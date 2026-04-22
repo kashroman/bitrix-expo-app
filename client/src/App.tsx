@@ -303,7 +303,15 @@ function InstallPage() {
           return;
         }
         window.BX24.callBatch(calls, (results) => {
-          const failed = Object.entries(results).filter(([, result]) => result.error());
+          const failed = Object.entries(results).filter(([, result]) => {
+            const error = result.error();
+            const description = result.error_description() ?? "";
+            const alreadyBound =
+              description.toLocaleLowerCase("en-US").includes("handler already binded") ||
+              description.toLocaleLowerCase("en-US").includes("already binded") ||
+              String(error).includes("200");
+            return Boolean(error) && !alreadyBound;
+          });
           if (failed.length) {
             reject(
               new Error(
