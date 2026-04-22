@@ -63,6 +63,24 @@ function detectByWords(
   };
 }
 
+function detectExactTitle(
+  fields: Record<string, CrmField> | undefined,
+  titles: string[],
+  preferredTypes?: string[],
+): DetectedField | undefined {
+  const titleSet = new Set(titles.map((title) => ru(title).trim()));
+  const entry = fieldEntries(fields).find(
+    (item) => titleSet.has(ru(item.title).trim()) && (!preferredTypes || preferredTypes.includes(item.type ?? "")),
+  );
+  if (!entry) return undefined;
+  return {
+    code: entry.code,
+    title: entry.title,
+    type: entry.type,
+    confidence: "high",
+  };
+}
+
 function detectLinkToExpo(
   fields: Record<string, CrmField> | undefined,
   entityTypeId?: number,
@@ -116,25 +134,34 @@ export async function detectExpoModel(): Promise<ExpoDetection> {
 
   const dealExpoField = detectLinkToExpo(dealFields, expoType?.entityTypeId);
   const leadExpoField = detectLinkToExpo(leadFields, expoType?.entityTypeId);
+  const eventStart =
+    detectExactTitle(expoFields, ["Дата начала выставки"], ["date", "datetime"]) ??
+    detectByWords(expoFields, [["проведен", "период", "выстав", "event"], ["нач", "start"]], [
+      "date",
+      "datetime",
+    ]);
+  const eventEnd =
+    detectExactTitle(expoFields, ["Дата завершения выставки", "Дата окончания выставки"], ["date", "datetime"]) ??
+    detectByWords(expoFields, [["проведен", "период", "выстав", "event"], ["заверш", "оконч", "end"]], [
+      "date",
+      "datetime",
+    ]);
+
   const dateFields = {
-    mountStart: detectByWords(
+    mountStart:
+      detectExactTitle(expoFields, ["Дата начала монтажа", "Начало монтажа"], ["date", "datetime"]) ??
+      detectByWords(
       expoFields,
       [["монтаж", "застрой", "mount"], ["нач", "start", "дата"]],
       ["date", "datetime"],
     ),
-    eventStart:
-      detectByWords(expoFields, [["проведен", "период", "выстав", "event"], ["нач", "start"]], [
-        "date",
-        "datetime",
-      ]) ?? detectByWords(expoFields, [["дата начала", "begindate"]], ["date", "datetime"]),
-    eventEnd:
-      detectByWords(expoFields, [["проведен", "период", "выстав", "event"], ["оконч", "end"]], [
-        "date",
-        "datetime",
-      ]) ?? detectByWords(expoFields, [["дата завершения", "closedate"]], ["date", "datetime"]),
-    dismantleEnd: detectByWords(
+    eventStart,
+    eventEnd,
+    dismantleEnd:
+      detectExactTitle(expoFields, ["Дата окончания демонтажа", "Дата завершения демонтажа"], ["date", "datetime"]) ??
+      detectByWords(
       expoFields,
-      [["демонтаж", "dismant"], ["оконч", "end", "дата"]],
+      [["демонтаж", "dismant"], ["заверш", "оконч", "end", "дата"]],
       ["date", "datetime"],
     ),
   };
