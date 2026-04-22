@@ -2,7 +2,6 @@ import { QueryClientProvider, useMutation, useQuery } from "@tanstack/react-quer
 import { CalendarDays, CheckCircle2, ExternalLink, FileWarning, Loader2, Moon, RefreshCw, Save, Sun } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Route, Router, Switch, Link } from "wouter";
-import { useHashLocation } from "wouter/use-hash-location";
 import { queryClient } from "./lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { Toaster } from "@/components/ui/toaster";
@@ -75,10 +74,16 @@ function useBitrixReady() {
 }
 
 function useRouteQueryId() {
-  const [id, setId] = useState<string | undefined>(() => new URLSearchParams(window.location.search).get("id") ?? undefined);
+  const readId = () => {
+    const fromSearch = new URLSearchParams(window.location.search).get("id");
+    if (fromSearch) return fromSearch;
+    const hashQuery = window.location.hash.includes("?") ? window.location.hash.split("?")[1] : "";
+    return new URLSearchParams(hashQuery).get("id") ?? undefined;
+  };
+  const [id, setId] = useState<string | undefined>(() => readId());
 
   useEffect(() => {
-    const update = () => setId(new URLSearchParams(window.location.search).get("id") ?? undefined);
+    const update = () => setId(readId());
     window.addEventListener("popstate", update);
     window.addEventListener("hashchange", update);
     return () => {
@@ -88,6 +93,34 @@ function useRouteQueryId() {
   }, []);
 
   return id;
+}
+
+function bitrixLocationHook(): [string, (to: string) => void] {
+  const normalize = () => {
+    const hash = window.location.hash.replace(/^#/, "");
+    if (hash.startsWith("/")) return hash.split("?")[0] || "/";
+    const path = window.location.pathname.match(/\/(install|deal-tab|expo-tab|calendar)\/?$/)?.[1];
+    return path ? `/${path}` : "/";
+  };
+
+  const [location, setLocationState] = useState(normalize);
+
+  useEffect(() => {
+    const update = () => setLocationState(normalize());
+    window.addEventListener("hashchange", update);
+    window.addEventListener("popstate", update);
+    return () => {
+      window.removeEventListener("hashchange", update);
+      window.removeEventListener("popstate", update);
+    };
+  }, []);
+
+  const navigate = (to: string) => {
+    window.location.hash = to.startsWith("/") ? to : `/${to}`;
+    setLocationState(to.startsWith("/") ? to : `/${to}`);
+  };
+
+  return [location, navigate];
 }
 
 function useDetection() {
@@ -1054,18 +1087,11 @@ function AppRouter() {
 }
 
 function App() {
-  useEffect(() => {
-    const pathRoute = window.location.pathname.match(/\/(install|deal-tab|expo-tab|calendar)\/?$/)?.[1];
-    if (pathRoute && (!window.location.hash || window.location.hash === "#/")) {
-      window.location.hash = `/${pathRoute}`;
-    }
-  }, []);
-
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
-        <Router hook={useHashLocation}>
+        <Router hook={bitrixLocationHook}>
           <AppRouter />
         </Router>
       </TooltipProvider>

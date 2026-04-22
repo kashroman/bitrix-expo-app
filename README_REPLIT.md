@@ -8,10 +8,10 @@
 
 ## Экраны
 
-- `/#/install` — установка приложения, `placement.bind`, `BX24.installFinish()`.
-- `/#/deal-tab` — вкладка карточки сделки.
-- `/#/expo-tab` — вкладка карточки смарт-процесса “Выставки”.
-- `/#/calendar` — отдельный календарь выставок.
+- `/install` или `/#/install` — установка приложения, `placement.bind`, `BX24.installFinish()`.
+- `/deal-tab` или `/#/deal-tab` — вкладка карточки сделки.
+- `/expo-tab` или `/#/expo-tab` — вкладка карточки смарт-процесса “Выставки”.
+- `/calendar` или `/#/calendar` — отдельный календарь выставок.
 
 ## Replit
 
@@ -20,7 +20,7 @@
 3. Для разработки используйте `npm run dev`.
 4. Для Deployments используйте команду `npm run build && npm run start`.
 5. Скопируйте HTTPS URL Replit и укажите его как URL установки локального приложения Bitrix24:
-   `https://YOUR-REPLIT-URL/#/install`
+   `https://YOUR-REPLIT-URL/install`
 
 ## Bitrix24 scopes
 
@@ -31,9 +31,9 @@
 
 ## Placement’ы
 
-- `CRM_DEAL_DETAIL_TAB` → `/#/deal-tab`
-- `CRM_DYNAMIC_{entityTypeId}_DETAIL_TAB` → `/#/expo-tab`
-- `CRM_ANALYTICS_MENU` → `/#/calendar`
+- `CRM_DEAL_DETAIL_TAB` → `/deal-tab`
+- `CRM_DYNAMIC_{entityTypeId}_DETAIL_TAB` → `/expo-tab`
+- `CRM_ANALYTICS_MENU` → `/calendar`
 
 `entityTypeId` определяется при установке через `crm.type.list` по названию смарт-процесса “Выставки”. Если процесс не найден автоматически, на странице установки можно указать ID вручную.
 

@@ -165,5 +165,5 @@ export function openBitrixPath(path: string) {
 export function currentHandlerUrl(route: string): string {
   const cleanRoute = route.startsWith("/") ? route : `/${route}`;
   const basePath = window.location.pathname.replace(/\/(deal-tab|expo-tab|calendar|install)\/?$/, "/");
-  return `${window.location.origin}${basePath}#${cleanRoute}`;
+  return `${window.location.origin}${basePath.replace(/\/$/, "")}${cleanRoute}`;
 }
