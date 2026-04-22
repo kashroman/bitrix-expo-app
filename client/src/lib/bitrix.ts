@@ -167,3 +167,100 @@ export function currentHandlerUrl(route: string): string {
   const basePath = window.location.pathname.replace(/\/(deal-tab|expo-tab|calendar|install)\/?$/, "/");
   return `${window.location.origin}${basePath.replace(/\/$/, "")}${cleanRoute}`;
 }
+
+export type RegisteredHandler = {
+  placement: string;
+  handler: string;
+  title?: string;
+  raw?: Record<string, unknown>;
+};
+
+const STALE_HOST_MARKERS = [
+  "replit.app",
+  "replit.dev",
+  "riker.replit.dev",
+  "bitrix-expo-app.replit.app",
+  "replit.co",
+  "repl.co",
+];
+
+const MANAGED_ROUTES = ["/deal-tab", "/expo-tab", "/calendar"];
+
+export function getManagedPlacements(entityTypeId?: number): string[] {
+  const placements = ["CRM_DEAL_DETAIL_TAB", "CRM_ANALYTICS_MENU"];
+  if (entityTypeId) placements.push(`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`);
+  return placements;
+}
+
+function normalizeRegisteredRows(data: unknown): RegisteredHandler[] {
+  const rows: Record<string, unknown>[] = [];
+  if (Array.isArray(data)) {
+    rows.push(...(data as Record<string, unknown>[]));
+  } else if (data && typeof data === "object") {
+    const maybeResult = (data as { result?: unknown }).result;
+    if (Array.isArray(maybeResult)) rows.push(...(maybeResult as Record<string, unknown>[]));
+    else if (maybeResult && typeof maybeResult === "object") {
+      rows.push(...(Object.values(maybeResult) as Record<string, unknown>[]).filter((v) => v && typeof v === "object"));
+    }
+  }
+  return rows.map((row) => ({
+    placement: String(row.PLACEMENT ?? row.placement ?? ""),
+    handler: String(row.HANDLER ?? row.handler ?? ""),
+    title: row.TITLE ? String(row.TITLE) : row.title ? String(row.title) : undefined,
+    raw: row,
+  }));
+}
+
+export async function listRegisteredPlacements(): Promise<RegisteredHandler[]> {
+  const data = await callBx<unknown>("placement.get", {});
+  return normalizeRegisteredRows(data);
+}
+
+export function isStaleHandler(handler: string, currentOrigin: string): boolean {
+  if (!handler) return false;
+  let url: URL;
+  try {
+    url = new URL(handler);
+  } catch {
+    return false;
+  }
+  const lowerHost = url.host.toLowerCase();
+  if (STALE_HOST_MARKERS.some((marker) => lowerHost.includes(marker))) return true;
+  const routeMatches = MANAGED_ROUTES.some((route) => url.pathname === route || url.pathname.endsWith(route));
+  if (routeMatches && url.origin !== currentOrigin) return true;
+  return false;
+}
+
+export function findStaleHandlers(
+  registered: RegisteredHandler[],
+  managedPlacements: string[],
+  currentOrigin: string,
+): RegisteredHandler[] {
+  const managed = new Set(managedPlacements);
+  return registered.filter(
+    (row) => managed.has(row.placement) && isStaleHandler(row.handler, currentOrigin),
+  );
+}
+
+export function callBxRaw<T = unknown>(
+  method: string,
+  params: Record<string, unknown> = {},
+): Promise<BxResult<T>> {
+  return new Promise((resolve, reject) => {
+    if (!window.BX24) {
+      reject(new Error("BX24 SDK не найден."));
+      return;
+    }
+    window.BX24.callMethod<T>(method, params, (result) => resolve(result));
+  });
+}
+
+export function isAlreadyBoundError(error: string | null, description: string | null): boolean {
+  const text = `${error ?? ""} ${description ?? ""}`.toLocaleLowerCase("en-US");
+  return (
+    text.includes("handler already binded") ||
+    text.includes("already binded") ||
+    text.includes("already bound") ||
+    text.includes("handler_already_binded")
+  );
+}

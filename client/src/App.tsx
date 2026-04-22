@@ -15,13 +15,19 @@ import { Separator } from "@/components/ui/separator";
 import NotFound from "@/pages/not-found";
 import {
   callBx,
+  callBxRaw,
   currentHandlerUrl,
+  findStaleHandlers,
+  getManagedPlacements,
   getPlacementEntityId,
   getPlacementInfo,
   initBitrix,
+  isAlreadyBoundError,
   isInsideBitrix,
+  listRegisteredPlacements,
   openBitrixPath,
   CrmItem,
+  RegisteredHandler,
 } from "./lib/bitrix";
 import {
   detectExpoModel,
@@ -257,6 +263,24 @@ function StatusPill({ label, value, ok }: { label: string; value: string; ok: bo
   );
 }
 
+type InstallTargetHandler = {
+  placement: string;
+  handler: string;
+  title: string;
+  description: string;
+};
+
+type InstallDiagnostics = {
+  origin: string;
+  registered: RegisteredHandler[];
+  stale: RegisteredHandler[];
+  unbound: { placement: string; handler: string; ok: boolean; message?: string }[];
+  bound: { placement: string; handler: string; ok: boolean; alreadyBound: boolean; message?: string }[];
+  targets: InstallTargetHandler[];
+  errors: string[];
+  finished: boolean;
+};
+
 function InstallPage() {
   const ready = useBitrixReady();
   const detection = useDetection();
@@ -267,95 +291,176 @@ function InstallPage() {
     title: string;
     text: string;
   } | null>(null);
+  const [diagnostics, setDiagnostics] = useState<InstallDiagnostics | null>(null);
   const entityTypeId = detection.data?.expoType?.entityTypeId ?? (Number(manualEntityTypeId) || undefined);
 
   const install = useMutation({
     mutationFn: async () => {
+      if (!window.BX24) throw new Error("Откройте страницу установки внутри Bitrix24.");
       if (!entityTypeId) throw new Error("Не найден entityTypeId смарт-процесса “Выставки”.");
+
       const dynamicPlacement = `CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`;
-      const calls: Record<string, [string, Record<string, unknown>]> = {
-        deal_tab: [
-          "placement.bind",
-          {
-            PLACEMENT: "CRM_DEAL_DETAIL_TAB",
-            HANDLER: currentHandlerUrl("/deal-tab"),
-            TITLE: "Выставка",
-            DESCRIPTION: "Связанная выставка, даты и сделки",
-            GROUP_NAME: "interpro.pro",
-          },
-        ],
-        expo_tab: [
-          "placement.bind",
-          {
-            PLACEMENT: dynamicPlacement,
-            HANDLER: currentHandlerUrl("/expo-tab"),
-            TITLE: "Работы и результаты",
-            DESCRIPTION: "Карточка выставки, сделки, лиды и итоги",
-            GROUP_NAME: "interpro.pro",
-          },
-        ],
-        calendar_menu: [
-          "placement.bind",
-          {
-            PLACEMENT: "CRM_ANALYTICS_MENU",
-            HANDLER: currentHandlerUrl("/calendar"),
-            TITLE: "Календарь выставок",
-            DESCRIPTION: "Календарный обзор выставок interpro.pro",
-            GROUP_NAME: "interpro.pro",
-          },
-        ],
+      const origin = window.location.origin;
+      const targets: InstallTargetHandler[] = [
+        {
+          placement: "CRM_DEAL_DETAIL_TAB",
+          handler: currentHandlerUrl("/deal-tab"),
+          title: "Выставка",
+          description: "Связанная выставка, даты и сделки",
+        },
+        {
+          placement: dynamicPlacement,
+          handler: currentHandlerUrl("/expo-tab"),
+          title: "Работы и результаты",
+          description: "Карточка выставки, сделки, лиды и итоги",
+        },
+        {
+          placement: "CRM_ANALYTICS_MENU",
+          handler: currentHandlerUrl("/calendar"),
+          title: "Календарь выставок",
+          description: "Календарный обзор выставок interpro.pro",
+        },
+      ];
+
+      const diag: InstallDiagnostics = {
+        origin,
+        registered: [],
+        stale: [],
+        unbound: [],
+        bound: [],
+        targets,
+        errors: [],
+        finished: false,
       };
 
-      const alreadyBoundKeys: string[] = [];
-      await new Promise<void>((resolve, reject) => {
-        if (!window.BX24) {
-          reject(new Error("Откройте страницу установки внутри Bitrix24."));
-          return;
-        }
-        window.BX24.callBatch(calls, (results) => {
-          const failed = Object.entries(results).filter(([, result]) => {
-            const error = result.error();
-            const description = result.error_description() ?? "";
-            const alreadyBound =
-              description.toLocaleLowerCase("en-US").includes("handler already binded") ||
-              description.toLocaleLowerCase("en-US").includes("already binded") ||
-              String(error).includes("200");
-            if (alreadyBound) {
-              alreadyBoundKeys.push(description);
-            }
-            return Boolean(error) && !alreadyBound;
-          });
-          if (failed.length) {
-            reject(
-              new Error(
-                failed
-                  .map(([key, result]) => `${key}: ${result.error()} ${result.error_description() ?? ""}`)
-                  .join("; "),
-              ),
-            );
-            return;
-          }
-          window.BX24?.installFinish();
-          resolve();
-        });
-      });
+      try {
+        diag.registered = await listRegisteredPlacements();
+      } catch (error) {
+        diag.errors.push(
+          `placement.get: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      setDiagnostics({ ...diag });
 
-      return { dynamicPlacement, alreadyBoundCount: alreadyBoundKeys.length };
+      const managedPlacements = getManagedPlacements(entityTypeId);
+      diag.stale = findStaleHandlers(diag.registered, managedPlacements, origin);
+      setDiagnostics({ ...diag });
+
+      for (const stale of diag.stale) {
+        try {
+          const result = await callBxRaw("placement.unbind", {
+            PLACEMENT: stale.placement,
+            HANDLER: stale.handler,
+          });
+          const err = result.error();
+          if (err) {
+            diag.unbound.push({
+              placement: stale.placement,
+              handler: stale.handler,
+              ok: false,
+              message: `${err}: ${result.error_description() ?? ""}`.trim(),
+            });
+            diag.errors.push(
+              `unbind ${stale.placement}: ${err} ${result.error_description() ?? ""}`.trim(),
+            );
+          } else {
+            diag.unbound.push({ placement: stale.placement, handler: stale.handler, ok: true });
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          diag.unbound.push({ placement: stale.placement, handler: stale.handler, ok: false, message: msg });
+          diag.errors.push(`unbind ${stale.placement}: ${msg}`);
+        }
+        setDiagnostics({ ...diag });
+      }
+
+      for (const target of targets) {
+        try {
+          const result = await callBxRaw("placement.bind", {
+            PLACEMENT: target.placement,
+            HANDLER: target.handler,
+            TITLE: target.title,
+            DESCRIPTION: target.description,
+            GROUP_NAME: "interpro.pro",
+          });
+          const err = result.error();
+          const desc = result.error_description();
+          if (err) {
+            const already = isAlreadyBoundError(err, desc);
+            diag.bound.push({
+              placement: target.placement,
+              handler: target.handler,
+              ok: already,
+              alreadyBound: already,
+              message: `${err}: ${desc ?? ""}`.trim(),
+            });
+            if (!already) {
+              diag.errors.push(`bind ${target.placement}: ${err} ${desc ?? ""}`.trim());
+            }
+          } else {
+            diag.bound.push({
+              placement: target.placement,
+              handler: target.handler,
+              ok: true,
+              alreadyBound: false,
+            });
+          }
+        } catch (error) {
+          const msg = error instanceof Error ? error.message : String(error);
+          diag.bound.push({
+            placement: target.placement,
+            handler: target.handler,
+            ok: false,
+            alreadyBound: false,
+            message: msg,
+          });
+          diag.errors.push(`bind ${target.placement}: ${msg}`);
+        }
+        setDiagnostics({ ...diag });
+      }
+
+      const allBindsOk = diag.bound.every((entry) => entry.ok);
+      if (allBindsOk) {
+        try {
+          window.BX24.installFinish();
+          diag.finished = true;
+        } catch (error) {
+          diag.errors.push(
+            `installFinish: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+      setDiagnostics({ ...diag });
+
+      return { diag, dynamicPlacement };
     },
-    onSuccess: (data) => {
-      setInstallStatus({
-        tone: "success",
-        title: data.alreadyBoundCount ? "Установка уже была выполнена" : "Установка завершена",
-        text: data.alreadyBoundCount
-          ? `Bitrix24 сообщил, что ${data.alreadyBoundCount} placement уже были зарегистрированы. Это считается успешным состоянием; BX24.installFinish() вызван повторно.`
-          : `Зарегистрированы CRM_DEAL_DETAIL_TAB, ${data.dynamicPlacement}, CRM_ANALYTICS_MENU. BX24.installFinish() вызван.`,
-      });
-      toast({
-        title: data.alreadyBoundCount ? "Установка уже активна" : "Установка завершена",
-        description: data.alreadyBoundCount
-          ? "Placement’ы уже были зарегистрированы ранее."
-          : `Зарегистрированы CRM_DEAL_DETAIL_TAB, ${data.dynamicPlacement}, CRM_ANALYTICS_MENU.`,
-      });
+    onSuccess: ({ diag, dynamicPlacement }) => {
+      const unboundCount = diag.unbound.filter((u) => u.ok).length;
+      const alreadyBound = diag.bound.filter((b) => b.alreadyBound).length;
+      const freshlyBound = diag.bound.filter((b) => b.ok && !b.alreadyBound).length;
+      if (diag.finished) {
+        const parts: string[] = [];
+        if (unboundCount) parts.push(`сняты устаревшие обработчики: ${unboundCount}`);
+        if (freshlyBound) parts.push(`зарегистрированы новые: ${freshlyBound}`);
+        if (alreadyBound) parts.push(`уже были привязаны: ${alreadyBound}`);
+        setInstallStatus({
+          tone: "success",
+          title: "Установка завершена",
+          text: `${parts.join("; ") || `Привязаны CRM_DEAL_DETAIL_TAB, ${dynamicPlacement}, CRM_ANALYTICS_MENU.`}. BX24.installFinish() вызван.`,
+        });
+        toast({ title: "Установка завершена", description: "BX24.installFinish() вызван." });
+      } else {
+        setInstallStatus({
+          tone: "warning",
+          title: "Установка завершена с ошибками",
+          text: diag.errors.join("; ") || "См. диагностику ниже.",
+        });
+        toast({
+          title: "Установка завершена с ошибками",
+          description: "См. диагностику ниже.",
+          variant: "destructive",
+        });
+      }
     },
     onError: (error) => {
       setInstallStatus({
@@ -376,7 +481,7 @@ function InstallPage() {
       <PageTitle
         eyebrow="Установка"
         title="Регистрация приложения в Bitrix24"
-        description="Страница установки определяет смарт-процесс “Выставки”, регистрирует placement’ы через placement.bind и после успешного batch-вызова завершает установку BX24.installFinish()."
+        description="Страница установки определяет смарт-процесс “Выставки”, снимает устаревшие обработчики (Replit), регистрирует placement’ы для текущего origin и вызывает BX24.installFinish()."
       />
       <StatusCard ready={ready.data} detection={detection.data} />
 
@@ -401,15 +506,19 @@ function InstallPage() {
                   data-testid="input-manual-entity-type-id"
                   value={manualEntityTypeId}
                   onChange={(event) => setManualEntityTypeId(event.target.value)}
-                  placeholder="Например: 183"
+                  placeholder="Например: 1050"
                 />
               </div>
             )}
             <div className="grid gap-2 rounded-lg bg-muted/50 p-4 text-sm">
-              <div className="font-medium">Будут зарегистрированы:</div>
-              <CodeLine value="CRM_DEAL_DETAIL_TAB → /deal-tab" />
-              <CodeLine value={`CRM_DYNAMIC_${entityTypeId ?? "XXX"}_DETAIL_TAB → /expo-tab`} />
-              <CodeLine value="CRM_ANALYTICS_MENU → /calendar" />
+              <div className="font-medium">Origin приложения:</div>
+              <CodeLine value={typeof window !== "undefined" ? window.location.origin : "—"} />
+              <div className="mt-2 font-medium">Будут зарегистрированы:</div>
+              <CodeLine value={`CRM_DEAL_DETAIL_TAB → ${currentHandlerUrl("/deal-tab")}`} />
+              <CodeLine
+                value={`CRM_DYNAMIC_${entityTypeId ?? "XXX"}_DETAIL_TAB → ${currentHandlerUrl("/expo-tab")}`}
+              />
+              <CodeLine value={`CRM_ANALYTICS_MENU → ${currentHandlerUrl("/calendar")}`} />
             </div>
             {installStatus ? <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} /> : null}
             <Button
@@ -419,14 +528,188 @@ function InstallPage() {
               className="w-full sm:w-auto"
             >
               {install.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
-              Зарегистрировать и завершить установку
+              Переустановить и завершить установку
             </Button>
           </CardContent>
         </Card>
 
         <DiagnosticsPanel detection={detection.data} loading={detection.isLoading} />
       </div>
+
+      <InstallDiagnosticsPanel diagnostics={diagnostics} entityTypeId={entityTypeId} />
     </Shell>
+  );
+}
+
+function InstallDiagnosticsPanel({
+  diagnostics,
+  entityTypeId,
+}: {
+  diagnostics: InstallDiagnostics | null;
+  entityTypeId?: number;
+}) {
+  const managed = useMemo(() => new Set(getManagedPlacements(entityTypeId)), [entityTypeId]);
+  if (!diagnostics) {
+    return (
+      <Card className="mt-6">
+        <CardHeader>
+          <CardTitle className="text-lg">Диагностика установки</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Empty text="Нажмите кнопку установки, чтобы увидеть список зарегистрированных handlers, удалённые устаревшие привязки и целевые Render-handlers." />
+        </CardContent>
+      </Card>
+    );
+  }
+  const registeredManaged = diagnostics.registered.filter((row) => managed.has(row.placement));
+  const registeredOther = diagnostics.registered.filter((row) => !managed.has(row.placement));
+  return (
+    <Card className="mt-6">
+      <CardHeader>
+        <CardTitle className="text-lg">Диагностика установки</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-6">
+        <div>
+          <div className="mb-2 text-sm font-medium">
+            Целевые Render-handlers ({diagnostics.targets.length})
+          </div>
+          <div className="grid gap-2">
+            {diagnostics.targets.map((target) => (
+              <HandlerRow
+                key={`target-${target.placement}`}
+                placement={target.placement}
+                handler={target.handler}
+                tone="ok"
+                note={target.title}
+              />
+            ))}
+          </div>
+          <div className="mt-1 text-xs text-muted-foreground">origin: {diagnostics.origin}</div>
+        </div>
+
+        <Separator />
+
+        <div>
+          <div className="mb-2 text-sm font-medium">
+            Зарегистрированные handlers в Bitrix24 ({diagnostics.registered.length})
+          </div>
+          {diagnostics.registered.length === 0 ? (
+            <Empty text="placement.get не вернул строк." />
+          ) : (
+            <div className="grid gap-2">
+              {registeredManaged.map((row, index) => (
+                <HandlerRow
+                  key={`reg-managed-${index}`}
+                  placement={row.placement}
+                  handler={row.handler}
+                  tone={diagnostics.stale.some((s) => s.handler === row.handler && s.placement === row.placement) ? "stale" : "neutral"}
+                  note={row.title}
+                />
+              ))}
+              {registeredOther.length > 0 && (
+                <div className="mt-2 text-xs text-muted-foreground">
+                  Также зарегистрировано (не наши placements): {registeredOther.length}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <Separator />
+
+        <div>
+          <div className="mb-2 text-sm font-medium">
+            Удалённые устаревшие handlers ({diagnostics.unbound.length})
+          </div>
+          {diagnostics.unbound.length === 0 ? (
+            <div className="text-sm text-muted-foreground">Устаревших привязок не найдено.</div>
+          ) : (
+            <div className="grid gap-2">
+              {diagnostics.unbound.map((row, index) => (
+                <HandlerRow
+                  key={`unbound-${index}`}
+                  placement={row.placement}
+                  handler={row.handler}
+                  tone={row.ok ? "ok" : "error"}
+                  note={row.message}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+
+        <Separator />
+
+        <div>
+          <div className="mb-2 text-sm font-medium">
+            Результаты placement.bind ({diagnostics.bound.length})
+          </div>
+          <div className="grid gap-2">
+            {diagnostics.bound.map((row, index) => (
+              <HandlerRow
+                key={`bound-${index}`}
+                placement={row.placement}
+                handler={row.handler}
+                tone={row.ok ? (row.alreadyBound ? "neutral" : "ok") : "error"}
+                note={row.alreadyBound ? "handler already binded (ok)" : row.message}
+              />
+            ))}
+          </div>
+        </div>
+
+        {diagnostics.errors.length > 0 && (
+          <>
+            <Separator />
+            <div>
+              <div className="mb-2 text-sm font-medium text-red-600 dark:text-red-400">
+                Ошибки ({diagnostics.errors.length})
+              </div>
+              <ul className="list-disc space-y-1 pl-5 text-sm text-red-700 dark:text-red-300">
+                {diagnostics.errors.map((err, index) => (
+                  <li key={index} data-testid={`install-error-${index}`}>
+                    {err}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </>
+        )}
+
+        <div className="text-sm text-muted-foreground">
+          installFinish: {diagnostics.finished ? "вызван" : "не вызван"}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function HandlerRow({
+  placement,
+  handler,
+  tone,
+  note,
+}: {
+  placement: string;
+  handler: string;
+  tone: "ok" | "error" | "stale" | "neutral";
+  note?: string;
+}) {
+  const color =
+    tone === "ok"
+      ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30"
+      : tone === "error"
+      ? "border-red-300 bg-red-50 dark:border-red-900 dark:bg-red-950/30"
+      : tone === "stale"
+      ? "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"
+      : "border-border bg-card";
+  return (
+    <div className={`grid gap-1 rounded-lg border p-2 text-xs ${color}`} data-testid={`handler-row-${placement}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-medium">{placement}</span>
+        {note ? <span className="text-muted-foreground">{note}</span> : null}
+      </div>
+      <code className="break-all text-[11px]">{handler}</code>
+    </div>
   );
 }
 
