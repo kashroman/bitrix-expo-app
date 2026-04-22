@@ -258,6 +258,11 @@ function InstallPage() {
   const detection = useDetection();
   const { toast } = useToast();
   const [manualEntityTypeId, setManualEntityTypeId] = useState("");
+  const [installStatus, setInstallStatus] = useState<{
+    tone: "success" | "warning";
+    title: string;
+    text: string;
+  } | null>(null);
   const entityTypeId = detection.data?.expoType?.entityTypeId ?? (Number(manualEntityTypeId) || undefined);
 
   const install = useMutation({
@@ -297,6 +302,7 @@ function InstallPage() {
         ],
       };
 
+      const alreadyBoundKeys: string[] = [];
       await new Promise<void>((resolve, reject) => {
         if (!window.BX24) {
           reject(new Error("Откройте страницу установки внутри Bitrix24."));
@@ -310,6 +316,9 @@ function InstallPage() {
               description.toLocaleLowerCase("en-US").includes("handler already binded") ||
               description.toLocaleLowerCase("en-US").includes("already binded") ||
               String(error).includes("200");
+            if (alreadyBound) {
+              alreadyBoundKeys.push(description);
+            }
             return Boolean(error) && !alreadyBound;
           });
           if (failed.length) {
@@ -327,15 +336,29 @@ function InstallPage() {
         });
       });
 
-      return { dynamicPlacement };
+      return { dynamicPlacement, alreadyBoundCount: alreadyBoundKeys.length };
     },
     onSuccess: (data) => {
+      setInstallStatus({
+        tone: "success",
+        title: data.alreadyBoundCount ? "Установка уже была выполнена" : "Установка завершена",
+        text: data.alreadyBoundCount
+          ? `Bitrix24 сообщил, что ${data.alreadyBoundCount} placement уже были зарегистрированы. Это считается успешным состоянием; BX24.installFinish() вызван повторно.`
+          : `Зарегистрированы CRM_DEAL_DETAIL_TAB, ${data.dynamicPlacement}, CRM_ANALYTICS_MENU. BX24.installFinish() вызван.`,
+      });
       toast({
-        title: "Установка завершена",
-        description: `Зарегистрированы CRM_DEAL_DETAIL_TAB, ${data.dynamicPlacement}, CRM_ANALYTICS_MENU.`,
+        title: data.alreadyBoundCount ? "Установка уже активна" : "Установка завершена",
+        description: data.alreadyBoundCount
+          ? "Placement’ы уже были зарегистрированы ранее."
+          : `Зарегистрированы CRM_DEAL_DETAIL_TAB, ${data.dynamicPlacement}, CRM_ANALYTICS_MENU.`,
       });
     },
     onError: (error) => {
+      setInstallStatus({
+        tone: "warning",
+        title: "Установка не завершена",
+        text: error instanceof Error ? error.message : "Проверьте права администратора и entityTypeId.",
+      });
       toast({
         title: "Установка не завершена",
         description: error instanceof Error ? error.message : "Проверьте права администратора и entityTypeId.",
@@ -384,6 +407,7 @@ function InstallPage() {
               <CodeLine value={`CRM_DYNAMIC_${entityTypeId ?? "XXX"}_DETAIL_TAB → /expo-tab`} />
               <CodeLine value="CRM_ANALYTICS_MENU → /calendar" />
             </div>
+            {installStatus ? <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} /> : null}
             <Button
               onClick={() => install.mutate()}
               disabled={install.isPending || !ready.data?.inside}
@@ -417,10 +441,10 @@ function DiagnosticsPanel({ detection, loading }: { detection?: ExpoDetection; l
         <FieldLine label="Сделка → выставка" value={detection?.dealExpoField?.code} />
         <FieldLine label="Лид → выставка" value={detection?.leadExpoField?.code} />
         <Separator />
-        <FieldLine label="Монтаж начало" value={detection?.dateFields.mountStart?.code} />
-        <FieldLine label="Проведение начало" value={detection?.dateFields.eventStart?.code} />
-        <FieldLine label="Проведение окончание" value={detection?.dateFields.eventEnd?.code} />
-        <FieldLine label="Демонтаж окончание" value={detection?.dateFields.dismantleEnd?.code} />
+        <FieldLine label="Монтаж начало" value={formatDetected(detection?.dateFields.mountStart)} />
+        <FieldLine label="Проведение начало" value={formatDetected(detection?.dateFields.eventStart)} />
+        <FieldLine label="Проведение окончание" value={formatDetected(detection?.dateFields.eventEnd)} />
+        <FieldLine label="Демонтаж окончание" value={formatDetected(detection?.dateFields.dismantleEnd)} />
         <Separator />
         <div>
           <div className="mb-2 text-sm font-medium">Итоговые поля</div>
@@ -428,7 +452,7 @@ function DiagnosticsPanel({ detection, loading }: { detection?: ExpoDetection; l
             {detection?.resultFields.length ? (
               detection.resultFields.map((field) => (
                 <Badge key={field.code} variant="secondary" data-testid={`badge-result-field-${field.code}`}>
-                  {field.code}
+                  {field.title}: {field.code}
                 </Badge>
               ))
             ) : (
@@ -988,6 +1012,11 @@ function FieldLine({ label, value }: { label: string; value: unknown }) {
       <span className="font-medium">{formatValue(value)}</span>
     </div>
   );
+}
+
+function formatDetected(field?: { code: string; title: string; type?: string }) {
+  if (!field) return undefined;
+  return `${field.title} · ${field.code}${field.type ? ` · ${field.type}` : ""}`;
 }
 
 function CodeLine({ value }: { value: string }) {
