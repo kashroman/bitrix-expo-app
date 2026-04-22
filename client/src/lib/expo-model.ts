@@ -18,6 +18,8 @@ export type ExpoDetection = {
     dismantleEnd?: DetectedField;
   };
   resultFields: DetectedField[];
+  allExpoDateFields: DetectedField[];
+  candidateExpoFields: DetectedField[];
   editableExpoFields: DetectedField[];
   raw: {
     dealFields?: Record<string, CrmField>;
@@ -167,6 +169,38 @@ export async function detectExpoModel(): Promise<ExpoDetection> {
       confidence: "medium" as const,
     }));
 
+  const allExpoDateFields = fieldEntries(expoFields)
+    .filter((entry) => ["date", "datetime"].includes(entry.type ?? ""))
+    .map((entry) => ({
+      code: entry.code,
+      title: entry.title,
+      type: entry.type,
+      confidence: "high" as const,
+    }));
+
+  const candidateExpoFields = fieldEntries(expoFields)
+    .filter((entry) =>
+      [
+        "монтаж",
+        "демонтаж",
+        "выстав",
+        "проведен",
+        "начал",
+        "оконч",
+        "итог",
+        "результ",
+        "сделк",
+        "лид",
+        "сумм",
+      ].some((word) => entry.haystack.includes(word)),
+    )
+    .map((entry) => ({
+      code: entry.code,
+      title: entry.title,
+      type: entry.type,
+      confidence: "medium" as const,
+    }));
+
   if (!dealExpoField) notes.push("Поле привязки выставки в сделке не найдено автоматически.");
   if (!leadExpoField) notes.push("Поле привязки выставки в лиде не найдено автоматически.");
   if (!dateFields.eventStart || !dateFields.eventEnd) {
@@ -179,6 +213,8 @@ export async function detectExpoModel(): Promise<ExpoDetection> {
     leadExpoField,
     dateFields,
     resultFields,
+    allExpoDateFields,
+    candidateExpoFields,
     editableExpoFields,
     raw: { dealFields, leadFields, expoFields },
     notes,

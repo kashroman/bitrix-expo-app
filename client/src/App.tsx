@@ -447,6 +447,21 @@ function DiagnosticsPanel({ detection, loading }: { detection?: ExpoDetection; l
         <FieldLine label="Демонтаж окончание" value={formatDetected(detection?.dateFields.dismantleEnd)} />
         <Separator />
         <div>
+          <div className="mb-2 text-sm font-medium">Все date-поля выставки</div>
+          <div className="flex flex-wrap gap-2">
+            {detection?.allExpoDateFields.length ? (
+              detection.allExpoDateFields.map((field) => (
+                <Badge key={field.code} variant="outline" data-testid={`badge-date-field-${field.code}`}>
+                  {field.title}: {field.code}
+                </Badge>
+              ))
+            ) : (
+              <span className="text-sm text-muted-foreground">Date-поля не найдены</span>
+            )}
+          </div>
+        </div>
+        <Separator />
+        <div>
           <div className="mb-2 text-sm font-medium">Итоговые поля</div>
           <div className="flex flex-wrap gap-2">
             {detection?.resultFields.length ? (
@@ -457,6 +472,21 @@ function DiagnosticsPanel({ detection, loading }: { detection?: ExpoDetection; l
               ))
             ) : (
               <span className="text-sm text-muted-foreground">Не определены автоматически</span>
+            )}
+          </div>
+        </div>
+        <Separator />
+        <div>
+          <div className="mb-2 text-sm font-medium">Кандидаты по названиям</div>
+          <div className="flex max-h-48 flex-wrap gap-2 overflow-auto rounded-lg border p-2">
+            {detection?.candidateExpoFields.length ? (
+              detection.candidateExpoFields.map((field) => (
+                <Badge key={field.code} variant="secondary" data-testid={`badge-candidate-field-${field.code}`}>
+                  {field.title}: {field.code} ({field.type ?? "type?"})
+                </Badge>
+              ))
+            ) : (
+              <span className="text-sm text-muted-foreground">Кандидаты не найдены</span>
             )}
           </div>
         </div>
