@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Component, ErrorInfo, ReactNode, useEffect, useState } from "react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { Route, Router, Switch, Link } from "wouter";
 import { queryClient } from "./lib/queryClient";
@@ -13,6 +13,59 @@ import EntityListPage from "@/pages/entity-list";
 import { DealTabPage, LeadTabPage } from "@/pages/crm-tab";
 import ExpoTabPage from "@/pages/expo-tab";
 import { Shell, PageTitle } from "@/pages/shell";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+
+class RouteErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state: { error: Error | null } = { error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.error("Route render error", error, info);
+  }
+
+  reset = () => this.setState({ error: null });
+
+  render() {
+    if (this.state.error) {
+      return (
+        <Shell>
+          <PageTitle
+            eyebrow="Ошибка"
+            title="Не удалось отобразить страницу"
+            description="Произошла непредвиденная ошибка при рендере маршрута. Данные CRM не сохраняются."
+          />
+          <Card className="border-destructive/40" data-testid="status-route-error">
+            <CardHeader>
+              <CardTitle className="text-lg">Ошибка рендеринга</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <p className="text-destructive break-words">
+                {this.state.error.message || String(this.state.error)}
+              </p>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="default" size="sm" onClick={this.reset} data-testid="button-route-retry">
+                  Попробовать снова
+                </Button>
+                <Link href="/calendar">
+                  <a>
+                    <Button variant="outline" size="sm" data-testid="button-route-calendar">
+                      К списку выставок
+                    </Button>
+                  </a>
+                </Link>
+              </div>
+            </CardContent>
+          </Card>
+        </Shell>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 function bitrixLocationHook(): [string, (to: string) => void] {
   const matchPath = () => {
@@ -105,7 +158,9 @@ function App() {
       <TooltipProvider>
         <Toaster />
         <Router hook={bitrixLocationHook}>
-          <AppRouter />
+          <RouteErrorBoundary>
+            <AppRouter />
+          </RouteErrorBoundary>
         </Router>
       </TooltipProvider>
     </QueryClientProvider>
