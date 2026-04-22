@@ -64,11 +64,12 @@ function useUrlParam(name: string): string | undefined {
 export default function EntityListPage({ params, entity }: { params: { eventId: string }; entity: Entity }) {
   const eventId = params.eventId;
   const initialGroup = useUrlParam("group") ?? "all";
+  const inBitrix = isInsideBitrix();
 
   const agg = useQuery<ExpoAggregate | undefined>({
     queryKey: ["expo-aggregate", Number(eventId)],
     queryFn: () => buildExpoAggregate(eventId),
-    enabled: isInsideBitrix() && Boolean(eventId),
+    enabled: inBitrix && Boolean(eventId),
   });
 
   const allColumns = entity === "lead" ? LEAD_COLUMNS : DEAL_COLUMNS;
@@ -105,11 +106,71 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
 
   const visibleColumns = allColumns.filter((c) => columns.has(c.key));
 
+  if (!inBitrix) {
+    return (
+      <Shell>
+        <div className="mb-4 flex items-center gap-2">
+          <Link href={`/event/${eventId}`}>
+            <a
+              className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+              data-testid="link-back-event"
+            >
+              <ArrowLeft className="h-4 w-4" />
+              К сводке выставки
+            </a>
+          </Link>
+        </div>
+        <PageTitle
+          eyebrow={entity === "lead" ? "Лиды" : "Сделки"}
+          title={`Выставка #${eventId}`}
+          description={`ID выставки: ${eventId}. ${entity === "lead" ? "Список лидов" : "Список сделок"}.`}
+        />
+        <Card
+          className="border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"
+          data-testid="status-demo"
+        >
+          <CardHeader>
+            <CardTitle className="text-lg">Демо-режим вне Bitrix24</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm">
+            <p>
+              {entity === "lead" ? "Лиды" : "Сделки"} выставки <strong>#{eventId}</strong> доступны только внутри
+              Bitrix24 с авторизованным SDK (<code>BX24</code>). Здесь показан только каркас страницы — данные CRM не
+              загружаются и нигде не сохраняются.
+            </p>
+            <p className="text-muted-foreground">
+              Чтобы увидеть реальные данные, откройте приложение из Bitrix24.
+            </p>
+            <div className="flex flex-wrap gap-2 pt-1">
+              <Link href="/calendar">
+                <a>
+                  <Button variant="default" size="sm" data-testid="button-go-calendar">
+                    <ArrowLeft className="mr-2 h-4 w-4" />К списку выставок
+                  </Button>
+                </a>
+              </Link>
+              <Link href={`/event/${eventId}`}>
+                <a>
+                  <Button variant="outline" size="sm" data-testid="button-go-event">
+                    К сводке выставки
+                  </Button>
+                </a>
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </Shell>
+    );
+  }
+
   return (
     <Shell>
       <div className="mb-4 flex items-center gap-2">
         <Link href={`/event/${eventId}`}>
-          <a className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground">
+          <a
+            className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+            data-testid="link-back-event"
+          >
             <ArrowLeft className="h-4 w-4" />
             К сводке выставки
           </a>
@@ -119,6 +180,7 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
       <PageTitle
         eyebrow={entity === "lead" ? "Лиды" : "Сделки"}
         title={agg.data?.expo.title ?? `Выставка #${eventId}`}
+        description={`ID выставки: ${eventId}`}
       />
 
       <Card className="mb-4">
@@ -180,7 +242,21 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
           {agg.isLoading ? (
             <LoadingRows />
           ) : agg.isError ? (
-            <Empty text={`Ошибка Bitrix24 API: ${String((agg.error as Error)?.message ?? agg.error)}`} />
+            <div className="space-y-3" data-testid="status-error">
+              <Empty text={`Ошибка Bitrix24 API: ${String((agg.error as Error)?.message ?? agg.error)}`} />
+              <div className="flex flex-wrap gap-2">
+                <Button variant="default" size="sm" onClick={() => agg.refetch()} data-testid="button-retry">
+                  Повторить
+                </Button>
+                <Link href="/calendar">
+                  <a>
+                    <Button variant="outline" size="sm" data-testid="button-go-calendar">
+                      <ArrowLeft className="mr-2 h-4 w-4" />К списку выставок
+                    </Button>
+                  </a>
+                </Link>
+              </div>
+            </div>
           ) : !rows.length ? (
             <Empty text={entity === "lead" ? "Связанных лидов не найдено." : "Связанных сделок не найдено."} />
           ) : (
