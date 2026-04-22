@@ -128,83 +128,107 @@ export async function fetchExpo(id: string | number): Promise<ExpoItem | undefin
 }
 
 export async function fetchLeadsByExpo(expoId: string | number): Promise<CrmItem[]> {
-  const filters = [
-    { [EXPO_LINK_FIELD]: expoId },
-    { [`=${EXPO_LINK_FIELD}`]: expoId },
+  const select = [
+    "ID",
+    "TITLE",
+    "STATUS_ID",
+    "ASSIGNED_BY_ID",
+    "DATE_CREATE",
+    "DATE_MODIFY",
+    "OPPORTUNITY",
+    "CURRENCY_ID",
+    "PHONE",
+    "EMAIL",
+    "NAME",
+    "LAST_NAME",
+    "SOURCE_ID",
+    EXPO_LINK_FIELD,
   ];
-  for (const filter of filters) {
-    try {
-      const rows = await listAllBx<CrmItem>("crm.lead.list", {
-        filter,
-        select: [
-          "ID",
-          "TITLE",
-          "STATUS_ID",
-          "ASSIGNED_BY_ID",
-          "DATE_CREATE",
-          "DATE_MODIFY",
-          "OPPORTUNITY",
-          "CURRENCY_ID",
-          "PHONE",
-          "EMAIL",
-          "NAME",
-          "LAST_NAME",
-          "SOURCE_ID",
-          EXPO_LINK_FIELD,
-        ],
-        order: { ID: "DESC" },
-      });
-      if (rows.length) return rows;
-    } catch {}
-  }
-  return [];
+  const [r1, r2] = await Promise.allSettled([
+    listAllBx<CrmItem>("crm.lead.list", {
+      filter: { [EXPO_LINK_FIELD]: expoId },
+      select,
+      order: { ID: "DESC" },
+    }),
+    listAllBx<CrmItem>("crm.lead.list", {
+      filter: { [`=${EXPO_LINK_FIELD}`]: expoId },
+      select,
+      order: { ID: "DESC" },
+    }),
+  ]);
+  const a = r1.status === "fulfilled" ? r1.value : [];
+  const b = r2.status === "fulfilled" ? r2.value : [];
+  return a.length >= b.length ? a : b;
 }
 
 export async function fetchDealsByExpo(expoId: string | number): Promise<CrmItem[]> {
-  const filters = [
-    { [EXPO_LINK_FIELD]: expoId },
-    { [`=${EXPO_LINK_FIELD}`]: expoId },
+  const select = [
+    "ID",
+    "TITLE",
+    "STAGE_ID",
+    "CATEGORY_ID",
+    "ASSIGNED_BY_ID",
+    "DATE_CREATE",
+    "DATE_MODIFY",
+    "OPPORTUNITY",
+    "CURRENCY_ID",
+    "COMPANY_ID",
+    "CONTACT_ID",
+    EXPO_LINK_FIELD,
   ];
-  for (const filter of filters) {
-    try {
-      const rows = await listAllBx<CrmItem>("crm.deal.list", {
-        filter,
-        select: [
-          "ID",
-          "TITLE",
-          "STAGE_ID",
-          "CATEGORY_ID",
-          "ASSIGNED_BY_ID",
-          "DATE_CREATE",
-          "DATE_MODIFY",
-          "OPPORTUNITY",
-          "CURRENCY_ID",
-          "COMPANY_ID",
-          "CONTACT_ID",
-          EXPO_LINK_FIELD,
-        ],
-        order: { ID: "DESC" },
-      });
-      if (rows.length) return rows;
-    } catch {}
-  }
-  return [];
+  const [r1, r2] = await Promise.allSettled([
+    listAllBx<CrmItem>("crm.deal.list", {
+      filter: { [EXPO_LINK_FIELD]: expoId },
+      select,
+      order: { ID: "DESC" },
+    }),
+    listAllBx<CrmItem>("crm.deal.list", {
+      filter: { [`=${EXPO_LINK_FIELD}`]: expoId },
+      select,
+      order: { ID: "DESC" },
+    }),
+  ]);
+  const a = r1.status === "fulfilled" ? r1.value : [];
+  const b = r2.status === "fulfilled" ? r2.value : [];
+  return a.length >= b.length ? a : b;
+}
+
+async function mergeWithCrmItem(
+  entityTypeId: number,
+  id: string | number,
+  base: CrmItem | undefined,
+): Promise<CrmItem | undefined> {
+  const baseHasParent = base && (base[EXPO_LINK_FIELD] ?? base[EXPO_LINK_FIELD.toLowerCase()]);
+  if (baseHasParent) return base;
+  try {
+    const data = await callBx<{ item: CrmItem }>("crm.item.get", {
+      entityTypeId,
+      id,
+      useOriginalUfNames: "N",
+    });
+    if (data?.item) return { ...(base ?? {}), ...data.item };
+  } catch {}
+  return base;
 }
 
 export async function fetchLeadById(id: string | number): Promise<CrmItem | undefined> {
+  let base: CrmItem | undefined;
   try {
-    return await callBx<CrmItem>("crm.lead.get", { id });
+    base = await callBx<CrmItem>("crm.lead.get", { id });
   } catch {
-    return undefined;
+    base = undefined;
   }
+  return mergeWithCrmItem(1, id, base);
 }
 
 export async function fetchDealById(id: string | number): Promise<CrmItem | undefined> {
+  let base: CrmItem | undefined;
   try {
-    return await callBx<CrmItem>("crm.deal.get", { id });
+    base = await callBx<CrmItem>("crm.deal.get", { id });
   } catch {
-    return undefined;
+    base = undefined;
   }
+  return mergeWithCrmItem(2, id, base);
 }
 
 export function computeLeadStats(leads: CrmItem[], leadStatusMap?: Map<string, string>): LeadStats {
@@ -312,12 +336,22 @@ export function dealGroupLabel(key: DealGroupKey) {
 export async function buildExpoAggregate(expoId: string | number): Promise<ExpoAggregate | undefined> {
   const expo = await fetchExpo(expoId);
   if (!expo) return undefined;
-  const [leads, deals, leadStatuses, dealStages] = await Promise.all([
+  const [leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
     fetchLeadsByExpo(expoId),
     fetchDealsByExpo(expoId),
     fetchLeadStatuses(),
     fetchDealStages(),
   ]);
+  const leads = leadsRes.status === "fulfilled" ? leadsRes.value : [];
+  const deals = dealsRes.status === "fulfilled" ? dealsRes.value : [];
+  const leadStatuses = leadStatusesRes.status === "fulfilled" ? leadStatusesRes.value : [];
+  const dealStages = dealStagesRes.status === "fulfilled" ? dealStagesRes.value : [];
+  if (typeof console !== "undefined") {
+    const errs: string[] = [];
+    if (leadsRes.status === "rejected") errs.push(`leads: ${String((leadsRes.reason as Error)?.message ?? leadsRes.reason)}`);
+    if (dealsRes.status === "rejected") errs.push(`deals: ${String((dealsRes.reason as Error)?.message ?? dealsRes.reason)}`);
+    if (errs.length) console.warn("buildExpoAggregate partial failure", errs);
+  }
   return {
     expo,
     leads,

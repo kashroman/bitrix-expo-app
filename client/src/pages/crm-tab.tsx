@@ -85,14 +85,30 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
 
       {entityQuery.isLoading ? (
         <LoadingRows />
+      ) : entityQuery.isError ? (
+        <Card className="border-destructive/40"><CardContent className="space-y-3 p-4 text-sm">
+          <Empty text={`Ошибка Bitrix24: ${String((entityQuery.error as Error)?.message ?? entityQuery.error)}`} />
+          <Button variant="default" size="sm" onClick={() => entityQuery.refetch()} data-testid="button-retry-entity">Повторить</Button>
+        </CardContent></Card>
       ) : !entityQuery.data && entityId ? (
-        <Card><CardContent className="p-4"><Empty text={`${entity === "deal" ? "Сделка" : "Лид"} не загружен или Bitrix24 вернул ошибку.`} /></CardContent></Card>
+        <Card><CardContent className="space-y-3 p-4">
+          <Empty text={`${entity === "deal" ? "Сделка" : "Лид"} #${entityId} не загружен. Проверьте права или введите другой ID.`} />
+          <Button variant="outline" size="sm" onClick={() => entityQuery.refetch()} data-testid="button-retry-entity">Повторить</Button>
+        </CardContent></Card>
       ) : !expoId ? (
-        <Card><CardContent className="p-4"><Empty text={`У ${label} не указана связанная выставка (${EXPO_LINK_FIELD}).`} /></CardContent></Card>
+        <Card><CardContent className="p-4"><Empty text={`У ${label} не указана связанная выставка (поле ${EXPO_LINK_FIELD}).`} /></CardContent></Card>
       ) : agg.isLoading ? (
         <LoadingRows />
+      ) : agg.isError ? (
+        <Card className="border-destructive/40"><CardContent className="space-y-3 p-4 text-sm">
+          <Empty text={`Ошибка загрузки выставки #${expoId}: ${String((agg.error as Error)?.message ?? agg.error)}`} />
+          <Button variant="default" size="sm" onClick={() => agg.refetch()} data-testid="button-retry-agg">Повторить</Button>
+        </CardContent></Card>
       ) : !agg.data ? (
-        <Card><CardContent className="p-4"><Empty text="Связанная выставка не найдена в смарт-процессе." /></CardContent></Card>
+        <Card><CardContent className="space-y-3 p-4">
+          <Empty text={`Связанная выставка #${expoId} не найдена в смарт-процессе.`} />
+          <Button variant="outline" size="sm" onClick={() => agg.refetch()} data-testid="button-retry-agg">Повторить</Button>
+        </CardContent></Card>
       ) : (
         <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr]">
           <Card className="lg:col-span-1">

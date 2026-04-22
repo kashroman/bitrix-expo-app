@@ -72,11 +72,33 @@ export function initBitrix(): Promise<void> {
   });
 }
 
+const DEFAULT_BX_TIMEOUT_MS = 25_000;
+const LIST_BX_TIMEOUT_MS = 45_000;
+
+function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`Таймаут Bitrix24 (${Math.round(ms / 1000)} с): ${label}`));
+    }, ms);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export function callBx<T = unknown>(
   method: string,
   params: Record<string, unknown> = {},
+  timeoutMs: number = DEFAULT_BX_TIMEOUT_MS,
 ): Promise<T> {
-  return new Promise((resolve, reject) => {
+  const promise = new Promise<T>((resolve, reject) => {
     if (!window.BX24) {
       reject(new Error("BX24 SDK не найден. Откройте приложение внутри Bitrix24 или установите его."));
       return;
@@ -90,13 +112,18 @@ export function callBx<T = unknown>(
       resolve(result.data());
     });
   });
+  return withTimeout(promise, timeoutMs, method);
 }
 
 export async function listAllBx<T = unknown>(
   method: string,
   params: Record<string, unknown> = {},
+  options: { timeoutMs?: number; maxPages?: number } = {},
 ): Promise<T[]> {
-  const first = await new Promise<BxResult<{ items?: T[]; types?: T[]; result?: T[] } | T[]>>(
+  const timeoutMs = options.timeoutMs ?? LIST_BX_TIMEOUT_MS;
+  const maxPages = options.maxPages ?? 40;
+
+  const firstPromise = new Promise<BxResult<{ items?: T[]; types?: T[]; result?: T[] } | T[]>>(
     (resolve, reject) => {
       if (!window.BX24) {
         reject(new Error("BX24 SDK не найден."));
@@ -111,6 +138,7 @@ export async function listAllBx<T = unknown>(
       });
     },
   );
+  const first = await withTimeout(firstPromise, timeoutMs, method);
 
   const rows: T[] = [];
   const collect = (data: { items?: T[]; types?: T[]; result?: T[] } | T[]) => {
@@ -123,8 +151,9 @@ export async function listAllBx<T = unknown>(
   collect(first.data());
 
   let current = first;
-  while (current.more && current.more() && current.next) {
-    current = await new Promise((resolve, reject) => {
+  let pages = 1;
+  while (current.more && current.more() && current.next && pages < maxPages) {
+    const nextPromise = new Promise<typeof current>((resolve, reject) => {
       current.next?.((nextResult) => {
         if (nextResult.error()) {
           reject(new Error(`${nextResult.error()}: ${nextResult.error_description() ?? ""}`));
@@ -133,7 +162,9 @@ export async function listAllBx<T = unknown>(
         resolve(nextResult as typeof current);
       });
     });
+    current = await withTimeout(nextPromise, timeoutMs, `${method} page ${pages + 1}`);
     collect(current.data());
+    pages += 1;
   }
 
   return rows;

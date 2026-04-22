@@ -233,9 +233,33 @@ export default function InstallPage() {
 
         <DiagnosticsPanel diagnostics={diagnostics} entityTypeId={entityTypeId} />
       </div>
+      <Card className="mt-6 border-blue-300 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30">
+        <CardHeader>
+          <CardTitle className="text-base">Как отличить вкладку приложения от встроенной</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm">
+          <p>
+            В карточке сделки/лида Bitrix24 сам автоматически создаёт вкладку со связанными элементами
+            смарт-процесса — она называется <strong>«Выставки»</strong> и показывает стандартный grid
+            Bitrix (не этот приложение). Это <em>не</em> placement-handler, отключить его в REST-API нельзя.
+          </p>
+          <p>
+            Приложение регистрирует <strong>отдельную</strong> вкладку с заголовком{" "}
+            <strong>«Выставка · аналитика»</strong>. Её иконка — логотип приложения; контент — воронки
+            лидов и сделок по связанной выставке (<code>{EXPO_LINK_FIELD_HINT}</code>).
+          </p>
+          <p>
+            Если пользователь видит только «Выставки» (native grid), значит placement не зарегистрирован
+            или origin handler-а устарел — запустите установку выше, смотрите диагностику. Вкладка
+            «Выставка · аналитика» может быть в overflow-меню вкладок, раскройте «Ещё».
+          </p>
+        </CardContent>
+      </Card>
     </Shell>
   );
 }
+
+const EXPO_LINK_FIELD_HINT = "PARENT_ID_1050";
 
 function DiagnosticsPanel({ diagnostics, entityTypeId }: { diagnostics: InstallDiagnostics | null; entityTypeId: number }) {
   const managed = useMemo(() => new Set(getManagedPlacements(entityTypeId)), [entityTypeId]);
