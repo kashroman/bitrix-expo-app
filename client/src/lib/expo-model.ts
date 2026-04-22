@@ -45,6 +45,7 @@ function detectByWords(
   fields: Record<string, CrmField> | undefined,
   requiredGroups: string[][],
   preferredTypes?: string[],
+  minMatchedGroups = 1,
 ): DetectedField | undefined {
   const candidates = fieldEntries(fields).map((entry) => {
     const wordScore = requiredGroups.reduce((score, group) => {
@@ -54,7 +55,7 @@ function detectByWords(
     return { ...entry, score: wordScore * 10 + typeScore };
   });
   const best = candidates.sort((a, b) => b.score - a.score)[0];
-  if (!best || best.score < 10) return undefined;
+  if (!best || Math.floor(best.score / 10) < minMatchedGroups) return undefined;
   return {
     code: best.code,
     title: best.title,
@@ -154,6 +155,7 @@ export async function detectExpoModel(): Promise<ExpoDetection> {
       expoFields,
       [["монтаж", "застрой", "mount"], ["нач", "start", "дата"]],
       ["date", "datetime"],
+      2,
     ),
     eventStart,
     eventEnd,
@@ -163,6 +165,7 @@ export async function detectExpoModel(): Promise<ExpoDetection> {
       expoFields,
       [["демонтаж", "dismant"], ["заверш", "оконч", "end", "дата"]],
       ["date", "datetime"],
+      2,
     ),
   };
 

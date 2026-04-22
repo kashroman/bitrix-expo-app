@@ -97,10 +97,13 @@ function useRouteQueryId() {
 
 function bitrixLocationHook(): [string, (to: string) => void] {
   const normalize = () => {
-    const hash = window.location.hash.replace(/^#/, "");
-    if (hash.startsWith("/")) return hash.split("?")[0] || "/";
     const path = window.location.pathname.match(/\/(install|deal-tab|expo-tab|calendar)\/?$/)?.[1];
-    return path ? `/${path}` : "/";
+    const pathRoute = path ? `/${path}` : undefined;
+    const hash = window.location.hash.replace(/^#/, "");
+    const hashRoute = hash.startsWith("/") ? hash.split("?")[0] || "/" : undefined;
+    if (pathRoute && (!hashRoute || hashRoute === "/")) return pathRoute;
+    if (hashRoute) return hashRoute;
+    return pathRoute ?? "/";
   };
 
   const [location, setLocationState] = useState(normalize);
@@ -116,8 +119,9 @@ function bitrixLocationHook(): [string, (to: string) => void] {
   }, []);
 
   const navigate = (to: string) => {
-    window.location.hash = to.startsWith("/") ? to : `/${to}`;
-    setLocationState(to.startsWith("/") ? to : `/${to}`);
+    const nextRoute = to.startsWith("/") ? to : `/${to}`;
+    window.location.hash = nextRoute;
+    setLocationState(nextRoute);
   };
 
   return [location, navigate];
