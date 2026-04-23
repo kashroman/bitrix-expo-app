@@ -19,6 +19,7 @@ import {
   RegisteredHandler,
 } from "@/lib/bitrix";
 import { EXPO_ENTITY_TYPE_ID } from "@/lib/config";
+import { discoverLinkFields, LinkFieldCandidate } from "@/lib/expo-link";
 import { useToast } from "@/hooks/use-toast";
 
 type InstallTargetHandler = {
@@ -233,6 +234,7 @@ export default function InstallPage() {
 
         <DiagnosticsPanel diagnostics={diagnostics} entityTypeId={entityTypeId} />
       </div>
+      <LinkFieldsCard inside={Boolean(ready.data?.inside)} />
       <Card className="mt-6 border-blue-300 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30">
         <CardHeader>
           <CardTitle className="text-base">Как отличить вкладку приложения от встроенной</CardTitle>
@@ -329,6 +331,98 @@ function DiagnosticsPanel({ diagnostics, entityTypeId }: { diagnostics: InstallD
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function LinkFieldsCard({ inside }: { inside: boolean }) {
+  const leadQ = useQuery({
+    queryKey: ["install-link-discovery", "lead"],
+    queryFn: () => discoverLinkFields("lead"),
+    enabled: inside,
+  });
+  const dealQ = useQuery({
+    queryKey: ["install-link-discovery", "deal"],
+    queryFn: () => discoverLinkFields("deal"),
+    enabled: inside,
+  });
+
+  return (
+    <Card className="mt-6" data-testid="card-link-fields">
+      <CardHeader>
+        <CardTitle className="text-base">Поля связи «Выставка (календарь)» (автоопределение)</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        {!inside && (
+          <div className="text-muted-foreground">Откройте внутри Bitrix24, чтобы увидеть поля.</div>
+        )}
+        <LinkFieldBlock
+          title="Лиды (crm.lead.fields)"
+          loading={leadQ.isLoading}
+          error={leadQ.error instanceof Error ? leadQ.error.message : leadQ.error ? String(leadQ.error) : undefined}
+          candidates={leadQ.data?.candidates ?? []}
+          hasCustom={leadQ.data?.hasCustom ?? false}
+        />
+        <LinkFieldBlock
+          title="Сделки (crm.deal.fields)"
+          loading={dealQ.isLoading}
+          error={dealQ.error instanceof Error ? dealQ.error.message : dealQ.error ? String(dealQ.error) : undefined}
+          candidates={dealQ.data?.candidates ?? []}
+          hasCustom={dealQ.data?.hasCustom ?? false}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function LinkFieldBlock({
+  title,
+  loading,
+  error,
+  candidates,
+  hasCustom,
+}: {
+  title: string;
+  loading: boolean;
+  error?: string;
+  candidates: LinkFieldCandidate[];
+  hasCustom: boolean;
+}) {
+  return (
+    <div className="rounded-md border bg-muted/30 p-3">
+      <div className="font-medium">{title}</div>
+      {loading ? (
+        <div className="mt-1 text-muted-foreground">Загрузка…</div>
+      ) : error ? (
+        <div className="mt-1 text-red-600">{error}</div>
+      ) : (
+        <>
+          <div className="mt-1 text-muted-foreground">
+            Найдено кастомных UF: {hasCustom ? "да" : "нет"}. Всего кандидатов: {candidates.length}.
+          </div>
+          {candidates.length === 0 ? (
+            <div className="mt-1 text-muted-foreground">
+              Нет полей, подходящих под «Выставка (календарь)» или привязку к entityTypeId=1050.
+            </div>
+          ) : (
+            <ul className="mt-2 space-y-1">
+              {candidates.slice(0, 8).map((c) => (
+                <li key={c.code} className="break-all">
+                  <code>{c.code}</code> · {c.title} · type={c.type ?? "—"} · score={c.score}
+                  {c.isCustom ? " · UF" : ""}
+                  <div className="text-muted-foreground">{c.reason}</div>
+                  {c.settings && Object.keys(c.settings).length > 0 && (
+                    <details>
+                      <summary className="cursor-pointer text-muted-foreground">settings</summary>
+                      <pre className="mt-1 whitespace-pre-wrap text-[10px]">{JSON.stringify(c.settings, null, 2)}</pre>
+                    </details>
+                  )}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </div>
   );
 }
 

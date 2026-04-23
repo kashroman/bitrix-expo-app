@@ -12,7 +12,12 @@ import {
   fetchDealById,
   fetchLeadById,
 } from "@/lib/expo-data";
-import { EXPO_LINK_FIELD, EXPO_ENTITY_TYPE_ID, LeadGroupKey, DealGroupKey } from "@/lib/config";
+import {
+  candidateExpoIdFromRecord,
+  discoverLinkFields,
+  LinkFieldCandidate,
+} from "@/lib/expo-link";
+import { EXPO_ENTITY_TYPE_ID, LeadGroupKey, DealGroupKey } from "@/lib/config";
 import {
   getPlacementEntityId,
   getPlacementInfo,
@@ -21,13 +26,6 @@ import {
   openBitrixPath,
 } from "@/lib/bitrix";
 import { formatDateRange } from "@/lib/format";
-
-function extractExpoIdFromParent(row: Record<string, unknown> | undefined): string | undefined {
-  if (!row) return undefined;
-  const val = row[EXPO_LINK_FIELD] ?? row[EXPO_LINK_FIELD.toLowerCase()];
-  if (val === undefined || val === null || val === "" || val === "0") return undefined;
-  return Array.isArray(val) ? String(val[0]) : String(val);
-}
 
 export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
   const placement = isInsideBitrix() ? getPlacementInfo() : {};
@@ -41,7 +39,25 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
     enabled: isInsideBitrix() && Boolean(entityId),
   });
 
-  const expoId = useMemo(() => extractExpoIdFromParent(entityQuery.data), [entityQuery.data]);
+  const linkDiscovery = useQuery({
+    queryKey: [`${entity}-link-discovery`],
+    queryFn: () => discoverLinkFields(entity),
+    enabled: isInsideBitrix(),
+  });
+
+  const { expoId, expoIdField } = useMemo(() => {
+    const choice = linkDiscovery.data
+      ? {
+          entity,
+          candidates: linkDiscovery.data.candidates,
+          attempted: [],
+          hasCustom: linkDiscovery.data.hasCustom,
+          usedFallback: false,
+        }
+      : undefined;
+    const picked = candidateExpoIdFromRecord(entityQuery.data, choice);
+    return { expoId: picked?.value, expoIdField: picked?.field };
+  }, [entityQuery.data, linkDiscovery.data, entity]);
 
   const agg = useQuery({
     queryKey: ["expo-aggregate", expoId ? Number(expoId) : undefined],
@@ -96,7 +112,18 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
           <Button variant="outline" size="sm" onClick={() => entityQuery.refetch()} data-testid="button-retry-entity">Повторить</Button>
         </CardContent></Card>
       ) : !expoId ? (
-        <Card><CardContent className="p-4"><Empty text={`У ${label} не указана связанная выставка (поле ${EXPO_LINK_FIELD}).`} /></CardContent></Card>
+        <Card>
+          <CardContent className="space-y-3 p-4 text-sm">
+            <Empty text={`У ${label} не указана связанная выставка.`} />
+            <LinkDiagnostics
+              entity={entity}
+              candidates={linkDiscovery.data?.candidates ?? []}
+              hasCustom={linkDiscovery.data?.hasCustom ?? false}
+              record={entityQuery.data}
+              chosenField={undefined}
+            />
+          </CardContent>
+        </Card>
       ) : agg.isLoading ? (
         <LoadingRows />
       ) : agg.isError ? (
@@ -160,9 +187,105 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
               />
             </CardContent>
           </Card>
+
+          <div className="lg:col-span-3">
+            <AggDiagnostics
+              leadChoice={agg.data.diagnostics.lead}
+              dealChoice={agg.data.diagnostics.deal}
+              errors={agg.data.diagnostics.errors}
+              currentEntity={entity}
+              currentField={expoIdField}
+            />
+          </div>
         </div>
       )}
     </Shell>
+  );
+}
+
+function AggDiagnostics({
+  leadChoice,
+  dealChoice,
+  errors,
+  currentEntity,
+  currentField,
+}: {
+  leadChoice: import("@/lib/expo-link").LinkFieldChoice;
+  dealChoice: import("@/lib/expo-link").LinkFieldChoice;
+  errors: string[];
+  currentEntity: "deal" | "lead";
+  currentField?: string;
+}) {
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 text-xs">
+      <div className="mb-1 font-medium">Диагностика связей</div>
+      <div className="grid gap-1">
+        <div>
+          Лиды → поле: <code>{leadChoice.chosenField ?? "—"}</code>, формат:{" "}
+          <code>{leadChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {leadChoice.candidates.filter((c) => c.isCustom).length},
+          fallback: {leadChoice.usedFallback ? "да" : "нет"}
+        </div>
+        <div>
+          Сделки → поле: <code>{dealChoice.chosenField ?? "—"}</code>, формат:{" "}
+          <code>{dealChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {dealChoice.candidates.filter((c) => c.isCustom).length},
+          fallback: {dealChoice.usedFallback ? "да" : "нет"}
+        </div>
+        <div>
+          Текущая вкладка ({currentEntity}): поле на записи — <code>{currentField ?? "—"}</code>
+        </div>
+        {errors.length > 0 && (
+          <div className="text-red-600">Ошибки: {errors.join("; ")}</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LinkDiagnostics({
+  entity,
+  candidates,
+  hasCustom,
+  record,
+  chosenField,
+}: {
+  entity: "deal" | "lead";
+  candidates: LinkFieldCandidate[];
+  hasCustom: boolean;
+  record: Record<string, unknown> | undefined;
+  chosenField?: string;
+}) {
+  const topCandidates = candidates.slice(0, 6);
+  return (
+    <div className="rounded-md border bg-muted/30 p-3 text-xs">
+      <div className="mb-1 font-medium">Диагностика поля «Выставка (календарь)» для {entity === "deal" ? "сделки" : "лида"}</div>
+      <div className="text-muted-foreground">
+        Найдены кастомные UF: {hasCustom ? "да" : "нет"}. {chosenField ? `Использовано поле: ${chosenField}.` : ""}
+      </div>
+      {topCandidates.length === 0 ? (
+        <div className="mt-2 text-muted-foreground">
+          Кандидатов не найдено. Проверьте, что у поля есть заголовок, содержащий «Выставка (календарь)».
+        </div>
+      ) : (
+        <ul className="mt-2 space-y-1">
+          {topCandidates.map((candidate) => {
+            const raw = record
+              ? record[candidate.code] ?? record[candidate.code.toLowerCase()] ?? record[candidate.code.toUpperCase()]
+              : undefined;
+            return (
+              <li key={candidate.code} className="break-all">
+                <span className="font-medium">{candidate.code}</span> · {candidate.title} · type={candidate.type ?? "—"} ·
+                score={candidate.score}
+                {raw !== undefined && raw !== null && raw !== "" ? (
+                  <> · <span className="text-emerald-700 dark:text-emerald-300">value={JSON.stringify(raw)}</span></>
+                ) : (
+                  <> · <span className="text-muted-foreground">value: —</span></>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
   );
 }
 

@@ -12,6 +12,7 @@ import {
   groupForDeal,
   groupForLead,
 } from "./config";
+import { fetchLinkedEntities, LinkFieldChoice } from "./expo-link";
 
 export type ExpoItem = {
   id: number;
@@ -56,6 +57,11 @@ export type ExpoAggregate = {
   dealStats: DealStats;
   leads: CrmItem[];
   deals: CrmItem[];
+  diagnostics: {
+    lead: LinkFieldChoice;
+    deal: LinkFieldChoice;
+    errors: string[];
+  };
 };
 
 export type StatusRef = { id: string; title: string; entityId?: string };
@@ -128,69 +134,13 @@ export async function fetchExpo(id: string | number): Promise<ExpoItem | undefin
 }
 
 export async function fetchLeadsByExpo(expoId: string | number): Promise<CrmItem[]> {
-  const select = [
-    "ID",
-    "TITLE",
-    "STATUS_ID",
-    "ASSIGNED_BY_ID",
-    "DATE_CREATE",
-    "DATE_MODIFY",
-    "OPPORTUNITY",
-    "CURRENCY_ID",
-    "PHONE",
-    "EMAIL",
-    "NAME",
-    "LAST_NAME",
-    "SOURCE_ID",
-    EXPO_LINK_FIELD,
-  ];
-  const [r1, r2] = await Promise.allSettled([
-    listAllBx<CrmItem>("crm.lead.list", {
-      filter: { [EXPO_LINK_FIELD]: expoId },
-      select,
-      order: { ID: "DESC" },
-    }),
-    listAllBx<CrmItem>("crm.lead.list", {
-      filter: { [`=${EXPO_LINK_FIELD}`]: expoId },
-      select,
-      order: { ID: "DESC" },
-    }),
-  ]);
-  const a = r1.status === "fulfilled" ? r1.value : [];
-  const b = r2.status === "fulfilled" ? r2.value : [];
-  return a.length >= b.length ? a : b;
+  const outcome = await fetchLinkedEntities("lead", expoId);
+  return outcome.rows as CrmItem[];
 }
 
 export async function fetchDealsByExpo(expoId: string | number): Promise<CrmItem[]> {
-  const select = [
-    "ID",
-    "TITLE",
-    "STAGE_ID",
-    "CATEGORY_ID",
-    "ASSIGNED_BY_ID",
-    "DATE_CREATE",
-    "DATE_MODIFY",
-    "OPPORTUNITY",
-    "CURRENCY_ID",
-    "COMPANY_ID",
-    "CONTACT_ID",
-    EXPO_LINK_FIELD,
-  ];
-  const [r1, r2] = await Promise.allSettled([
-    listAllBx<CrmItem>("crm.deal.list", {
-      filter: { [EXPO_LINK_FIELD]: expoId },
-      select,
-      order: { ID: "DESC" },
-    }),
-    listAllBx<CrmItem>("crm.deal.list", {
-      filter: { [`=${EXPO_LINK_FIELD}`]: expoId },
-      select,
-      order: { ID: "DESC" },
-    }),
-  ]);
-  const a = r1.status === "fulfilled" ? r1.value : [];
-  const b = r2.status === "fulfilled" ? r2.value : [];
-  return a.length >= b.length ? a : b;
+  const outcome = await fetchLinkedEntities("deal", expoId);
+  return outcome.rows as CrmItem[];
 }
 
 async function mergeWithCrmItem(
@@ -198,8 +148,6 @@ async function mergeWithCrmItem(
   id: string | number,
   base: CrmItem | undefined,
 ): Promise<CrmItem | undefined> {
-  const baseHasParent = base && (base[EXPO_LINK_FIELD] ?? base[EXPO_LINK_FIELD.toLowerCase()]);
-  if (baseHasParent) return base;
   try {
     const data = await callBx<{ item: CrmItem }>("crm.item.get", {
       entityTypeId,
@@ -210,6 +158,7 @@ async function mergeWithCrmItem(
   } catch {}
   return base;
 }
+void EXPO_LINK_FIELD;
 
 export async function fetchLeadById(id: string | number): Promise<CrmItem | undefined> {
   let base: CrmItem | undefined;
@@ -337,26 +286,51 @@ export async function buildExpoAggregate(expoId: string | number): Promise<ExpoA
   const expo = await fetchExpo(expoId);
   if (!expo) return undefined;
   const [leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
-    fetchLeadsByExpo(expoId),
-    fetchDealsByExpo(expoId),
+    fetchLinkedEntities("lead", expoId),
+    fetchLinkedEntities("deal", expoId),
     fetchLeadStatuses(),
     fetchDealStages(),
   ]);
-  const leads = leadsRes.status === "fulfilled" ? leadsRes.value : [];
-  const deals = dealsRes.status === "fulfilled" ? dealsRes.value : [];
+  const errs: string[] = [];
+  const leadOutcome = leadsRes.status === "fulfilled" ? leadsRes.value : undefined;
+  const dealOutcome = dealsRes.status === "fulfilled" ? dealsRes.value : undefined;
+  if (leadsRes.status === "rejected") {
+    errs.push(`leads: ${String((leadsRes.reason as Error)?.message ?? leadsRes.reason)}`);
+  }
+  if (dealsRes.status === "rejected") {
+    errs.push(`deals: ${String((dealsRes.reason as Error)?.message ?? dealsRes.reason)}`);
+  }
+  const leads = (leadOutcome?.rows ?? []) as CrmItem[];
+  const deals = (dealOutcome?.rows ?? []) as CrmItem[];
   const leadStatuses = leadStatusesRes.status === "fulfilled" ? leadStatusesRes.value : [];
   const dealStages = dealStagesRes.status === "fulfilled" ? dealStagesRes.value : [];
-  if (typeof console !== "undefined") {
-    const errs: string[] = [];
-    if (leadsRes.status === "rejected") errs.push(`leads: ${String((leadsRes.reason as Error)?.message ?? leadsRes.reason)}`);
-    if (dealsRes.status === "rejected") errs.push(`deals: ${String((dealsRes.reason as Error)?.message ?? dealsRes.reason)}`);
-    if (errs.length) console.warn("buildExpoAggregate partial failure", errs);
-  }
+  if (typeof console !== "undefined" && errs.length) console.warn("buildExpoAggregate partial failure", errs);
+
+  const leadChoice: LinkFieldChoice = leadOutcome?.choice ?? {
+    entity: "lead",
+    candidates: [],
+    attempted: [],
+    hasCustom: false,
+    usedFallback: false,
+  };
+  const dealChoice: LinkFieldChoice = dealOutcome?.choice ?? {
+    entity: "deal",
+    candidates: [],
+    attempted: [],
+    hasCustom: false,
+    usedFallback: false,
+  };
+
   return {
     expo,
     leads,
     deals,
     leadStats: computeLeadStats(leads, statusTitleMap(leadStatuses)),
     dealStats: computeDealStats(deals, statusTitleMap(dealStages)),
+    diagnostics: {
+      lead: leadChoice,
+      deal: dealChoice,
+      errors: errs,
+    },
   };
 }

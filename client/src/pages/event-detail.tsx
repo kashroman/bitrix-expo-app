@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Shell, PageTitle, LoadingRows } from "./shell";
 import { LeadFunnel, DealFunnel } from "@/components/funnel";
 import { buildExpoAggregate } from "@/lib/expo-data";
+import { LinkFieldChoice } from "@/lib/expo-link";
 import { EXPO_ENTITY_TYPE_ID, DealGroupKey, LeadGroupKey } from "@/lib/config";
 import { formatDateRange } from "@/lib/format";
 import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
@@ -129,6 +130,14 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
               </CardContent>
             </Card>
           </div>
+
+          <div className="mt-4">
+            <LinkDiagnosticsCard
+              leadChoice={agg.data.diagnostics.lead}
+              dealChoice={agg.data.diagnostics.deal}
+              errors={agg.data.diagnostics.errors}
+            />
+          </div>
         </>
       )}
     </Shell>
@@ -221,6 +230,88 @@ function ErrorState({ eventId, message, onRetry }: { eventId: string; message: s
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function LinkDiagnosticsCard({
+  leadChoice,
+  dealChoice,
+  errors,
+}: {
+  leadChoice: LinkFieldChoice;
+  dealChoice: LinkFieldChoice;
+  errors: string[];
+}) {
+  return (
+    <Card data-testid="card-link-diagnostics">
+      <CardHeader>
+        <CardTitle className="text-base">Диагностика связи «Выставка (календарь)»</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <ChoiceBlock title="Лиды" choice={leadChoice} />
+        <ChoiceBlock title="Сделки" choice={dealChoice} />
+        {errors.length > 0 && (
+          <div className="text-red-600">Общие ошибки: {errors.join("; ")}</div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function ChoiceBlock({ title, choice }: { title: string; choice: LinkFieldChoice }) {
+  const customCount = choice.candidates.filter((c) => c.isCustom).length;
+  return (
+    <div className="rounded-md border bg-muted/30 p-3">
+      <div className="font-medium">{title}</div>
+      <div className="mt-1 grid gap-1">
+        <div>
+          Выбранное поле: <code>{choice.chosenField ?? "—"}</code>, формат:{" "}
+          <code>{choice.chosenFormat ?? "—"}</code>, записей:{" "}
+          {choice.attempted.find((a) => a.field === choice.chosenField && a.format === choice.chosenFormat)?.count ?? 0}
+          {choice.usedFallback ? " (fallback на PARENT_ID)" : ""}
+        </div>
+        <div>
+          Кастомных UF-кандидатов: {customCount}, всего кандидатов: {choice.candidates.length}
+        </div>
+        {choice.candidates.length > 0 && (
+          <details className="text-muted-foreground">
+            <summary className="cursor-pointer">Кандидаты полей</summary>
+            <ul className="mt-1 space-y-1">
+              {choice.candidates.slice(0, 8).map((c) => (
+                <li key={c.code} className="break-all">
+                  <code>{c.code}</code> · {c.title} · type={c.type ?? "—"} · score={c.score} · {c.reason}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {choice.attempted.length > 0 && (
+          <details className="text-muted-foreground">
+            <summary className="cursor-pointer">Попытки фильтрации ({choice.attempted.length})</summary>
+            <ul className="mt-1 space-y-1">
+              {choice.attempted.map((a, i) => (
+                <li key={`${a.field}-${a.format}-${i}`} className="break-all">
+                  <code>{a.field}</code> · формат <code>{a.format || "—"}</code> · count={a.count}
+                  {a.error ? <span className="text-red-600"> · {a.error}</span> : null}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+        {choice.sampleValues && choice.sampleValues.length > 0 && (
+          <details className="text-muted-foreground">
+            <summary className="cursor-pointer">Пример значений ({choice.sampleValues.length})</summary>
+            <ul className="mt-1 space-y-1">
+              {choice.sampleValues.map((s, i) => (
+                <li key={i}>
+                  id={s.id ?? "—"}, value={JSON.stringify(s.value)}
+                </li>
+              ))}
+            </ul>
+          </details>
+        )}
+      </div>
+    </div>
   );
 }
 
