@@ -156,14 +156,19 @@ export default function CalendarPage() {
             <LoadingRows />
           ) : expos.isError ? (
             <Empty text={`Ошибка Bitrix24 API: ${String((expos.error as Error)?.message ?? expos.error)}`} />
-          ) : !filtered.length ? (
-            <Empty text="Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс." />
           ) : view === "gantt" ? (
             <GanttView
               expos={filtered}
               activeMonth={activeMonth}
               onMonthChange={setActiveMonth}
+              emptyMessage={
+                filtered.length === 0
+                  ? "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
+                  : undefined
+              }
             />
+          ) : !filtered.length ? (
+            <Empty text="Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс." />
           ) : view === "calendar" ? (
             <CalendarView expos={filtered} onSelect={(expo) => navigateToEvent(expo.id)} />
           ) : (
@@ -223,10 +228,12 @@ function GanttView({
   expos,
   activeMonth,
   onMonthChange,
+  emptyMessage,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
   onMonthChange: (d: Date) => void;
+  emptyMessage?: string;
 }) {
   const visible = useMemo(
     () => exposOverlappingMonth(expos, activeMonth).slice(0, MAX_MONTH_DEAL_ENRICH),
@@ -323,6 +330,7 @@ function GanttView({
       dealsFor={dealsFor}
       initialMonth={activeMonth}
       onMonthChange={onMonthChange}
+      emptyMessage={emptyMessage}
     />
   );
 }

@@ -108,6 +108,7 @@ export function GanttTimeline({
   dealsFor,
   initialMonth,
   onMonthChange,
+  emptyMessage,
 }: {
   expos: ExpoItem[];
   onSelect: (expo: ExpoItem) => void;
@@ -115,6 +116,7 @@ export function GanttTimeline({
   dealsFor?: GanttDealsProvider;
   initialMonth?: Date;
   onMonthChange?: (monthStart: Date) => void;
+  emptyMessage?: string;
 }) {
   const [cursor, setCursor] = useState<Date>(() => {
     if (initialMonth) return monthStartOf(initialMonth.getFullYear(), initialMonth.getMonth());
@@ -159,27 +161,12 @@ export function GanttTimeline({
     setCursor(monthStartOf(now.getFullYear(), now.getMonth()));
   };
 
-  if (!expos.length) {
-    return (
-      <div>
-        <MonthControls
-          cursor={cursor}
-          onPrev={goPrev}
-          onNext={goNext}
-          onToday={goToday}
-          onSelect={(d) => setCursor(d)}
-          yearOptions={yearOptions}
-        />
-        <div className="mt-3 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
-          Нет выставок для отображения.
-        </div>
-      </div>
-    );
-  }
-
   const today = stripTime(new Date());
   const todayIndex =
     today.getFullYear() === year && today.getMonth() === month ? today.getDate() : -1;
+
+  const isEmpty = sortedExpos.length === 0;
+  const emptyText = emptyMessage ?? "Нет выставок для отображения.";
 
   return (
     <div>
@@ -224,6 +211,16 @@ export function GanttTimeline({
             );
           })}
         </div>
+
+        {isEmpty ? (
+          <EmptyGridBody
+            year={year}
+            month={month}
+            totalDays={totalDays}
+            todayIndex={todayIndex}
+            text={emptyText}
+          />
+        ) : null}
 
         {sortedExpos.map((expo, rowIndex) => {
           const deals = (dealsFor?.(expo) ?? []).filter((d) =>
@@ -423,6 +420,54 @@ function DealBars({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function EmptyGridBody({
+  year,
+  month,
+  totalDays,
+  todayIndex,
+  text,
+}: {
+  year: number;
+  month: number;
+  totalDays: number;
+  todayIndex: number;
+  text: string;
+}) {
+  return (
+    <div
+      className="relative grid min-w-0 items-stretch border-b"
+      style={{
+        gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
+        minHeight: `${DAY_HEIGHT_BASE * 2}px`,
+      }}
+    >
+      <div className="border-r bg-background/70" aria-hidden />
+      {Array.from({ length: totalDays }, (_, i) => {
+        const dayNum = i + 1;
+        const date = new Date(year, month, dayNum);
+        const dow = date.getDay();
+        const isWeekend = dow === 0 || dow === 6;
+        const isToday = dayNum === todayIndex;
+        return (
+          <div
+            key={dayNum}
+            className={`border-r border-border/40 ${isWeekend ? "bg-muted/30" : ""} ${
+              isToday ? "bg-primary/5" : ""
+            }`}
+            aria-hidden
+          />
+        );
+      })}
+      <div
+        className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-muted-foreground"
+        data-testid="gantt-empty"
+      >
+        {text}
+      </div>
     </div>
   );
 }
