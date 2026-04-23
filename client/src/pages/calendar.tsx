@@ -211,17 +211,34 @@ function ViewButton({
   );
 }
 
+// An interval is usable only when at least one bound is configured AND parseable.
+// When only one bound is present, treat as single-day (start == end).
+// Per spec: do not invent dates — if a field is not configured/available, the
+// interval is simply absent for that expo.
+function intervalsOf(expo: ExpoItem): Array<{ start: number; end: number }> {
+  const out: Array<{ start: number; end: number }> = [];
+  const push = (from: unknown, to: unknown) => {
+    const a = parseDate(from);
+    const b = parseDate(to);
+    if (!a && !b) return;
+    const s = (a ?? b)!.getTime();
+    const e = (b ?? a)!.getTime();
+    out.push({ start: Math.min(s, e), end: Math.max(s, e) });
+  };
+  push(expo.installStart, expo.installEnd);
+  push(expo.expoStart, expo.expoEnd);
+  push(expo.dismantleStart, expo.dismantleEnd);
+  return out;
+}
+
+// Overlap rule: interval [s,e] touches the month iff s <= monthEnd AND e >= monthStart.
+// Expo qualifies if ANY of its (mount | event | dismantle) intervals overlaps.
 function exposOverlappingMonth(expos: ExpoItem[], monthStart: Date): ExpoItem[] {
   const mStart = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1).getTime();
   const mEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getTime();
-  return expos.filter((expo) => {
-    const s = parseDate(expo.installStart)?.getTime() ?? parseDate(expo.expoStart)?.getTime();
-    const e = parseDate(expo.dismantleEnd)?.getTime() ?? parseDate(expo.expoEnd)?.getTime();
-    if (s === undefined && e === undefined) return false;
-    const start = s ?? e!;
-    const end = e ?? s!;
-    return end >= mStart && start <= mEnd;
-  });
+  return expos.filter((expo) =>
+    intervalsOf(expo).some((iv) => iv.start <= mEnd && iv.end >= mStart),
+  );
 }
 
 function GanttView({
@@ -235,14 +252,21 @@ function GanttView({
   onMonthChange: (d: Date) => void;
   emptyMessage?: string;
 }) {
-  const visible = useMemo(
-    () => exposOverlappingMonth(expos, activeMonth).slice(0, MAX_MONTH_DEAL_ENRICH),
+  const overlapping = useMemo(
+    () => exposOverlappingMonth(expos, activeMonth),
     [expos, activeMonth],
+  );
+  // Cap the concurrent deal-aggregate lookups per month so the first
+  // MAX_MONTH_DEAL_ENRICH rows drive enrichment, but every overlapping expo is
+  // still rendered in the Gantt grid.
+  const enrichTargets = useMemo(
+    () => overlapping.slice(0, MAX_MONTH_DEAL_ENRICH),
+    [overlapping],
   );
   const enabled = isInsideBitrix();
 
   const aggregates = useQueries({
-    queries: visible.map((expo) => ({
+    queries: enrichTargets.map((expo) => ({
       queryKey: ["expo-aggregate", expo.id],
       queryFn: () => buildExpoAggregate(expo.id),
       enabled,
@@ -283,7 +307,7 @@ function GanttView({
   const byExpoId = useMemo(() => {
     const out = new Map<number | string, GanttDealBar[]>();
     aggregates.forEach((q, idx) => {
-      const expo = visible[idx];
+      const expo = enrichTargets[idx];
       if (!expo) return;
       const data = q.data as ExpoAggregate | undefined;
       if (!isFoundAggregate(data)) return;
@@ -315,22 +339,28 @@ function GanttView({
       out.set(expo.id, bars);
     });
     return out;
-  }, [aggregates, visible, stageTitleMap, stageTitlesFromCrm]);
+  }, [aggregates, enrichTargets, stageTitleMap, stageTitlesFromCrm]);
 
   const dealsFor = useCallback(
     (expo: ExpoItem): GanttDealBar[] => byExpoId.get(expo.id) ?? [],
     [byExpoId],
   );
 
+  const effectiveEmpty =
+    emptyMessage ??
+    (expos.length === 0
+      ? "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
+      : "Ни одна выставка не попадает в выбранный месяц (по периодам монтажа / проведения / демонтажа).");
+
   return (
     <GanttTimeline
-      expos={expos}
+      expos={overlapping}
       onSelect={(expo) => navigateToEvent(expo.id)}
       renderRight={(expo) => <StatsMini expoId={expo.id} />}
       dealsFor={dealsFor}
       initialMonth={activeMonth}
       onMonthChange={onMonthChange}
-      emptyMessage={emptyMessage}
+      emptyMessage={effectiveEmpty}
     />
   );
 }
@@ -399,6 +429,8 @@ function GanttDiagnostics({
 
   const monthLabel = activeMonth.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
   const visibleCount = exposOverlappingMonth(expos, activeMonth).length;
+  const totalCount = expos.length;
+  const excludedNoOverlap = Math.max(0, totalCount - visibleCount);
   const mountMissing = !EXPO_DATE_FIELDS.mountStart && !EXPO_DATE_FIELDS.mountEnd;
   const dismantleMissing = !EXPO_DATE_FIELDS.dismantleStart && !EXPO_DATE_FIELDS.dismantleEnd;
 
@@ -410,7 +442,19 @@ function GanttDiagnostics({
       <CardContent className="space-y-3 text-xs">
         <div className="grid gap-1">
           <div>
-            Активный месяц: <b>{monthLabel}</b> · выставок, пересекающих месяц: <b>{visibleCount}</b>
+            Активный месяц: <b>{monthLabel}</b> · показано в Gantt:{" "}
+            <b data-testid="gantt-diag-visible">{visibleCount}</b> из{" "}
+            <b data-testid="gantt-diag-total">{totalCount}</b> · скрыто (нет пересечения
+            с месяцем либо нет дат):{" "}
+            <b data-testid="gantt-diag-excluded">{excludedNoOverlap}</b>
+          </div>
+          <div className="text-muted-foreground">
+            Правило отбора: интервал <i>[начало, конец]</i> пересекает месяц, если
+            <code className="mx-1">начало ≤ конец месяца</code> и
+            <code className="mx-1">конец ≥ начало месяца</code>. Учитываются периоды
+            монтажа, проведения и демонтажа; одиночная дата трактуется как
+            <code className="mx-1">начало = конец</code>. Если поле монтажа/демонтажа
+            не настроено или не заполнено — интервал просто игнорируется.
           </div>
           <div>
             Lead UF: <code>{leadExpoFieldCode ?? "—"}</code> · Deal UF:{" "}
