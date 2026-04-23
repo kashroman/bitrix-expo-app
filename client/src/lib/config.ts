@@ -2,8 +2,13 @@ export const EXPO_ENTITY_TYPE_ID = 1050;
 
 export const EXPO_LINK_FIELD = "PARENT_ID_1050";
 
-export const leadExpoFieldCode: string | null = null;
-export const dealExpoFieldCode: string | null = null;
+// Manual override for the custom "Выставка (календарь)" link field codes.
+// Confirmed from Bitrix24 diagnostics (type=crm, DYNAMIC_1050="Y"):
+//   lead: UF_CRM_1770132666 — listLabel/formLabel "Выставка (календарь)", LEAD=null
+//   deal: UF_CRM_6989BC521C964 — listLabel/formLabel "Выставка (календарь)", LEAD="N"
+// Set to null to fall back to automatic discovery via findLinkCandidates().
+export const leadExpoFieldCode: string | null = "UF_CRM_1770132666";
+export const dealExpoFieldCode: string | null = "UF_CRM_6989BC521C964";
 
 export function manualExpoFieldCode(entity: "lead" | "deal"): string | null {
   return entity === "lead" ? leadExpoFieldCode : dealExpoFieldCode;

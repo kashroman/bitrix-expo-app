@@ -466,9 +466,27 @@ export function summarizeSettings(settings: Record<string, unknown> | undefined)
   if (!settings) return "";
   const keys = Object.keys(settings);
   if (keys.length === 0) return "";
-  const picked = ["parentEntityTypeId", "PARENT_ENTITY_TYPE_ID", "entityTypeId", "ENTITY_TYPE_ID", "DISPLAY", "DEFAULT_VALUE"]
+  const preferred = [
+    "parentEntityTypeId",
+    "PARENT_ENTITY_TYPE_ID",
+    "entityTypeId",
+    "ENTITY_TYPE_ID",
+    "LEAD",
+    "DEAL",
+    "CONTACT",
+    "COMPANY",
+    "DISPLAY",
+    "DEFAULT_VALUE",
+  ];
+  const picked = preferred
     .filter((k) => k in settings)
     .map((k) => `${k}=${JSON.stringify(settings[k])}`);
+  // Surface DYNAMIC_* entries (e.g. DYNAMIC_1050) that are also load-bearing for CRM link fields.
+  for (const k of keys) {
+    if (k.startsWith("DYNAMIC_") && !picked.some((p) => p.startsWith(`${k}=`))) {
+      picked.push(`${k}=${JSON.stringify(settings[k])}`);
+    }
+  }
   if (picked.length) return picked.join(", ");
   return keys.slice(0, 3).map((k) => `${k}=${JSON.stringify(settings[k])}`).join(", ");
 }

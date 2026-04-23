@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Shell, PageTitle, LoadingRows } from "./shell";
 import { LeadFunnel, DealFunnel } from "@/components/funnel";
 import { buildExpoAggregate } from "@/lib/expo-data";
-import { LinkFieldChoice } from "@/lib/expo-link";
+import { LinkFieldChoice, summarizeSettings } from "@/lib/expo-link";
 import { EXPO_ENTITY_TYPE_ID, DealGroupKey, LeadGroupKey } from "@/lib/config";
 import { formatDateRange } from "@/lib/format";
 import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
@@ -286,6 +286,20 @@ function ChoiceBlock({ title, choice }: { title: string; choice: LinkFieldChoice
             ) : (
               <span className="text-amber-700 dark:text-amber-300">не найден в fields</span>
             )}
+            {choice.manualOverrideActive && choice.bestCandidate ? (
+              <div className="mt-0.5 text-muted-foreground">
+                {choice.bestCandidate.listLabel ? (
+                  <>listLabel: <span className="text-foreground">{choice.bestCandidate.listLabel}</span> · </>
+                ) : null}
+                {choice.bestCandidate.formLabel ? (
+                  <>formLabel: <span className="text-foreground">{choice.bestCandidate.formLabel}</span> · </>
+                ) : null}
+                type: <code>{choice.bestCandidate.type ?? "—"}</code>
+                {summarizeSettings(choice.bestCandidate.settings) ? (
+                  <> · settings: <code>{summarizeSettings(choice.bestCandidate.settings)}</code></>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         ) : null}
         <div>
