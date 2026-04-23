@@ -14,6 +14,27 @@ export function manualExpoFieldCode(entity: "lead" | "deal"): string | null {
   return entity === "lead" ? leadExpoFieldCode : dealExpoFieldCode;
 }
 
+// Manual override for the expo-link filter value format. Confirmed from
+// Bitrix24 diagnostics on event id=1274:
+//   lead UF_CRM_1770132666  · numeric  · count=1
+//   deal UF_CRM_6989BC521C964 · numeric · count=1 (sample id=3108, value=[1274])
+// Supported labels must match filterFormats() in expo-link.ts:
+//   "numeric" | "string" | "T1050_<id>" | "DYNAMIC_1050_<id>"
+// Set to null to fall back to full format probing.
+export type ExpoLinkFormatOverride =
+  | "numeric"
+  | "string"
+  | "T1050_<id>"
+  | "DYNAMIC_1050_<id>"
+  | null;
+
+export const leadExpoFieldFormat: ExpoLinkFormatOverride = "numeric";
+export const dealExpoFieldFormat: ExpoLinkFormatOverride = "numeric";
+
+export function manualExpoFieldFormat(entity: "lead" | "deal"): ExpoLinkFormatOverride {
+  return entity === "lead" ? leadExpoFieldFormat : dealExpoFieldFormat;
+}
+
 export const EXPO_DATE_FIELDS = {
   eventStart: "ufCrm8_1766066484758",
   eventEnd: "ufCrm8_1766066501630",

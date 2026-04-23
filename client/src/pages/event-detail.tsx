@@ -301,6 +301,17 @@ function ChoiceBlock({ title, choice }: { title: string; choice: LinkFieldChoice
           Формат фильтра: <code>{choice.chosenFormat ?? "—"}</code>, записей: {chosenCount}
           {choice.usedFallback ? " (fallback на PARENT_ID)" : ""}
         </div>
+        {choice.manualFormatOverrideActive ? (
+          <div>
+            Format override: <code>{choice.manualFormatOverride ?? "—"}</code> ·{" "}
+            <span className="text-emerald-700 dark:text-emerald-300">активен</span>
+            {choice.sampleValues && choice.sampleValues.length > 0 ? (
+              <div className="mt-0.5 text-muted-foreground">
+                Sample: {choice.sampleValues.map((s) => `id=${s.id ?? "?"} · value=${JSON.stringify(s.value)}`).join("; ")}
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         {choice.manualOverride ? (
           <div>
             Ручной override (config): <code>{choice.manualOverride}</code> ·{" "}

@@ -57,6 +57,8 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
           hasCustom: linkDiscovery.data.hasCustom,
           usedFallback: false,
           manualOverrideActive: linkDiscovery.data.manualOverrideActive,
+          manualFormatOverrideActive: linkDiscovery.data.manualFormatOverrideActive,
+          manualFormatOverride: linkDiscovery.data.manualFormatOverride,
           warnings: linkDiscovery.data.warnings,
           totalCandidateCount: linkDiscovery.data.totalCandidateCount,
         }
@@ -244,12 +246,18 @@ function AggDiagnostics({
           <code>{leadChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {leadChoice.candidates.filter((c) => c.isCustom).length},
           fallback: {leadChoice.usedFallback ? "да" : "нет"}
           {leadChoice.manualOverrideActive ? " · override активен" : ""}
+          {leadChoice.manualFormatOverrideActive ? (
+            <> · format override: <code>{leadChoice.manualFormatOverride ?? "—"}</code></>
+          ) : null}
         </div>
         <div>
           Сделки → поле: <code>{dealChoice.chosenField ?? "—"}</code>, формат:{" "}
           <code>{dealChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {dealChoice.candidates.filter((c) => c.isCustom).length},
           fallback: {dealChoice.usedFallback ? "да" : "нет"}
           {dealChoice.manualOverrideActive ? " · override активен" : ""}
+          {dealChoice.manualFormatOverrideActive ? (
+            <> · format override: <code>{dealChoice.manualFormatOverride ?? "—"}</code></>
+          ) : null}
         </div>
         <div>
           Текущая вкладка ({currentEntity}): поле на записи — <code>{currentField ?? "—"}</code>

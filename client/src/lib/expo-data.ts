@@ -87,6 +87,7 @@ function emptyLinkChoice(entity: "lead" | "deal"): LinkFieldChoice {
     hasCustom: false,
     usedFallback: false,
     manualOverrideActive: false,
+    manualFormatOverrideActive: false,
     warnings: [],
     totalCandidateCount: 0,
   };

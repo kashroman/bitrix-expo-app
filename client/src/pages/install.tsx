@@ -18,7 +18,14 @@ import {
   listRegisteredPlacements,
   RegisteredHandler,
 } from "@/lib/bitrix";
-import { EXPO_ENTITY_TYPE_ID, leadExpoFieldCode, dealExpoFieldCode } from "@/lib/config";
+import {
+  EXPO_ENTITY_TYPE_ID,
+  leadExpoFieldCode,
+  dealExpoFieldCode,
+  leadExpoFieldFormat,
+  dealExpoFieldFormat,
+  ExpoLinkFormatOverride,
+} from "@/lib/config";
 import { discoverLinkFields, LinkDiscoveryResult, LinkFieldCandidate, summarizeSettings } from "@/lib/expo-link";
 import { useToast } from "@/hooks/use-toast";
 
@@ -361,6 +368,7 @@ function LinkFieldsCard({ inside }: { inside: boolean }) {
           error={leadQ.error instanceof Error ? leadQ.error.message : leadQ.error ? String(leadQ.error) : undefined}
           data={leadQ.data}
           manualOverrideConfig={leadExpoFieldCode}
+          manualFormatConfig={leadExpoFieldFormat}
         />
         <LinkFieldBlock
           title="Сделки (crm.deal.fields)"
@@ -368,6 +376,7 @@ function LinkFieldsCard({ inside }: { inside: boolean }) {
           error={dealQ.error instanceof Error ? dealQ.error.message : dealQ.error ? String(dealQ.error) : undefined}
           data={dealQ.data}
           manualOverrideConfig={dealExpoFieldCode}
+          manualFormatConfig={dealExpoFieldFormat}
         />
       </CardContent>
     </Card>
@@ -380,12 +389,14 @@ function LinkFieldBlock({
   error,
   data,
   manualOverrideConfig,
+  manualFormatConfig,
 }: {
   title: string;
   loading: boolean;
   error?: string;
   data?: LinkDiscoveryResult;
   manualOverrideConfig: string | null;
+  manualFormatConfig: ExpoLinkFormatOverride;
 }) {
   const best = data?.bestCandidate;
   const top = (data?.candidates ?? []).slice(0, 10);
@@ -422,6 +433,17 @@ function LinkFieldBlock({
                     </>
                   )
                 : <span className="text-muted-foreground">не задан</span>}
+            </div>
+            <div className="mt-1">
+              <span className="text-[11px] uppercase tracking-wide text-muted-foreground">Format override: </span>
+              {manualFormatConfig
+                ? (
+                    <>
+                      <code>{manualFormatConfig}</code>{" "}
+                      <span className="text-emerald-700 dark:text-emerald-300">активен</span>
+                    </>
+                  )
+                : <span className="text-muted-foreground">не задан (пробуем все форматы)</span>}
             </div>
           </div>
 

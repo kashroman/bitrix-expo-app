@@ -1,5 +1,11 @@
 import { callBx, CrmField, listAllBx } from "./bitrix";
-import { EXPO_ENTITY_TYPE_ID, EXPO_LINK_FIELD, manualExpoFieldCode } from "./config";
+import {
+  EXPO_ENTITY_TYPE_ID,
+  EXPO_LINK_FIELD,
+  ExpoLinkFormatOverride,
+  manualExpoFieldCode,
+  manualExpoFieldFormat,
+} from "./config";
 
 export type LinkFieldCandidate = {
   code: string;
@@ -25,6 +31,8 @@ export type LinkFieldChoice = {
   usedFallback: boolean;
   manualOverride?: string;
   manualOverrideActive: boolean;
+  manualFormatOverride?: ExpoLinkFormatOverride;
+  manualFormatOverrideActive: boolean;
   warnings: string[];
   bestCandidate?: LinkFieldCandidate;
   totalCandidateCount: number;
@@ -205,8 +213,11 @@ async function tryListWithField(
   fieldCode: string,
   expoId: string | number,
   baseSelect: string[],
+  pinnedFormat?: ExpoLinkFormatOverride,
 ): Promise<{ rows: Record<string, unknown>[]; format: string; attempts: { format: string; count: number; error?: string }[] }> {
-  const formats = filterFormats(expoId);
+  const all = filterFormats(expoId);
+  const pinned = pinnedFormat ? all.find((f) => f.label === pinnedFormat) : undefined;
+  const formats = pinned ? [pinned] : all;
   const select = Array.from(new Set([...baseSelect, fieldCode]));
   const attempts: { format: string; count: number; error?: string }[] = [];
   for (const fmt of formats) {
@@ -217,11 +228,33 @@ async function tryListWithField(
         order: { ID: "DESC" },
       }, { maxPages: 20 });
       attempts.push({ format: fmt.label, count: rows.length });
+      // When a format is pinned, accept the result (even 0 rows) without probing
+      // further formats — the override is the source of truth.
+      if (pinned) return { rows, format: fmt.label, attempts };
       if (rows.length > 0) {
         return { rows, format: fmt.label, attempts };
       }
     } catch (err) {
       attempts.push({ format: fmt.label, count: 0, error: err instanceof Error ? err.message : String(err) });
+      // If a pinned format call errors, fall through to probing the remaining
+      // formats so diagnostics stay safe.
+      if (pinned) {
+        const rest = all.filter((f) => f.label !== pinned.label);
+        for (const fmt2 of rest) {
+          try {
+            const rows = await listAllBx<Record<string, unknown>>(method, {
+              filter: { [fieldCode]: fmt2.value },
+              select,
+              order: { ID: "DESC" },
+            }, { maxPages: 20 });
+            attempts.push({ format: fmt2.label, count: rows.length });
+            if (rows.length > 0) return { rows, format: fmt2.label, attempts };
+          } catch (err2) {
+            attempts.push({ format: fmt2.label, count: 0, error: err2 instanceof Error ? err2.message : String(err2) });
+          }
+        }
+        return { rows: [], format: "", attempts };
+      }
     }
   }
   return { rows: [], format: "", attempts };
@@ -240,6 +273,8 @@ export type LinkDiscoveryResult = {
   fields: Record<string, CrmField>;
   manualOverride?: string;
   manualOverrideActive: boolean;
+  manualFormatOverride?: ExpoLinkFormatOverride;
+  manualFormatOverrideActive: boolean;
   bestCandidate?: LinkFieldCandidate;
   warnings: string[];
   totalCandidateCount: number;
@@ -258,6 +293,7 @@ async function resolveLinkFieldsFor(
   const allCandidates = findLinkCandidates(fields);
   const warnings: string[] = [];
   const manualOverride = manualExpoFieldCode(entity) ?? undefined;
+  const manualFormatOverride = manualExpoFieldFormat(entity);
   let manualOverrideActive = false;
   let orderedCandidates = allCandidates;
   let bestCandidate: LinkFieldCandidate | undefined = allCandidates[0];
@@ -307,6 +343,8 @@ async function resolveLinkFieldsFor(
     hasCustom,
     manualOverride,
     manualOverrideActive,
+    manualFormatOverride: manualFormatOverride ?? undefined,
+    manualFormatOverrideActive: Boolean(manualFormatOverride),
     bestCandidate,
     warnings,
     totalCandidateCount: allCandidates.length,
@@ -328,6 +366,7 @@ export async function fetchLinkedEntities(
     hasCustom: false,
     usedFallback: false,
     manualOverrideActive: false,
+    manualFormatOverrideActive: false,
     warnings: [],
     totalCandidateCount: 0,
   };
@@ -339,16 +378,61 @@ export async function fetchLinkedEntities(
     choice.hasCustom = resolved.hasCustom;
     choice.manualOverride = resolved.manualOverride;
     choice.manualOverrideActive = resolved.manualOverrideActive;
+    choice.manualFormatOverride = resolved.manualFormatOverride;
+    choice.manualFormatOverrideActive = resolved.manualFormatOverrideActive;
     choice.warnings = [...resolved.warnings];
     choice.bestCandidate = resolved.bestCandidate;
     choice.totalCandidateCount = resolved.totalCandidateCount;
 
+    const pinnedFormat = resolved.manualFormatOverride ?? null;
+    const allFormats = filterFormats(expoId);
+    const pinnedEntry = pinnedFormat ? allFormats.find((f) => f.label === pinnedFormat) : undefined;
     const probeOrder = resolved.candidates.slice(0, 6);
 
     for (const candidate of probeOrder) {
-      const formats = filterFormats(expoId);
       const select = Array.from(new Set([...baseSelect, candidate.code]));
       let found = false;
+
+      // With a pinned format, try it first and accept whatever it returns
+      // (including 0 rows) without probing other formats for this candidate.
+      // Only a real API error triggers fallback probing.
+      if (pinnedEntry) {
+        let pinnedErrored = false;
+        try {
+          const list = await listAllBx<Record<string, unknown>>(listMethod, {
+            filter: { [candidate.code]: pinnedEntry.value },
+            select,
+            order: { ID: "DESC" },
+          }, { maxPages: 20 });
+          choice.attempted.push({ field: candidate.code, format: pinnedEntry.label, count: list.length });
+          if (list.length > 0) {
+            rows = list;
+            choice.chosenField = candidate.code;
+            choice.chosenFormat = pinnedEntry.label;
+            choice.usedFallback = isParentField(candidate.code);
+            choice.sampleValues = list.slice(0, 3).map((row) => ({
+              id: row.ID ? String(row.ID) : undefined,
+              value: row[candidate.code] ?? row[candidate.code.toLowerCase()],
+            }));
+            found = true;
+          }
+        } catch (err) {
+          pinnedErrored = true;
+          choice.attempted.push({
+            field: candidate.code,
+            format: pinnedEntry.label,
+            count: 0,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (found) break;
+        // Pinned call succeeded but returned 0 rows → skip this candidate
+        // without trying other formats (deterministic behavior).
+        if (!pinnedErrored) continue;
+        // Pinned errored → fall through to full-format probing below.
+      }
+
+      const formats = pinnedEntry ? allFormats.filter((f) => f.label !== pinnedEntry.label) : allFormats;
       for (const fmt of formats) {
         try {
           const list = await listAllBx<Record<string, unknown>>(listMethod, {
@@ -384,7 +468,7 @@ export async function fetchLinkedEntities(
     if (!choice.chosenField) {
       const fallback = EXPO_LINK_FIELD;
       if (!resolved.candidates.some((c) => c.code === fallback)) {
-        const attempt = await tryListWithField(listMethod, fallback, expoId, baseSelect);
+        const attempt = await tryListWithField(listMethod, fallback, expoId, baseSelect, pinnedFormat ?? undefined);
         for (const a of attempt.attempts) {
           choice.attempted.push({ field: fallback, format: a.format, count: a.count, error: a.error });
         }
