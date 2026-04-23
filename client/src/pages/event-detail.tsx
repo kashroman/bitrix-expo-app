@@ -20,7 +20,9 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
     enabled: inBitrix && Boolean(eventId),
   });
 
-  const title = agg.data?.expo.title ?? `Выставка #${eventId}`;
+  const foundData = agg.data && agg.data.status === "found" ? agg.data : undefined;
+  const notFoundData = agg.data && agg.data.status === "not-found" ? agg.data : undefined;
+  const title = foundData?.expo.title ?? `Выставка #${eventId}`;
 
   return (
     <Shell>
@@ -48,9 +50,18 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
           message={String((agg.error as Error)?.message ?? agg.error)}
           onRetry={() => agg.refetch()}
         />
-      ) : !agg.data ? (
-        <NotFoundState eventId={eventId} />
-      ) : (
+      ) : notFoundData ? (
+        <>
+          <NotFoundState eventId={eventId} errors={notFoundData.diagnostics.errors} />
+          <div className="mt-4">
+            <LinkDiagnosticsCard
+              leadChoice={notFoundData.diagnostics.lead}
+              dealChoice={notFoundData.diagnostics.deal}
+              errors={notFoundData.diagnostics.errors}
+            />
+          </div>
+        </>
+      ) : foundData ? (
         <>
           <div className="grid gap-4 lg:grid-cols-[1.1fr_.9fr]">
             <Card>
@@ -58,19 +69,19 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
                 <CardTitle className="text-lg">Информация о выставке</CardTitle>
               </CardHeader>
               <CardContent className="space-y-2 text-sm">
-                <FieldLine label="ID" value={String(agg.data.expo.id)} />
-                <FieldLine label="Название" value={agg.data.expo.title} />
-                <FieldLine label="Проведение" value={formatDateRange(agg.data.expo.expoStart, agg.data.expo.expoEnd)} />
-                <FieldLine label="Монтаж" value={formatDateRange(agg.data.expo.installStart, agg.data.expo.installEnd)} />
-                <FieldLine label="Демонтаж" value={formatDateRange(agg.data.expo.dismantleStart, agg.data.expo.dismantleEnd)} />
-                {agg.data.expo.responsibleId && (
-                  <FieldLine label="Ответственный ID" value={String(agg.data.expo.responsibleId)} />
+                <FieldLine label="ID" value={String(foundData.expo.id)} />
+                <FieldLine label="Название" value={foundData.expo.title} />
+                <FieldLine label="Проведение" value={formatDateRange(foundData.expo.expoStart, foundData.expo.expoEnd)} />
+                <FieldLine label="Монтаж" value={formatDateRange(foundData.expo.installStart, foundData.expo.installEnd)} />
+                <FieldLine label="Демонтаж" value={formatDateRange(foundData.expo.dismantleStart, foundData.expo.dismantleEnd)} />
+                {foundData.expo.responsibleId && (
+                  <FieldLine label="Ответственный ID" value={String(foundData.expo.responsibleId)} />
                 )}
                 <div className="pt-2">
                   <Button
                     variant="outline"
                     size="sm"
-                    onClick={() => openBitrixPath(`/crm/type/${EXPO_ENTITY_TYPE_ID}/details/${agg.data!.expo.id}/`)}
+                    onClick={() => openBitrixPath(`/crm/type/${EXPO_ENTITY_TYPE_ID}/details/${foundData.expo.id}/`)}
                     data-testid="button-open-in-bitrix"
                   >
                     <ExternalLink className="mr-2 h-4 w-4" />
@@ -86,10 +97,10 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
                   <CardTitle className="text-lg">KPI</CardTitle>
                 </CardHeader>
                 <CardContent className="grid grid-cols-2 gap-3 md:grid-cols-4">
-                  <Kpi label="Лидов" value={agg.data.leadStats.total} />
-                  <Kpi label="Успешных" value={agg.data.leadStats.success} tone="success" />
-                  <Kpi label="Сделок" value={agg.data.dealStats.total} />
-                  <Kpi label="Выигранных" value={agg.data.dealStats.won} tone="success" />
+                  <Kpi label="Лидов" value={foundData.leadStats.total} />
+                  <Kpi label="Успешных" value={foundData.leadStats.success} tone="success" />
+                  <Kpi label="Сделок" value={foundData.dealStats.total} />
+                  <Kpi label="Выигранных" value={foundData.dealStats.won} tone="success" />
                 </CardContent>
               </Card>
             </div>
@@ -105,7 +116,7 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
               </CardHeader>
               <CardContent>
                 <LeadFunnel
-                  stats={agg.data.leadStats}
+                  stats={foundData.leadStats}
                   onSelect={(group: LeadGroupKey) => {
                     window.location.hash = `/event/${eventId}/leads?group=${group}`;
                   }}
@@ -122,7 +133,7 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
               </CardHeader>
               <CardContent>
                 <DealFunnel
-                  stats={agg.data.dealStats}
+                  stats={foundData.dealStats}
                   onSelect={(group: DealGroupKey) => {
                     window.location.hash = `/event/${eventId}/deals?group=${group}`;
                   }}
@@ -133,13 +144,13 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
 
           <div className="mt-4">
             <LinkDiagnosticsCard
-              leadChoice={agg.data.diagnostics.lead}
-              dealChoice={agg.data.diagnostics.deal}
-              errors={agg.data.diagnostics.errors}
+              leadChoice={foundData.diagnostics.lead}
+              dealChoice={foundData.diagnostics.deal}
+              errors={foundData.diagnostics.errors}
             />
           </div>
         </>
-      )}
+      ) : null}
     </Shell>
   );
 }
@@ -184,7 +195,8 @@ function DemoState({ eventId }: { eventId: string }) {
   );
 }
 
-function NotFoundState({ eventId }: { eventId: string }) {
+function NotFoundState({ eventId, errors }: { eventId: string; errors?: string[] }) {
+  const hasErrors = Array.isArray(errors) && errors.length > 0;
   return (
     <Card data-testid="status-not-found">
       <CardHeader>
@@ -192,8 +204,19 @@ function NotFoundState({ eventId }: { eventId: string }) {
       </CardHeader>
       <CardContent className="space-y-3 text-sm">
         <p className="text-muted-foreground">
-          Возможно, элемент смарт-процесса удалён или у пользователя нет прав на чтение.
+          Возможно, элемент смарт-процесса удалён, у пользователя нет прав на чтение, либо метод{" "}
+          <code>crm.item.get</code> вернул ошибку.
         </p>
+        {hasErrors && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            <div className="font-medium">Подробности:</div>
+            <ul className="mt-1 list-disc pl-5">
+              {errors!.map((err, i) => (
+                <li key={i} className="break-all">{err}</li>
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="flex flex-wrap gap-2">
           <Link href="/calendar">
             <a>

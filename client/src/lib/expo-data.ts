@@ -51,18 +51,46 @@ export type DealStats = {
   byGroup: Record<DealGroupKey, CrmItem[]>;
 };
 
-export type ExpoAggregate = {
+export type ExpoAggregateDiagnostics = {
+  lead: LinkFieldChoice;
+  deal: LinkFieldChoice;
+  errors: string[];
+};
+
+export type ExpoAggregateFound = {
+  status: "found";
   expo: ExpoItem;
   leadStats: LeadStats;
   dealStats: DealStats;
   leads: CrmItem[];
   deals: CrmItem[];
-  diagnostics: {
-    lead: LinkFieldChoice;
-    deal: LinkFieldChoice;
-    errors: string[];
-  };
+  diagnostics: ExpoAggregateDiagnostics;
 };
+
+export type ExpoAggregateNotFound = {
+  status: "not-found";
+  expoId: string;
+  diagnostics: ExpoAggregateDiagnostics;
+};
+
+export type ExpoAggregate = ExpoAggregateFound | ExpoAggregateNotFound;
+
+export function isFoundAggregate(agg: ExpoAggregate | null | undefined): agg is ExpoAggregateFound {
+  return !!agg && agg.status === "found";
+}
+
+function emptyLinkChoice(entity: "lead" | "deal"): LinkFieldChoice {
+  return {
+    entity,
+    candidates: [],
+    attempted: [],
+    hasCustom: false,
+    usedFallback: false,
+    manualOverrideActive: false,
+    warnings: [],
+    totalCandidateCount: 0,
+  };
+}
 
 export type StatusRef = { id: string; title: string; entityId?: string };
 
@@ -119,18 +147,28 @@ export async function fetchExpoList(): Promise<ExpoItem[]> {
   return items.map(normalizeExpo);
 }
 
-export async function fetchExpo(id: string | number): Promise<ExpoItem | undefined> {
+export type FetchExpoOutcome =
+  | { status: "found"; expo: ExpoItem }
+  | { status: "not-found" }
+  | { status: "failed"; error: string };
+
+export async function fetchExpoOutcome(id: string | number): Promise<FetchExpoOutcome> {
   try {
     const data = await callBx<{ item: CrmItem }>("crm.item.get", {
       entityTypeId: EXPO_ENTITY_TYPE_ID,
       id,
       useOriginalUfNames: "N",
     });
-    if (!data?.item) return undefined;
-    return normalizeExpo(data.item);
-  } catch {
-    return undefined;
+    if (!data?.item) return { status: "not-found" };
+    return { status: "found", expo: normalizeExpo(data.item) };
+  } catch (err) {
+    return { status: "failed", error: err instanceof Error ? err.message : String(err) };
   }
+}
+
+export async function fetchExpo(id: string | number): Promise<ExpoItem | undefined> {
+  const outcome = await fetchExpoOutcome(id);
+  return outcome.status === "found" ? outcome.expo : undefined;
 }
 
 export async function fetchLeadsByExpo(expoId: string | number): Promise<CrmItem[]> {
@@ -282,16 +320,17 @@ export function dealGroupLabel(key: DealGroupKey) {
   return DEAL_GROUP_LABELS[key];
 }
 
-export async function buildExpoAggregate(expoId: string | number): Promise<ExpoAggregate | undefined> {
-  const expo = await fetchExpo(expoId);
-  if (!expo) return undefined;
-  const [leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
+export async function buildExpoAggregate(expoId: string | number): Promise<ExpoAggregate> {
+  const idStr = String(expoId);
+  const [expoRes, leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
+    fetchExpoOutcome(expoId),
     fetchLinkedEntities("lead", expoId),
     fetchLinkedEntities("deal", expoId),
     fetchLeadStatuses(),
     fetchDealStages(),
   ]);
   const errs: string[] = [];
+
   const leadOutcome = leadsRes.status === "fulfilled" ? leadsRes.value : undefined;
   const dealOutcome = dealsRes.status === "fulfilled" ? dealsRes.value : undefined;
   if (leadsRes.status === "rejected") {
@@ -300,34 +339,47 @@ export async function buildExpoAggregate(expoId: string | number): Promise<ExpoA
   if (dealsRes.status === "rejected") {
     errs.push(`deals: ${String((dealsRes.reason as Error)?.message ?? dealsRes.reason)}`);
   }
+  if (leadStatusesRes.status === "rejected") {
+    errs.push(`lead-statuses: ${String((leadStatusesRes.reason as Error)?.message ?? leadStatusesRes.reason)}`);
+  }
+  if (dealStagesRes.status === "rejected") {
+    errs.push(`deal-stages: ${String((dealStagesRes.reason as Error)?.message ?? dealStagesRes.reason)}`);
+  }
+
+  const leadChoice: LinkFieldChoice = leadOutcome?.choice ?? emptyLinkChoice("lead");
+  const dealChoice: LinkFieldChoice = dealOutcome?.choice ?? emptyLinkChoice("deal");
+
+  let expoError: string | undefined;
+  let expo: ExpoItem | undefined;
+  if (expoRes.status === "fulfilled") {
+    const out = expoRes.value;
+    if (out.status === "found") {
+      expo = out.expo;
+    } else if (out.status === "failed") {
+      expoError = out.error;
+    }
+  } else {
+    expoError = String((expoRes.reason as Error)?.message ?? expoRes.reason);
+  }
+  if (expoError) errs.push(`expo: ${expoError}`);
+
+  if (typeof console !== "undefined" && errs.length) console.warn("buildExpoAggregate partial failure", errs);
+
+  if (!expo) {
+    return {
+      status: "not-found",
+      expoId: idStr,
+      diagnostics: { lead: leadChoice, deal: dealChoice, errors: errs },
+    };
+  }
+
   const leads = (leadOutcome?.rows ?? []) as CrmItem[];
   const deals = (dealOutcome?.rows ?? []) as CrmItem[];
   const leadStatuses = leadStatusesRes.status === "fulfilled" ? leadStatusesRes.value : [];
   const dealStages = dealStagesRes.status === "fulfilled" ? dealStagesRes.value : [];
-  if (typeof console !== "undefined" && errs.length) console.warn("buildExpoAggregate partial failure", errs);
-
-  const leadChoice: LinkFieldChoice = leadOutcome?.choice ?? {
-    entity: "lead",
-    candidates: [],
-    attempted: [],
-    hasCustom: false,
-    usedFallback: false,
-    manualOverrideActive: false,
-    warnings: [],
-    totalCandidateCount: 0,
-  };
-  const dealChoice: LinkFieldChoice = dealOutcome?.choice ?? {
-    entity: "deal",
-    candidates: [],
-    attempted: [],
-    hasCustom: false,
-    usedFallback: false,
-    manualOverrideActive: false,
-    warnings: [],
-    totalCandidateCount: 0,
-  };
 
   return {
+    status: "found",
     expo,
     leads,
     deals,

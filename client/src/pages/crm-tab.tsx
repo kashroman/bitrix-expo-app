@@ -11,6 +11,7 @@ import {
   buildExpoAggregate,
   fetchDealById,
   fetchLeadById,
+  isFoundAggregate,
 } from "@/lib/expo-data";
 import {
   candidateExpoIdFromRecord,
@@ -69,6 +70,8 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
     queryFn: () => buildExpoAggregate(expoId!),
     enabled: isInsideBitrix() && Boolean(expoId),
   });
+  const foundAgg = isFoundAggregate(agg.data) ? agg.data : undefined;
+  const notFoundAgg = agg.data && agg.data.status === "not-found" ? agg.data : undefined;
 
   const label = entity === "deal" ? "сделки" : "лида";
 
@@ -77,7 +80,7 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
       <div className="mb-3 flex items-center justify-between gap-3">
         <div>
           <div className="text-xs uppercase tracking-[0.18em] text-primary">Вкладка {label}</div>
-          <div className="text-base font-semibold">{agg.data?.expo.title ?? "Аналитика по выставке"}</div>
+          <div className="text-base font-semibold">{foundAgg?.expo.title ?? "Аналитика по выставке"}</div>
         </div>
         <Button
           variant="outline"
@@ -135,26 +138,38 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
           <Empty text={`Ошибка загрузки выставки #${expoId}: ${String((agg.error as Error)?.message ?? agg.error)}`} />
           <Button variant="default" size="sm" onClick={() => agg.refetch()} data-testid="button-retry-agg">Повторить</Button>
         </CardContent></Card>
-      ) : !agg.data ? (
+      ) : notFoundAgg ? (
         <Card><CardContent className="space-y-3 p-4">
           <Empty text={`Связанная выставка #${expoId} не найдена в смарт-процессе.`} />
+          {notFoundAgg.diagnostics.errors.length > 0 && (
+            <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              {notFoundAgg.diagnostics.errors.join("; ")}
+            </div>
+          )}
+          <AggDiagnostics
+            leadChoice={notFoundAgg.diagnostics.lead}
+            dealChoice={notFoundAgg.diagnostics.deal}
+            errors={notFoundAgg.diagnostics.errors}
+            currentEntity={entity}
+            currentField={expoIdField}
+          />
           <Button variant="outline" size="sm" onClick={() => agg.refetch()} data-testid="button-retry-agg">Повторить</Button>
         </CardContent></Card>
-      ) : (
+      ) : foundAgg ? (
         <div className="grid gap-3 lg:grid-cols-[1fr_1fr_1fr]">
           <Card className="lg:col-span-1">
             <CardHeader><CardTitle className="text-base">Выставка</CardTitle></CardHeader>
             <CardContent className="space-y-1 text-sm">
-              <FieldLine label="Название" value={agg.data.expo.title} />
-              <FieldLine label="ID" value={String(agg.data.expo.id)} />
-              <FieldLine label="Проведение" value={formatDateRange(agg.data.expo.expoStart, agg.data.expo.expoEnd)} />
-              <FieldLine label="Монтаж" value={formatDateRange(agg.data.expo.installStart, agg.data.expo.installEnd)} />
-              <FieldLine label="Демонтаж" value={formatDateRange(agg.data.expo.dismantleStart, agg.data.expo.dismantleEnd)} />
+              <FieldLine label="Название" value={foundAgg.expo.title} />
+              <FieldLine label="ID" value={String(foundAgg.expo.id)} />
+              <FieldLine label="Проведение" value={formatDateRange(foundAgg.expo.expoStart, foundAgg.expo.expoEnd)} />
+              <FieldLine label="Монтаж" value={formatDateRange(foundAgg.expo.installStart, foundAgg.expo.installEnd)} />
+              <FieldLine label="Демонтаж" value={formatDateRange(foundAgg.expo.dismantleStart, foundAgg.expo.dismantleEnd)} />
               <div className="pt-2 flex flex-wrap gap-2">
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => openBitrixPath(`/crm/type/${EXPO_ENTITY_TYPE_ID}/details/${agg.data!.expo.id}/`)}
+                  onClick={() => openBitrixPath(`/crm/type/${EXPO_ENTITY_TYPE_ID}/details/${foundAgg.expo.id}/`)}
                   data-testid="button-open-expo"
                 >
                   <ExternalLink className="mr-1.5 h-3.5 w-3.5" />
@@ -163,7 +178,7 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => openAppInNewTab(`/event/${agg.data!.expo.id}`)}
+                  onClick={() => openAppInNewTab(`/event/${foundAgg.expo.id}`)}
                   data-testid="button-open-event"
                 >
                   Подробная сводка
@@ -176,8 +191,8 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
             <CardHeader><CardTitle className="text-base">Воронка лидов</CardTitle></CardHeader>
             <CardContent>
               <LeadFunnel
-                stats={agg.data.leadStats}
-                onSelect={(group: LeadGroupKey) => openAppInNewTab(`/event/${agg.data!.expo.id}/leads?group=${group}`)}
+                stats={foundAgg.leadStats}
+                onSelect={(group: LeadGroupKey) => openAppInNewTab(`/event/${foundAgg.expo.id}/leads?group=${group}`)}
               />
             </CardContent>
           </Card>
@@ -186,23 +201,23 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
             <CardHeader><CardTitle className="text-base">Воронка сделок</CardTitle></CardHeader>
             <CardContent>
               <DealFunnel
-                stats={agg.data.dealStats}
-                onSelect={(group: DealGroupKey) => openAppInNewTab(`/event/${agg.data!.expo.id}/deals?group=${group}`)}
+                stats={foundAgg.dealStats}
+                onSelect={(group: DealGroupKey) => openAppInNewTab(`/event/${foundAgg.expo.id}/deals?group=${group}`)}
               />
             </CardContent>
           </Card>
 
           <div className="lg:col-span-3">
             <AggDiagnostics
-              leadChoice={agg.data.diagnostics.lead}
-              dealChoice={agg.data.diagnostics.deal}
-              errors={agg.data.diagnostics.errors}
+              leadChoice={foundAgg.diagnostics.lead}
+              dealChoice={foundAgg.diagnostics.deal}
+              errors={foundAgg.diagnostics.errors}
               currentEntity={entity}
               currentField={expoIdField}
             />
           </div>
         </div>
-      )}
+      ) : null}
     </Shell>
   );
 }

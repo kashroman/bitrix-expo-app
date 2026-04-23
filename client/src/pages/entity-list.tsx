@@ -12,6 +12,7 @@ import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
 import {
   buildExpoAggregate,
   ExpoAggregate,
+  isFoundAggregate,
 } from "@/lib/expo-data";
 import {
   DEAL_GROUP_LABELS,
@@ -66,11 +67,13 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
   const initialGroup = useUrlParam("group") ?? "all";
   const inBitrix = isInsideBitrix();
 
-  const agg = useQuery<ExpoAggregate | undefined>({
+  const agg = useQuery<ExpoAggregate>({
     queryKey: ["expo-aggregate", Number(eventId)],
     queryFn: () => buildExpoAggregate(eventId),
     enabled: inBitrix && Boolean(eventId),
   });
+  const foundAgg = isFoundAggregate(agg.data) ? agg.data : undefined;
+  const notFoundAgg = agg.data && agg.data.status === "not-found" ? agg.data : undefined;
 
   const allColumns = entity === "lead" ? LEAD_COLUMNS : DEAL_COLUMNS;
   const [columns, setColumns] = useState<Set<string>>(
@@ -80,8 +83,8 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
   const [group, setGroup] = useState<string>(initialGroup);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set());
 
-  const rows = entity === "lead" ? agg.data?.leads ?? [] : agg.data?.deals ?? [];
-  const stats = entity === "lead" ? agg.data?.leadStats : agg.data?.dealStats;
+  const rows = entity === "lead" ? foundAgg?.leads ?? [] : foundAgg?.deals ?? [];
+  const stats = entity === "lead" ? foundAgg?.leadStats : foundAgg?.dealStats;
   const groupLabels = entity === "lead"
     ? (LEAD_GROUP_LABELS as Record<string, string>)
     : (DEAL_GROUP_LABELS as Record<string, string>);
@@ -179,7 +182,7 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
 
       <PageTitle
         eyebrow={entity === "lead" ? "Лиды" : "Сделки"}
-        title={agg.data?.expo.title ?? `Выставка #${eventId}`}
+        title={foundAgg?.expo.title ?? `Выставка #${eventId}`}
         description={`ID выставки: ${eventId}`}
       />
 
@@ -252,6 +255,27 @@ export default function EntityListPage({ params, entity }: { params: { eventId: 
                   <a>
                     <Button variant="outline" size="sm" data-testid="button-go-calendar">
                       <ArrowLeft className="mr-2 h-4 w-4" />К списку выставок
+                    </Button>
+                  </a>
+                </Link>
+              </div>
+            </div>
+          ) : notFoundAgg ? (
+            <div className="space-y-3" data-testid="status-not-found">
+              <Empty text={`Выставка #${eventId} не найдена или недоступна.`} />
+              {notFoundAgg.diagnostics.errors.length > 0 && (
+                <div className="rounded border border-amber-300 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                  {notFoundAgg.diagnostics.errors.join("; ")}
+                </div>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <Button variant="default" size="sm" onClick={() => agg.refetch()} data-testid="button-retry">
+                  Повторить
+                </Button>
+                <Link href={`/event/${eventId}`}>
+                  <a>
+                    <Button variant="outline" size="sm" data-testid="button-go-event">
+                      К сводке выставки
                     </Button>
                   </a>
                 </Link>

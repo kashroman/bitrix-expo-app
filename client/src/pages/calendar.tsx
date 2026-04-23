@@ -14,6 +14,7 @@ import {
   ExpoAggregate,
   ExpoItem,
   fetchExpoList,
+  isFoundAggregate,
 } from "@/lib/expo-data";
 import { formatDateRange } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
@@ -232,7 +233,7 @@ function StatsMini({ expoId }: { expoId: number }) {
     queryFn: () => buildExpoAggregate(expoId),
     enabled: isInsideBitrix(),
   });
-  const data = agg.data;
+  const data = isFoundAggregate(agg.data) ? agg.data : undefined;
   if (!data) return null;
   return (
     <div className="mt-1 flex gap-3 text-[11px] text-muted-foreground">
@@ -244,13 +245,14 @@ function StatsMini({ expoId }: { expoId: number }) {
 }
 
 function StatsCount({ expoId, kind }: { expoId: number; kind: "lead" | "deal" }) {
-  const agg = useQuery<ExpoAggregate | undefined>({
+  const agg = useQuery<ExpoAggregate>({
     queryKey: ["expo-aggregate", expoId],
     queryFn: () => buildExpoAggregate(expoId),
     enabled: isInsideBitrix(),
   });
-  if (!agg.data) return <span className="text-muted-foreground">…</span>;
-  const stats = kind === "lead" ? agg.data.leadStats : agg.data.dealStats;
+  const data = isFoundAggregate(agg.data) ? agg.data : undefined;
+  if (!data) return <span className="text-muted-foreground">…</span>;
+  const stats = kind === "lead" ? data.leadStats : data.dealStats;
   return <span className="font-medium">{stats.total}</span>;
 }
 
