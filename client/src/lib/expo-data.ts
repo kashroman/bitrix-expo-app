@@ -312,6 +312,9 @@ export async function buildExpoAggregate(expoId: string | number): Promise<ExpoA
     attempted: [],
     hasCustom: false,
     usedFallback: false,
+    manualOverrideActive: false,
+    warnings: [],
+    totalCandidateCount: 0,
   };
   const dealChoice: LinkFieldChoice = dealOutcome?.choice ?? {
     entity: "deal",
@@ -319,6 +322,9 @@ export async function buildExpoAggregate(expoId: string | number): Promise<ExpoA
     attempted: [],
     hasCustom: false,
     usedFallback: false,
+    manualOverrideActive: false,
+    warnings: [],
+    totalCandidateCount: 0,
   };
 
   return {

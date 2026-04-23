@@ -1,10 +1,13 @@
 import { callBx, CrmField, listAllBx } from "./bitrix";
-import { EXPO_ENTITY_TYPE_ID, EXPO_LINK_FIELD } from "./config";
+import { EXPO_ENTITY_TYPE_ID, EXPO_LINK_FIELD, manualExpoFieldCode } from "./config";
 
 export type LinkFieldCandidate = {
   code: string;
   title: string;
+  listLabel?: string;
+  formLabel?: string;
   type?: string;
+  userTypeId?: string;
   isCustom: boolean;
   settings?: Record<string, unknown>;
   score: number;
@@ -20,6 +23,11 @@ export type LinkFieldChoice = {
   sampleValues?: Array<{ id?: string; value?: unknown }>;
   hasCustom: boolean;
   usedFallback: boolean;
+  manualOverride?: string;
+  manualOverrideActive: boolean;
+  warnings: string[];
+  bestCandidate?: LinkFieldCandidate;
+  totalCandidateCount: number;
 };
 
 export type LinkFieldsCache = {
@@ -29,15 +37,28 @@ export type LinkFieldsCache = {
 
 const ru = (s?: string) => (s ?? "").toLocaleLowerCase("ru-RU");
 
-function titleMatchesExpoCalendar(title: string): number {
-  const t = ru(title);
-  if (!t) return 0;
-  const trimmed = t.trim();
-  if (trimmed === "выставка (календарь)" || trimmed === "выставка(календарь)") return 100;
-  const hasExpo = t.includes("выстав") || t.includes("expo") || t.includes("exhibition");
-  const hasCal = t.includes("календар") || t.includes("calendar");
-  if (hasExpo && hasCal) return 60;
-  if (hasExpo) return 20;
+function normalize(s: string): string {
+  return ru(s).replace(/[()\[\].,;:!?«»"'`]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function titleExpoCalendarScore(label: string): number {
+  const n = normalize(label);
+  if (!n) return 0;
+  // Exact normalized match to "выставка календарь"
+  if (n === "выставка календарь" || n === "выставка календарь ru" || n === "выставка календар") return 200;
+  const hasExpo = n.includes("выстав");
+  const hasCal = n.includes("календар");
+  if (hasExpo && hasCal) return 150;
+  if (hasExpo) return 10;
+  return 0;
+}
+
+function codeExpoCalendarScore(code: string): number {
+  const n = ru(code).replace(/_+/g, " ");
+  const hasExpo = n.includes("expo") || n.includes("exhibition") || n.includes("vystav") || n.includes("выстав");
+  const hasCal = n.includes("calendar") || n.includes("календар");
+  if (hasExpo && hasCal) return 40;
+  if (hasExpo) return 8;
   return 0;
 }
 
@@ -50,17 +71,39 @@ function isParentField(code: string): boolean {
   return code.toUpperCase().startsWith("PARENT_ID_");
 }
 
+function isCrmLikeField(field: CrmField): boolean {
+  const userType = (field.userTypeId ?? "").toLowerCase();
+  if (userType === "crm" || userType === "crm_entity" || userType === "element" || userType === "iblock_element") return true;
+  if ((field.type ?? "").toLowerCase() === "crm") return true;
+  const settings = field.settings as Record<string, unknown> | undefined;
+  if (!settings) return false;
+  const hasCrmKeys =
+    "parentEntityTypeId" in settings ||
+    "PARENT_ENTITY_TYPE_ID" in settings ||
+    "LEAD" in settings ||
+    "DEAL" in settings ||
+    "CONTACT" in settings ||
+    "COMPANY" in settings ||
+    "DYNAMIC" in settings;
+  return hasCrmKeys;
+}
+
 export function findLinkCandidates(fields: Record<string, CrmField>): LinkFieldCandidate[] {
   const out: LinkFieldCandidate[] = [];
   for (const [code, field] of Object.entries(fields ?? {})) {
     const title = field.title ?? code;
-    const titleScore = titleMatchesExpoCalendar(title);
-    const codeScore = titleMatchesExpoCalendar(code);
+    const listLabel = field.listLabel;
+    const formLabel = field.formLabel;
+    const filterLabel = field.filterLabel;
+    const labelCandidates = [title, listLabel, formLabel, filterLabel].filter(Boolean) as string[];
+    const titleScore = Math.max(0, ...labelCandidates.map(titleExpoCalendarScore));
+    const codeScore = codeExpoCalendarScore(code);
     const settings = (field.settings as Record<string, unknown> | undefined) ?? undefined;
     const settingsEntityType =
       Number(settings?.parentEntityTypeId ?? NaN) ||
       Number(settings?.ENTITY_TYPE_ID ?? NaN) ||
       Number(settings?.entityTypeId ?? NaN);
+    const crmLike = isCrmLikeField(field);
     const linksExpoByType = settingsEntityType === EXPO_ENTITY_TYPE_ID;
     const isParent = isParentField(code);
     const isUf = isCustomUfCode(code);
@@ -70,30 +113,42 @@ export function findLinkCandidates(fields: Record<string, CrmField>): LinkFieldC
 
     if (titleScore) {
       score += titleScore;
-      reasons.push(`title "${title}" matches expo-calendar (${titleScore})`);
+      reasons.push(`label matches expo-calendar (+${titleScore})`);
     }
     if (codeScore) {
-      score += Math.floor(codeScore / 2);
-      reasons.push(`code "${code}" matches expo-calendar (${Math.floor(codeScore / 2)})`);
+      score += codeScore;
+      reasons.push(`code matches (+${codeScore})`);
     }
     if (linksExpoByType) {
-      score += 40;
-      reasons.push(`settings link to entityTypeId=${EXPO_ENTITY_TYPE_ID}`);
+      if (crmLike) {
+        score += 80;
+        reasons.push(`CRM-link field with parentEntityTypeId=${EXPO_ENTITY_TYPE_ID} (+80)`);
+      } else {
+        score += 10;
+        reasons.push(`settings.parentEntityTypeId=${EXPO_ENTITY_TYPE_ID} but field not CRM-like (+10)`);
+      }
     }
     if (isUf) {
-      score += 10;
-      reasons.push("is user field");
+      score += 5;
+      reasons.push("UF field (+5)");
     }
     if (isParent) {
       score -= 20;
-      reasons.push("is PARENT_ID_* (downweighted vs UF)");
+      reasons.push("PARENT_ID_* (-20)");
+    }
+    if (!titleScore && !codeScore && !linksExpoByType && !isParent) {
+      // Not relevant enough to include
+      continue;
     }
     if (score <= 0 && !isParent) continue;
 
     out.push({
       code,
       title,
+      listLabel,
+      formLabel,
       type: field.type,
+      userTypeId: field.userTypeId,
       isCustom: isUf,
       settings,
       score,
@@ -150,9 +205,10 @@ async function tryListWithField(
   fieldCode: string,
   expoId: string | number,
   baseSelect: string[],
-): Promise<{ rows: Record<string, unknown>[]; format: string; error?: string }> {
+): Promise<{ rows: Record<string, unknown>[]; format: string; attempts: { format: string; count: number; error?: string }[] }> {
   const formats = filterFormats(expoId);
   const select = Array.from(new Set([...baseSelect, fieldCode]));
+  const attempts: { format: string; count: number; error?: string }[] = [];
   for (const fmt of formats) {
     try {
       const rows = await listAllBx<Record<string, unknown>>(method, {
@@ -160,14 +216,15 @@ async function tryListWithField(
         select,
         order: { ID: "DESC" },
       }, { maxPages: 20 });
+      attempts.push({ format: fmt.label, count: rows.length });
       if (rows.length > 0) {
-        return { rows, format: fmt.label };
+        return { rows, format: fmt.label, attempts };
       }
     } catch (err) {
-      return { rows: [], format: fmt.label, error: err instanceof Error ? err.message : String(err) };
+      attempts.push({ format: fmt.label, count: 0, error: err instanceof Error ? err.message : String(err) });
     }
   }
-  return { rows: [], format: "" };
+  return { rows: [], format: "", attempts };
 }
 
 export type EntityFetchOutcome = {
@@ -176,11 +233,19 @@ export type EntityFetchOutcome = {
   choice: LinkFieldChoice;
 };
 
-export async function discoverLinkFields(entity: "lead" | "deal"): Promise<{
+export type LinkDiscoveryResult = {
   candidates: LinkFieldCandidate[];
+  allCandidates: LinkFieldCandidate[];
   hasCustom: boolean;
   fields: Record<string, CrmField>;
-}> {
+  manualOverride?: string;
+  manualOverrideActive: boolean;
+  bestCandidate?: LinkFieldCandidate;
+  warnings: string[];
+  totalCandidateCount: number;
+};
+
+export async function discoverLinkFields(entity: "lead" | "deal"): Promise<LinkDiscoveryResult> {
   const method = entity === "lead" ? "crm.lead.fields" : "crm.deal.fields";
   return resolveLinkFieldsFor(entity, method);
 }
@@ -188,15 +253,64 @@ export async function discoverLinkFields(entity: "lead" | "deal"): Promise<{
 async function resolveLinkFieldsFor(
   entity: "lead" | "deal",
   method: "crm.lead.fields" | "crm.deal.fields",
-): Promise<{ fields: Record<string, CrmField>; candidates: LinkFieldCandidate[]; hasCustom: boolean }> {
+): Promise<LinkDiscoveryResult> {
   const fields = await callBx<Record<string, CrmField>>(method, {});
   const allCandidates = findLinkCandidates(fields);
+  const warnings: string[] = [];
+  const manualOverride = manualExpoFieldCode(entity) ?? undefined;
+  let manualOverrideActive = false;
+  let orderedCandidates = allCandidates;
+  let bestCandidate: LinkFieldCandidate | undefined = allCandidates[0];
+
+  if (manualOverride) {
+    const manualField = fields[manualOverride];
+    if (manualField) {
+      manualOverrideActive = true;
+      const override: LinkFieldCandidate = {
+        code: manualOverride,
+        title: manualField.title ?? manualOverride,
+        listLabel: manualField.listLabel,
+        formLabel: manualField.formLabel,
+        type: manualField.type,
+        userTypeId: manualField.userTypeId,
+        isCustom: isCustomUfCode(manualOverride),
+        settings: manualField.settings,
+        score: 9999,
+        reason: "manual override from config",
+      };
+      orderedCandidates = [override, ...allCandidates.filter((c) => c.code !== manualOverride)];
+      bestCandidate = override;
+    } else {
+      warnings.push(`manual override ${manualOverride} not present in ${method}`);
+    }
+  }
+
   const hasCustom = allCandidates.some((c) => c.isCustom && c.score > 0);
-  const customCandidates = allCandidates.filter((c) => c.isCustom && c.score > 0);
-  const parentCandidates = allCandidates.filter((c) => isParentField(c.code));
-  const ordered = [...customCandidates, ...parentCandidates];
-  void entity;
-  return { fields, candidates: ordered.length ? ordered : allCandidates, hasCustom };
+
+  if (!manualOverrideActive && bestCandidate) {
+    if (bestCandidate.score < 60) {
+      warnings.push(`best candidate score is low (${bestCandidate.score})`);
+    }
+    const tiedTop = allCandidates.filter((c) => c.score === bestCandidate!.score);
+    if (tiedTop.length > 1) {
+      warnings.push(`${tiedTop.length} candidates tied at top score ${bestCandidate.score}`);
+    }
+  }
+  if (!bestCandidate && !manualOverrideActive) {
+    warnings.push("no expo-calendar candidates discovered");
+  }
+
+  return {
+    fields,
+    candidates: orderedCandidates,
+    allCandidates,
+    hasCustom,
+    manualOverride,
+    manualOverrideActive,
+    bestCandidate,
+    warnings,
+    totalCandidateCount: allCandidates.length,
+  };
 }
 
 export async function fetchLinkedEntities(
@@ -213,6 +327,9 @@ export async function fetchLinkedEntities(
     attempted: [],
     hasCustom: false,
     usedFallback: false,
+    manualOverrideActive: false,
+    warnings: [],
+    totalCandidateCount: 0,
   };
   let rows: Record<string, unknown>[] = [];
 
@@ -220,8 +337,15 @@ export async function fetchLinkedEntities(
     const resolved = await resolveLinkFieldsFor(entity, method);
     choice.candidates = resolved.candidates;
     choice.hasCustom = resolved.hasCustom;
+    choice.manualOverride = resolved.manualOverride;
+    choice.manualOverrideActive = resolved.manualOverrideActive;
+    choice.warnings = [...resolved.warnings];
+    choice.bestCandidate = resolved.bestCandidate;
+    choice.totalCandidateCount = resolved.totalCandidateCount;
 
-    for (const candidate of resolved.candidates) {
+    const probeOrder = resolved.candidates.slice(0, 6);
+
+    for (const candidate of probeOrder) {
       const formats = filterFormats(expoId);
       const select = Array.from(new Set([...baseSelect, candidate.code]));
       let found = false;
@@ -237,9 +361,7 @@ export async function fetchLinkedEntities(
             rows = list;
             choice.chosenField = candidate.code;
             choice.chosenFormat = fmt.label;
-            choice.usedFallback = isParentField(candidate.code) && resolved.hasCustom === false
-              ? false
-              : isParentField(candidate.code);
+            choice.usedFallback = isParentField(candidate.code) && !resolved.hasCustom ? false : isParentField(candidate.code);
             choice.sampleValues = list.slice(0, 3).map((row) => ({
               id: row.ID ? String(row.ID) : undefined,
               value: row[candidate.code] ?? row[candidate.code.toLowerCase()],
@@ -263,7 +385,9 @@ export async function fetchLinkedEntities(
       const fallback = EXPO_LINK_FIELD;
       if (!resolved.candidates.some((c) => c.code === fallback)) {
         const attempt = await tryListWithField(listMethod, fallback, expoId, baseSelect);
-        choice.attempted.push({ field: fallback, format: attempt.format || "none", count: attempt.rows.length, error: attempt.error });
+        for (const a of attempt.attempts) {
+          choice.attempted.push({ field: fallback, format: a.format, count: a.count, error: a.error });
+        }
         if (attempt.rows.length > 0) {
           rows = attempt.rows;
           choice.chosenField = fallback;
@@ -276,6 +400,10 @@ export async function fetchLinkedEntities(
         }
       }
     }
+
+    if (!choice.chosenField) {
+      choice.warnings.push("no rows returned for any candidate/format");
+    }
   } catch (err) {
     choice.attempted.push({
       field: "(fields-discovery)",
@@ -283,6 +411,7 @@ export async function fetchLinkedEntities(
       count: 0,
       error: err instanceof Error ? err.message : String(err),
     });
+    choice.warnings.push(err instanceof Error ? err.message : String(err));
   }
 
   return { entity, rows, choice };
@@ -326,4 +455,20 @@ export function candidateExpoIdFromRecord(record: Record<string, unknown> | unde
     if (value) return { value, field: code };
   }
   return undefined;
+}
+
+export function readRecordFieldValue(record: Record<string, unknown> | undefined, code: string): unknown {
+  if (!record || !code) return undefined;
+  return record[code] ?? record[code.toLowerCase()] ?? record[code.toUpperCase()];
+}
+
+export function summarizeSettings(settings: Record<string, unknown> | undefined): string {
+  if (!settings) return "";
+  const keys = Object.keys(settings);
+  if (keys.length === 0) return "";
+  const picked = ["parentEntityTypeId", "PARENT_ENTITY_TYPE_ID", "entityTypeId", "ENTITY_TYPE_ID", "DISPLAY", "DEFAULT_VALUE"]
+    .filter((k) => k in settings)
+    .map((k) => `${k}=${JSON.stringify(settings[k])}`);
+  if (picked.length) return picked.join(", ");
+  return keys.slice(0, 3).map((k) => `${k}=${JSON.stringify(settings[k])}`).join(", ");
 }

@@ -2,6 +2,13 @@ export const EXPO_ENTITY_TYPE_ID = 1050;
 
 export const EXPO_LINK_FIELD = "PARENT_ID_1050";
 
+export const leadExpoFieldCode: string | null = null;
+export const dealExpoFieldCode: string | null = null;
+
+export function manualExpoFieldCode(entity: "lead" | "deal"): string | null {
+  return entity === "lead" ? leadExpoFieldCode : dealExpoFieldCode;
+}
+
 export const EXPO_DATE_FIELDS = {
   eventStart: "ufCrm8_1766066484758",
   eventEnd: "ufCrm8_1766066501630",

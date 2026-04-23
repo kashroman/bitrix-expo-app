@@ -16,6 +16,8 @@ import {
   candidateExpoIdFromRecord,
   discoverLinkFields,
   LinkFieldCandidate,
+  LinkDiscoveryResult,
+  readRecordFieldValue,
 } from "@/lib/expo-link";
 import { EXPO_ENTITY_TYPE_ID, LeadGroupKey, DealGroupKey } from "@/lib/config";
 import {
@@ -53,6 +55,9 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
           attempted: [],
           hasCustom: linkDiscovery.data.hasCustom,
           usedFallback: false,
+          manualOverrideActive: linkDiscovery.data.manualOverrideActive,
+          warnings: linkDiscovery.data.warnings,
+          totalCandidateCount: linkDiscovery.data.totalCandidateCount,
         }
       : undefined;
     const picked = candidateExpoIdFromRecord(entityQuery.data, choice);
@@ -117,8 +122,7 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
             <Empty text={`У ${label} не указана связанная выставка.`} />
             <LinkDiagnostics
               entity={entity}
-              candidates={linkDiscovery.data?.candidates ?? []}
-              hasCustom={linkDiscovery.data?.hasCustom ?? false}
+              discovery={linkDiscovery.data}
               record={entityQuery.data}
               chosenField={undefined}
             />
@@ -224,15 +228,22 @@ function AggDiagnostics({
           Лиды → поле: <code>{leadChoice.chosenField ?? "—"}</code>, формат:{" "}
           <code>{leadChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {leadChoice.candidates.filter((c) => c.isCustom).length},
           fallback: {leadChoice.usedFallback ? "да" : "нет"}
+          {leadChoice.manualOverrideActive ? " · override активен" : ""}
         </div>
         <div>
           Сделки → поле: <code>{dealChoice.chosenField ?? "—"}</code>, формат:{" "}
           <code>{dealChoice.chosenFormat ?? "—"}</code>, кастомных кандидатов: {dealChoice.candidates.filter((c) => c.isCustom).length},
           fallback: {dealChoice.usedFallback ? "да" : "нет"}
+          {dealChoice.manualOverrideActive ? " · override активен" : ""}
         </div>
         <div>
           Текущая вкладка ({currentEntity}): поле на записи — <code>{currentField ?? "—"}</code>
         </div>
+        {(leadChoice.warnings?.length || dealChoice.warnings?.length) ? (
+          <div className="text-amber-700 dark:text-amber-300">
+            {[...(leadChoice.warnings ?? []).map((w) => `лид: ${w}`), ...(dealChoice.warnings ?? []).map((w) => `сделка: ${w}`)].join("; ")}
+          </div>
+        ) : null}
         {errors.length > 0 && (
           <div className="text-red-600">Ошибки: {errors.join("; ")}</div>
         )}
@@ -243,37 +254,76 @@ function AggDiagnostics({
 
 function LinkDiagnostics({
   entity,
-  candidates,
-  hasCustom,
+  discovery,
   record,
   chosenField,
 }: {
   entity: "deal" | "lead";
-  candidates: LinkFieldCandidate[];
-  hasCustom: boolean;
+  discovery: LinkDiscoveryResult | undefined;
   record: Record<string, unknown> | undefined;
   chosenField?: string;
 }) {
+  const candidates = discovery?.candidates ?? [];
+  const hasCustom = discovery?.hasCustom ?? false;
+  const best = discovery?.bestCandidate;
   const topCandidates = candidates.slice(0, 6);
+
+  const checkedCode = chosenField ?? best?.code;
+  const checkedValueRaw = checkedCode ? readRecordFieldValue(record, checkedCode) : undefined;
+  const checkedValueEmpty =
+    checkedValueRaw === undefined || checkedValueRaw === null || checkedValueRaw === "" || checkedValueRaw === "0";
+
   return (
     <div className="rounded-md border bg-muted/30 p-3 text-xs">
-      <div className="mb-1 font-medium">Диагностика поля «Выставка (календарь)» для {entity === "deal" ? "сделки" : "лида"}</div>
-      <div className="text-muted-foreground">
-        Найдены кастомные UF: {hasCustom ? "да" : "нет"}. {chosenField ? `Использовано поле: ${chosenField}.` : ""}
+      <div className="mb-1 font-medium">
+        Диагностика поля «Выставка (календарь)» для {entity === "deal" ? "сделки" : "лида"}
       </div>
+
+      {checkedCode ? (
+        <div className="rounded border bg-background/60 p-2">
+          <div>
+            Проверено поле: <code>{checkedCode}</code>
+            {best && best.code === checkedCode && best.title ? (
+              <> · <span className="text-muted-foreground">{best.title}</span></>
+            ) : null}
+          </div>
+          <div>
+            Значение на записи:{" "}
+            {checkedValueEmpty ? (
+              <span className="text-muted-foreground">— (пусто)</span>
+            ) : (
+              <span className="text-emerald-700 dark:text-emerald-300">{JSON.stringify(checkedValueRaw)}</span>
+            )}
+          </div>
+        </div>
+      ) : (
+        <div className="text-muted-foreground">Поле для проверки не выбрано (нет кандидатов).</div>
+      )}
+
+      <div className="mt-2 text-muted-foreground">
+        Найдены кастомные UF: {hasCustom ? "да" : "нет"}. Всего кандидатов: {discovery?.totalCandidateCount ?? candidates.length}.
+        {discovery?.manualOverride ? (
+          <> Ручной override: <code>{discovery.manualOverride}</code>{" "}
+            {discovery.manualOverrideActive ? "(активен)" : "(не найден в fields)"}.
+          </>
+        ) : null}
+      </div>
+
+      {discovery?.warnings && discovery.warnings.length > 0 && (
+        <div className="mt-1 text-amber-700 dark:text-amber-300">{discovery.warnings.join("; ")}</div>
+      )}
+
       {topCandidates.length === 0 ? (
         <div className="mt-2 text-muted-foreground">
           Кандидатов не найдено. Проверьте, что у поля есть заголовок, содержащий «Выставка (календарь)».
         </div>
       ) : (
         <ul className="mt-2 space-y-1">
-          {topCandidates.map((candidate) => {
-            const raw = record
-              ? record[candidate.code] ?? record[candidate.code.toLowerCase()] ?? record[candidate.code.toUpperCase()]
-              : undefined;
+          {topCandidates.map((candidate: LinkFieldCandidate) => {
+            const raw = readRecordFieldValue(record, candidate.code);
             return (
               <li key={candidate.code} className="break-all">
-                <span className="font-medium">{candidate.code}</span> · {candidate.title} · type={candidate.type ?? "—"} ·
+                <span className="font-medium">{candidate.code}</span> · {candidate.title || "—"} · type={candidate.type ?? "—"} ·
                 score={candidate.score}
                 {raw !== undefined && raw !== null && raw !== "" ? (
                   <> · <span className="text-emerald-700 dark:text-emerald-300">value={JSON.stringify(raw)}</span></>

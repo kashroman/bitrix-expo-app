@@ -14,6 +14,10 @@ export type PlacementInfo = {
 export type CrmField = {
   type?: string;
   title?: string;
+  listLabel?: string;
+  formLabel?: string;
+  filterLabel?: string;
+  userTypeId?: string;
   isReadOnly?: boolean;
   isImmutable?: boolean;
   isMultiple?: boolean;

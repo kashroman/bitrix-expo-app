@@ -18,8 +18,8 @@ import {
   listRegisteredPlacements,
   RegisteredHandler,
 } from "@/lib/bitrix";
-import { EXPO_ENTITY_TYPE_ID } from "@/lib/config";
-import { discoverLinkFields, LinkFieldCandidate } from "@/lib/expo-link";
+import { EXPO_ENTITY_TYPE_ID, leadExpoFieldCode, dealExpoFieldCode } from "@/lib/config";
+import { discoverLinkFields, LinkDiscoveryResult, LinkFieldCandidate, summarizeSettings } from "@/lib/expo-link";
 import { useToast } from "@/hooks/use-toast";
 
 type InstallTargetHandler = {
@@ -349,7 +349,7 @@ function LinkFieldsCard({ inside }: { inside: boolean }) {
   return (
     <Card className="mt-6" data-testid="card-link-fields">
       <CardHeader>
-        <CardTitle className="text-base">Поля связи «Выставка (календарь)» (автоопределение)</CardTitle>
+        <CardTitle className="text-base">Связь лидов/сделок через поле «Выставка (календарь)»</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-xs">
         {!inside && (
@@ -359,15 +359,15 @@ function LinkFieldsCard({ inside }: { inside: boolean }) {
           title="Лиды (crm.lead.fields)"
           loading={leadQ.isLoading}
           error={leadQ.error instanceof Error ? leadQ.error.message : leadQ.error ? String(leadQ.error) : undefined}
-          candidates={leadQ.data?.candidates ?? []}
-          hasCustom={leadQ.data?.hasCustom ?? false}
+          data={leadQ.data}
+          manualOverrideConfig={leadExpoFieldCode}
         />
         <LinkFieldBlock
           title="Сделки (crm.deal.fields)"
           loading={dealQ.isLoading}
           error={dealQ.error instanceof Error ? dealQ.error.message : dealQ.error ? String(dealQ.error) : undefined}
-          candidates={dealQ.data?.candidates ?? []}
-          hasCustom={dealQ.data?.hasCustom ?? false}
+          data={dealQ.data}
+          manualOverrideConfig={dealExpoFieldCode}
         />
       </CardContent>
     </Card>
@@ -378,15 +378,22 @@ function LinkFieldBlock({
   title,
   loading,
   error,
-  candidates,
-  hasCustom,
+  data,
+  manualOverrideConfig,
 }: {
   title: string;
   loading: boolean;
   error?: string;
-  candidates: LinkFieldCandidate[];
-  hasCustom: boolean;
+  data?: LinkDiscoveryResult;
+  manualOverrideConfig: string | null;
 }) {
+  const best = data?.bestCandidate;
+  const top = (data?.candidates ?? []).slice(0, 10);
+  const allCandidates = data?.allCandidates ?? [];
+  const totalCount = data?.totalCandidateCount ?? 0;
+  const overrideActive = Boolean(data?.manualOverrideActive);
+  const warnings = data?.warnings ?? [];
+
   return (
     <div className="rounded-md border bg-muted/30 p-3">
       <div className="font-medium">{title}</div>
@@ -394,35 +401,127 @@ function LinkFieldBlock({
         <div className="mt-1 text-muted-foreground">Загрузка…</div>
       ) : error ? (
         <div className="mt-1 text-red-600">{error}</div>
+      ) : !data ? (
+        <div className="mt-1 text-muted-foreground">Нет данных.</div>
       ) : (
         <>
-          <div className="mt-1 text-muted-foreground">
-            Найдено кастомных UF: {hasCustom ? "да" : "нет"}. Всего кандидатов: {candidates.length}.
+          <div className="mt-2 rounded border bg-background/60 p-2">
+            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              Ручной override (config.ts)
+            </div>
+            <div>
+              {manualOverrideConfig
+                ? (
+                    <>
+                      code: <code>{manualOverrideConfig}</code> ·{" "}
+                      {overrideActive ? (
+                        <span className="text-emerald-700 dark:text-emerald-300">активен (найден в fields)</span>
+                      ) : (
+                        <span className="text-amber-700 dark:text-amber-300">задан, но отсутствует в fields</span>
+                      )}
+                    </>
+                  )
+                : <span className="text-muted-foreground">не задан</span>}
+            </div>
           </div>
-          {candidates.length === 0 ? (
+
+          <div className="mt-2 rounded border bg-background/60 p-2">
+            <div className="text-[11px] uppercase tracking-wide text-muted-foreground">
+              Выбранное/лучшее поле
+            </div>
+            {best ? (
+              <div className="grid gap-0.5">
+                <div><span className="text-muted-foreground">code:</span> <code>{best.code}</code></div>
+                <div><span className="text-muted-foreground">title:</span> {best.title || "—"}</div>
+                {best.listLabel && <div><span className="text-muted-foreground">listLabel:</span> {best.listLabel}</div>}
+                {best.formLabel && <div><span className="text-muted-foreground">formLabel:</span> {best.formLabel}</div>}
+                <div>
+                  <span className="text-muted-foreground">type:</span> {best.type ?? "—"} ·{" "}
+                  <span className="text-muted-foreground">userTypeId:</span> {best.userTypeId ?? "—"}
+                </div>
+                <div>
+                  <span className="text-muted-foreground">score:</span> {best.score} ·{" "}
+                  <span className="text-muted-foreground">reason:</span> {best.reason}
+                </div>
+              </div>
+            ) : (
+              <div className="text-muted-foreground">— кандидатов не найдено —</div>
+            )}
+          </div>
+
+          <div className="mt-2 text-muted-foreground">
+            Найдено кастомных UF: {data.hasCustom ? "да" : "нет"}. Всего кандидатов: {totalCount}.
+          </div>
+
+          {warnings.length > 0 && (
+            <div className="mt-2 rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+              <div className="font-medium">Предупреждения</div>
+              <ul className="list-disc pl-4">
+                {warnings.map((w, i) => <li key={i}>{w}</li>)}
+              </ul>
+            </div>
+          )}
+
+          <div className="mt-2 text-[11px] uppercase tracking-wide text-muted-foreground">
+            Топ-{Math.min(top.length, 10)} кандидатов (по score)
+          </div>
+          {top.length === 0 ? (
             <div className="mt-1 text-muted-foreground">
               Нет полей, подходящих под «Выставка (календарь)» или привязку к entityTypeId=1050.
             </div>
           ) : (
-            <ul className="mt-2 space-y-1">
-              {candidates.slice(0, 8).map((c) => (
-                <li key={c.code} className="break-all">
-                  <code>{c.code}</code> · {c.title} · type={c.type ?? "—"} · score={c.score}
-                  {c.isCustom ? " · UF" : ""}
-                  <div className="text-muted-foreground">{c.reason}</div>
-                  {c.settings && Object.keys(c.settings).length > 0 && (
-                    <details>
-                      <summary className="cursor-pointer text-muted-foreground">settings</summary>
-                      <pre className="mt-1 whitespace-pre-wrap text-[10px]">{JSON.stringify(c.settings, null, 2)}</pre>
-                    </details>
-                  )}
-                </li>
+            <ol className="mt-1 space-y-1">
+              {top.map((c) => (
+                <CandidateRow key={c.code} candidate={c} />
               ))}
-            </ul>
+            </ol>
+          )}
+
+          {allCandidates.length > top.length && (
+            <details className="mt-2">
+              <summary className="cursor-pointer text-muted-foreground">
+                Остальные кандидаты ({allCandidates.length - top.length})
+              </summary>
+              <ol className="mt-1 space-y-1">
+                {allCandidates.slice(top.length).map((c) => (
+                  <CandidateRow key={c.code} candidate={c} />
+                ))}
+              </ol>
+            </details>
           )}
         </>
       )}
     </div>
+  );
+}
+
+function CandidateRow({ candidate }: { candidate: LinkFieldCandidate }) {
+  return (
+    <li className="break-all rounded border bg-background/40 p-1.5">
+      <div>
+        <code>{candidate.code}</code> · score={candidate.score}
+        {candidate.isCustom ? " · UF" : ""}
+      </div>
+      <div>
+        <span className="text-muted-foreground">title:</span> {candidate.title || "—"}
+        {candidate.listLabel ? <> · <span className="text-muted-foreground">listLabel:</span> {candidate.listLabel}</> : null}
+        {candidate.formLabel ? <> · <span className="text-muted-foreground">formLabel:</span> {candidate.formLabel}</> : null}
+      </div>
+      <div>
+        <span className="text-muted-foreground">type:</span> {candidate.type ?? "—"} ·{" "}
+        <span className="text-muted-foreground">userTypeId:</span> {candidate.userTypeId ?? "—"}
+      </div>
+      <div className="text-muted-foreground">{candidate.reason}</div>
+      {candidate.settings && Object.keys(candidate.settings).length > 0 && (
+        <>
+          <div><span className="text-muted-foreground">settings:</span> {summarizeSettings(candidate.settings) || "(см. ниже)"}</div>
+          <details>
+            <summary className="cursor-pointer text-muted-foreground">settings JSON</summary>
+            <pre className="mt-1 whitespace-pre-wrap text-[10px]">{JSON.stringify(candidate.settings, null, 2)}</pre>
+          </details>
+        </>
+      )}
+    </li>
   );
 }
 

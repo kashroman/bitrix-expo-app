@@ -260,42 +260,83 @@ function LinkDiagnosticsCard({
 
 function ChoiceBlock({ title, choice }: { title: string; choice: LinkFieldChoice }) {
   const customCount = choice.candidates.filter((c) => c.isCustom).length;
+  const noResults = choice.attempted.length > 0 && choice.attempted.every((a) => a.count === 0);
+  const chosenCount = choice.attempted.find(
+    (a) => a.field === choice.chosenField && a.format === choice.chosenFormat,
+  )?.count ?? 0;
   return (
     <div className="rounded-md border bg-muted/30 p-3">
       <div className="font-medium">{title}</div>
       <div className="mt-1 grid gap-1">
         <div>
-          Выбранное поле: <code>{choice.chosenField ?? "—"}</code>, формат:{" "}
-          <code>{choice.chosenFormat ?? "—"}</code>, записей:{" "}
-          {choice.attempted.find((a) => a.field === choice.chosenField && a.format === choice.chosenFormat)?.count ?? 0}
-          {choice.usedFallback ? " (fallback на PARENT_ID)" : ""}
+          Выбранное поле: <code>{choice.chosenField ?? "—"}</code>
+          {choice.bestCandidate && choice.bestCandidate.code === choice.chosenField && choice.bestCandidate.title ? (
+            <> · title: <span className="text-muted-foreground">{choice.bestCandidate.title}</span></>
+          ) : null}
         </div>
         <div>
-          Кастомных UF-кандидатов: {customCount}, всего кандидатов: {choice.candidates.length}
+          Формат фильтра: <code>{choice.chosenFormat ?? "—"}</code>, записей: {chosenCount}
+          {choice.usedFallback ? " (fallback на PARENT_ID)" : ""}
         </div>
+        {choice.manualOverride ? (
+          <div>
+            Ручной override (config): <code>{choice.manualOverride}</code> ·{" "}
+            {choice.manualOverrideActive ? (
+              <span className="text-emerald-700 dark:text-emerald-300">активен</span>
+            ) : (
+              <span className="text-amber-700 dark:text-amber-300">не найден в fields</span>
+            )}
+          </div>
+        ) : null}
+        <div>
+          Кастомных UF-кандидатов: {customCount}, всего кандидатов: {choice.totalCandidateCount || choice.candidates.length}
+        </div>
+        {choice.warnings && choice.warnings.length > 0 && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            {choice.warnings.join("; ")}
+          </div>
+        )}
+        {!choice.chosenField && noResults && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-1.5 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            Ни один из форматов не вернул записей. См. список попыток ниже.
+          </div>
+        )}
         {choice.candidates.length > 0 && (
           <details className="text-muted-foreground">
-            <summary className="cursor-pointer">Кандидаты полей</summary>
+            <summary className="cursor-pointer">Кандидаты полей ({choice.candidates.length})</summary>
             <ul className="mt-1 space-y-1">
-              {choice.candidates.slice(0, 8).map((c) => (
+              {choice.candidates.slice(0, 10).map((c) => (
                 <li key={c.code} className="break-all">
-                  <code>{c.code}</code> · {c.title} · type={c.type ?? "—"} · score={c.score} · {c.reason}
+                  <code>{c.code}</code> · {c.title || "—"} · type={c.type ?? "—"} · userTypeId={c.userTypeId ?? "—"} · score={c.score}
+                  <div>{c.reason}</div>
                 </li>
               ))}
             </ul>
           </details>
         )}
         {choice.attempted.length > 0 && (
-          <details className="text-muted-foreground">
+          <details className="text-muted-foreground" open={!choice.chosenField && noResults}>
             <summary className="cursor-pointer">Попытки фильтрации ({choice.attempted.length})</summary>
-            <ul className="mt-1 space-y-1">
-              {choice.attempted.map((a, i) => (
-                <li key={`${a.field}-${a.format}-${i}`} className="break-all">
-                  <code>{a.field}</code> · формат <code>{a.format || "—"}</code> · count={a.count}
-                  {a.error ? <span className="text-red-600"> · {a.error}</span> : null}
-                </li>
-              ))}
-            </ul>
+            <table className="mt-1 w-full border-collapse text-[11px]">
+              <thead>
+                <tr className="text-left">
+                  <th className="pr-2">field</th>
+                  <th className="pr-2">format</th>
+                  <th className="pr-2">count</th>
+                  <th>error</th>
+                </tr>
+              </thead>
+              <tbody>
+                {choice.attempted.map((a, i) => (
+                  <tr key={`${a.field}-${a.format}-${i}`} className="align-top">
+                    <td className="pr-2 break-all"><code>{a.field}</code></td>
+                    <td className="pr-2"><code>{a.format || "—"}</code></td>
+                    <td className="pr-2 tabular-nums">{a.count}</td>
+                    <td className="text-red-600">{a.error ?? ""}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </details>
         )}
         {choice.sampleValues && choice.sampleValues.length > 0 && (
