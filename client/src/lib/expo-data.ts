@@ -93,7 +93,14 @@ function emptyLinkChoice(entity: "lead" | "deal"): LinkFieldChoice {
   };
 }
 
-export type StatusRef = { id: string; title: string; entityId?: string };
+export type StatusRef = {
+  id: string;
+  title: string;
+  entityId?: string;
+  categoryId?: string;
+  sort?: number;
+  source?: string;
+};
 
 const pick = (item: CrmItem, ...keys: (string | undefined)[]) => {
   for (const key of keys) {
@@ -289,22 +296,66 @@ export async function fetchLeadStatuses(): Promise<StatusRef[]> {
   }
 }
 
+function entityIdToCategoryId(entityId: string | undefined): string | undefined {
+  if (!entityId) return undefined;
+  if (entityId === "DEAL_STAGE") return "0";
+  const match = entityId.match(/^DEAL_STAGE_(\d+)$/);
+  return match ? match[1] : undefined;
+}
+
 export async function fetchDealStages(): Promise<StatusRef[]> {
   try {
     const rows: StatusRef[] = [];
-    const primary = await callBx<Array<Record<string, unknown>>>("crm.dealcategory.stage.list", {
-      id: 0,
-    }).catch(() => [] as Array<Record<string, unknown>>);
-    (Array.isArray(primary) ? primary : []).forEach((row) => {
-      rows.push({
-        id: String(row.STATUS_ID ?? ""),
-        title: String(row.NAME ?? row.STATUS_ID ?? ""),
-        entityId: "DEAL_STAGE",
+    const add = (row: StatusRef) => {
+      if (!row.id) return;
+      const existing = rows.find((r) => r.id === row.id);
+      if (existing) {
+        if (row.categoryId && !existing.categoryId) existing.categoryId = row.categoryId;
+        if (row.entityId && !existing.entityId) existing.entityId = row.entityId;
+        if (row.sort !== undefined && existing.sort === undefined) existing.sort = row.sort;
+        return;
+      }
+      rows.push(row);
+    };
+
+    // Try dealcategory.stage.list for each available category so non-default
+    // pipelines are included with their explicit categoryId.
+    try {
+      const categories = await callBx<Array<Record<string, unknown>>>(
+        "crm.dealcategory.list",
+        { order: { SORT: "ASC" } },
+      ).catch(() => [] as Array<Record<string, unknown>>);
+      const categoryIds = new Set<string>(["0"]);
+      (Array.isArray(categories) ? categories : []).forEach((cat) => {
+        const id = String(cat.ID ?? cat.id ?? "");
+        if (id) categoryIds.add(id);
       });
-    });
+      for (const categoryId of Array.from(categoryIds)) {
+        const stages = await callBx<Array<Record<string, unknown>>>(
+          "crm.dealcategory.stage.list",
+          { id: categoryId },
+        ).catch(() => [] as Array<Record<string, unknown>>);
+        (Array.isArray(stages) ? stages : []).forEach((row) => {
+          const id = String(row.STATUS_ID ?? "");
+          const sortRaw = row.SORT ?? row.sort;
+          add({
+            id,
+            title: String(row.NAME ?? row.STATUS_ID ?? ""),
+            entityId: categoryId === "0" ? "DEAL_STAGE" : `DEAL_STAGE_${categoryId}`,
+            categoryId,
+            sort: sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
+              ? Number(sortRaw)
+              : undefined,
+            source: "dealcategory.stage.list",
+          });
+        });
+      }
+    } catch {
+      // fallthrough — crm.status.list will still pick up stages below
+    }
+
     // Also pull stages via crm.status.list for all DEAL_STAGE* entities so
-    // non-default pipelines are covered. Bitrix uses entityId names like
-    // "DEAL_STAGE" (default) and "DEAL_STAGE_N" for each additional category.
+    // anything missing above (or in exotic pipelines) is still captured.
     try {
       const entities = await callBx<Array<Record<string, unknown>>>("crm.status.entity.types", {}).catch(
         () => [] as Array<Record<string, unknown>>,
@@ -319,11 +370,16 @@ export async function fetchDealStages(): Promise<StatusRef[]> {
         }).catch(() => [] as Array<Record<string, unknown>>);
         (Array.isArray(stages) ? stages : []).forEach((row) => {
           const id = String(row.STATUS_ID ?? "");
-          if (!id || rows.some((r) => r.id === id)) return;
-          rows.push({
+          const sortRaw = row.SORT ?? row.sort;
+          add({
             id,
             title: String(row.NAME ?? id),
             entityId,
+            categoryId: entityIdToCategoryId(entityId),
+            sort: sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
+              ? Number(sortRaw)
+              : undefined,
+            source: "status.list",
           });
         });
       }

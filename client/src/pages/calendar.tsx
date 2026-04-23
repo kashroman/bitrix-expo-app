@@ -1,11 +1,12 @@
 import { useMemo, useState, useCallback } from "react";
 import { useQuery, useQueries } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search } from "lucide-react";
+import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
 import { GanttTimeline, GanttDealBar } from "@/components/gantt";
 import { CalendarView } from "@/components/calendar-view";
@@ -18,6 +19,7 @@ import {
   isFoundAggregate,
   statusTitleMap,
 } from "@/lib/expo-data";
+import type { StatusRef } from "@/lib/expo-data";
 import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
 import { isInsideBitrix } from "@/lib/bitrix";
@@ -26,10 +28,13 @@ import {
   DEAL_STATUS_ORDER,
   DealStatusKey,
   EXPO_DATE_FIELDS,
+  candidateDealStatusByName,
   dealExpoFieldCode,
   dealStageIds,
   leadExpoFieldCode,
   matchDealStatus,
+  matchDealStatusByName,
+  normalizeStageText,
 } from "@/lib/config";
 
 type ViewMode = "gantt" | "calendar" | "list";
@@ -524,8 +529,198 @@ function GanttDiagnostics({
             Ошибка загрузки стадий: {formatValue((stagesQuery.error as Error)?.message ?? stagesQuery.error)}
           </div>
         )}
+
+        <AllDealStagesTable stages={stagesQuery.data ?? []} />
       </CardContent>
     </Card>
+  );
+}
+
+type StageRowView = StatusRef & {
+  normalized: string;
+  exact?: DealStatusKey;
+  candidate?: DealStatusKey;
+};
+
+const STAGE_HIGHLIGHT: Record<DealStatusKey, { label: string; cls: string }> = {
+  signingContract: {
+    label: "Подписываем договор",
+    cls: "bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-100",
+  },
+  building: {
+    label: "Строим",
+    cls: "bg-blue-100 text-blue-900 dark:bg-blue-900/40 dark:text-blue-100",
+  },
+  projectCompleted: {
+    label: "Проект завершён",
+    cls: "bg-green-100 text-green-900 dark:bg-green-900/40 dark:text-green-100",
+  },
+};
+
+function AllDealStagesTable({ stages }: { stages: StatusRef[] }) {
+  const [open, setOpen] = useState(true);
+  const [filter, setFilter] = useState("");
+  const [onlyCandidates, setOnlyCandidates] = useState(false);
+
+  const rows = useMemo<StageRowView[]>(() => {
+    return stages.map((s) => {
+      const normalized = normalizeStageText(s.title ?? "");
+      const exact = matchDealStatusByName(s.title);
+      const candidate = exact ?? candidateDealStatusByName(s.title);
+      return { ...s, normalized, exact, candidate };
+    });
+  }, [stages]);
+
+  const filtered = useMemo(() => {
+    const needle = normalizeStageText(filter);
+    return rows.filter((row) => {
+      if (onlyCandidates && !row.candidate) return false;
+      if (!needle) return true;
+      return (
+        row.normalized.includes(needle) ||
+        row.id.toLocaleLowerCase().includes(filter.toLocaleLowerCase()) ||
+        (row.entityId ?? "").toLocaleLowerCase().includes(filter.toLocaleLowerCase())
+      );
+    });
+  }, [rows, filter, onlyCandidates]);
+
+  const grouped = useMemo(() => {
+    const out = new Map<string, StageRowView[]>();
+    filtered.forEach((row) => {
+      const key = row.entityId ?? row.categoryId ?? "—";
+      const list = out.get(key) ?? [];
+      list.push(row);
+      out.set(key, list);
+    });
+    return Array.from(out.entries()).sort(([a], [b]) => a.localeCompare(b));
+  }, [filtered]);
+
+  const totalCandidates = rows.filter((r) => r.candidate).length;
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between rounded-md border bg-muted/30 p-2 text-left"
+          data-testid="gantt-diag-stages-toggle"
+        >
+          <span>
+            Все стадии сделок (<b>{rows.length}</b>) · совпадений по подсказкам:{" "}
+            <b>{totalCandidates}</b>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            value={filter}
+            onChange={(e) => setFilter(e.target.value)}
+            placeholder="Фильтр по ID / названию / entityId"
+            className="h-8 max-w-xs text-xs"
+            data-testid="gantt-diag-stages-filter"
+          />
+          <label className="flex items-center gap-1 text-xs text-muted-foreground">
+            <input
+              type="checkbox"
+              checked={onlyCandidates}
+              onChange={(e) => setOnlyCandidates(e.target.checked)}
+              data-testid="gantt-diag-stages-only-candidates"
+            />
+            Только кандидаты (подпис/стро/заверш/договор/проект)
+          </label>
+          <span className="text-xs text-muted-foreground">
+            Показано: <b>{filtered.length}</b> из <b>{rows.length}</b>
+          </span>
+        </div>
+
+        {rows.length === 0 ? (
+          <div className="rounded border border-dashed p-2 text-muted-foreground">
+            Список стадий пуст. Проверьте доступ к crm.dealcategory.list /
+            crm.status.list.
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {grouped.map(([entityId, items]) => (
+              <div key={entityId} className="rounded-md border">
+                <div className="flex items-center justify-between gap-2 border-b bg-muted/40 px-2 py-1">
+                  <div className="font-medium">
+                    entityId: <code>{entityId}</code>
+                  </div>
+                  <div className="text-muted-foreground">
+                    stages: <b>{items.length}</b>
+                  </div>
+                </div>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]" data-testid={`gantt-diag-stages-table-${entityId}`}>
+                    <thead>
+                      <tr className="border-b text-left uppercase tracking-wide text-muted-foreground">
+                        <th className="px-2 py-1">STATUS_ID</th>
+                        <th className="px-2 py-1">Название</th>
+                        <th className="px-2 py-1">Normalized</th>
+                        <th className="px-2 py-1">Category</th>
+                        <th className="px-2 py-1">Sort</th>
+                        <th className="px-2 py-1">Source</th>
+                        <th className="px-2 py-1">Match</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((row) => {
+                        const highlight = row.exact
+                          ? STAGE_HIGHLIGHT[row.exact]
+                          : row.candidate
+                            ? STAGE_HIGHLIGHT[row.candidate]
+                            : undefined;
+                        return (
+                          <tr
+                            key={`${row.entityId ?? ""}:${row.id}`}
+                            className={`border-b align-top ${highlight ? highlight.cls : ""}`}
+                            data-testid={`gantt-diag-stage-row-${row.id}`}
+                          >
+                            <td className="px-2 py-1 font-mono">{row.id}</td>
+                            <td className="px-2 py-1">{row.title || "—"}</td>
+                            <td className="px-2 py-1 font-mono text-muted-foreground">
+                              {row.normalized || "—"}
+                            </td>
+                            <td className="px-2 py-1 font-mono">{row.categoryId ?? "—"}</td>
+                            <td className="px-2 py-1 font-mono">{row.sort ?? "—"}</td>
+                            <td className="px-2 py-1 font-mono text-muted-foreground">
+                              {row.source ?? "—"}
+                            </td>
+                            <td className="px-2 py-1">
+                              {row.exact ? (
+                                <span>
+                                  <b>точное</b> → {STAGE_HIGHLIGHT[row.exact].label}
+                                </span>
+                              ) : row.candidate ? (
+                                <span>
+                                  кандидат → {STAGE_HIGHLIGHT[row.candidate].label}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="text-muted-foreground">
+          Подсветка: жёлтая — похоже на «Подписываем договор», синяя — «Строим»,
+          зелёная — «Проект завершён». Точное совпадение помечено «точное»;
+          частичное — «кандидат». Скопируйте нужный <code>STATUS_ID</code> и
+          закрепите его в <code>dealStageIds</code> (client/src/lib/config.ts).
+        </div>
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

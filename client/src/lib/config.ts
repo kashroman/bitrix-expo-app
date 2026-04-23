@@ -154,12 +154,29 @@ export const DEAL_STATUS_ORDER: DealStatusKey[] = [
   "projectCompleted",
 ];
 
-function normalizeStageText(value: string): string {
+export function normalizeStageText(value: string): string {
   return value
     .toLocaleLowerCase("ru-RU")
     .replace(/ё/g, "е")
     .replace(/[^a-zа-я0-9]+/g, " ")
     .trim();
+}
+
+// Partial-token candidate matcher used by diagnostics to surface stages whose
+// titles look like likely candidates for the three tracked statuses even when
+// the strict matcher rejects them.
+export function candidateDealStatusByName(
+  title: string | undefined | null,
+): DealStatusKey | undefined {
+  if (!title) return undefined;
+  const n = normalizeStageText(String(title));
+  if (!n) return undefined;
+  if (n.includes("подпис") || n.includes("договор")) return "signingContract";
+  if (n.includes("стро")) return "building";
+  if (n.includes("заверш") || n.includes("законч") || n.includes("проект")) {
+    return "projectCompleted";
+  }
+  return undefined;
 }
 
 // Normalized keywords used to match a stage NAME to one of the three
