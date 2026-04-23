@@ -303,90 +303,247 @@ function entityIdToCategoryId(entityId: string | undefined): string | undefined 
   return match ? match[1] : undefined;
 }
 
-export async function fetchDealStages(): Promise<StatusRef[]> {
-  try {
-    const rows: StatusRef[] = [];
-    const add = (row: StatusRef) => {
-      if (!row.id) return;
-      const existing = rows.find((r) => r.id === row.id);
-      if (existing) {
-        if (row.categoryId && !existing.categoryId) existing.categoryId = row.categoryId;
-        if (row.entityId && !existing.entityId) existing.entityId = row.entityId;
-        if (row.sort !== undefined && existing.sort === undefined) existing.sort = row.sort;
-        return;
-      }
-      rows.push(row);
-    };
+export type DealStagesAttempt = {
+  source: string;
+  entityId?: string;
+  categoryId?: string;
+  ok: boolean;
+  count: number;
+  error?: string;
+};
 
-    // Try dealcategory.stage.list for each available category so non-default
-    // pipelines are included with their explicit categoryId.
+export type DealStagesDiagnostics = {
+  attempts: DealStagesAttempt[];
+  categoryIds: string[];
+  bySource: Record<string, number>;
+  byEntityId: Record<string, number>;
+  errors: string[];
+};
+
+export type DealStagesResult = {
+  stages: StatusRef[];
+  diagnostics: DealStagesDiagnostics;
+};
+
+const MAX_FALLBACK_CATEGORY_ID = 50;
+
+function errorMessage(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  return String(err);
+}
+
+export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
+  const stages: StatusRef[] = [];
+  const diagnostics: DealStagesDiagnostics = {
+    attempts: [],
+    categoryIds: [],
+    bySource: {},
+    byEntityId: {},
+    errors: [],
+  };
+
+  const add = (row: StatusRef): boolean => {
+    if (!row.id) return false;
+    const existing = stages.find(
+      (r) => r.id === row.id && (r.entityId ?? "") === (row.entityId ?? ""),
+    );
+    if (existing) {
+      if (row.categoryId && !existing.categoryId) existing.categoryId = row.categoryId;
+      if (row.entityId && !existing.entityId) existing.entityId = row.entityId;
+      if (row.sort !== undefined && existing.sort === undefined) existing.sort = row.sort;
+      if (row.source && !existing.source) existing.source = row.source;
+      return false;
+    }
+    stages.push(row);
+    return true;
+  };
+
+  const recordAttempt = (attempt: DealStagesAttempt) => {
+    diagnostics.attempts.push(attempt);
+    if (attempt.ok && attempt.count > 0) {
+      diagnostics.bySource[attempt.source] =
+        (diagnostics.bySource[attempt.source] ?? 0) + attempt.count;
+      if (attempt.entityId) {
+        diagnostics.byEntityId[attempt.entityId] =
+          (diagnostics.byEntityId[attempt.entityId] ?? 0) + attempt.count;
+      }
+    }
+    if (!attempt.ok && attempt.error) {
+      const key = attempt.entityId ?? attempt.categoryId ?? attempt.source;
+      diagnostics.errors.push(`${attempt.source}[${key}]: ${attempt.error}`);
+    }
+  };
+
+  // 1) crm.dealcategory.list — discover pipeline category IDs.
+  const categoryIds = new Set<string>(["0"]);
+  try {
+    const categories = await callBx<Array<Record<string, unknown>>>(
+      "crm.dealcategory.list",
+      { order: { SORT: "ASC" } },
+    );
+    const list = Array.isArray(categories) ? categories : [];
+    list.forEach((cat) => {
+      const id = String(cat.ID ?? cat.id ?? "");
+      if (id) categoryIds.add(id);
+    });
+    recordAttempt({
+      source: "dealcategory.list",
+      ok: true,
+      count: list.length,
+    });
+  } catch (err) {
+    recordAttempt({
+      source: "dealcategory.list",
+      ok: false,
+      count: 0,
+      error: errorMessage(err),
+    });
+  }
+  diagnostics.categoryIds = Array.from(categoryIds).sort((a, b) => Number(a) - Number(b));
+
+  // 2) crm.dealcategory.stage.list for every known category.
+  for (const categoryId of diagnostics.categoryIds) {
+    const entityId = categoryId === "0" ? "DEAL_STAGE" : `DEAL_STAGE_${categoryId}`;
     try {
-      const categories = await callBx<Array<Record<string, unknown>>>(
-        "crm.dealcategory.list",
-        { order: { SORT: "ASC" } },
-      ).catch(() => [] as Array<Record<string, unknown>>);
-      const categoryIds = new Set<string>(["0"]);
-      (Array.isArray(categories) ? categories : []).forEach((cat) => {
-        const id = String(cat.ID ?? cat.id ?? "");
-        if (id) categoryIds.add(id);
-      });
-      for (const categoryId of Array.from(categoryIds)) {
-        const stages = await callBx<Array<Record<string, unknown>>>(
-          "crm.dealcategory.stage.list",
-          { id: categoryId },
-        ).catch(() => [] as Array<Record<string, unknown>>);
-        (Array.isArray(stages) ? stages : []).forEach((row) => {
-          const id = String(row.STATUS_ID ?? "");
-          const sortRaw = row.SORT ?? row.sort;
+      const stagesRes = await callBx<Array<Record<string, unknown>>>(
+        "crm.dealcategory.stage.list",
+        { id: categoryId },
+      );
+      const list = Array.isArray(stagesRes) ? stagesRes : [];
+      let added = 0;
+      list.forEach((row) => {
+        const id = String(row.STATUS_ID ?? "");
+        const sortRaw = row.SORT ?? row.sort;
+        if (
           add({
             id,
             title: String(row.NAME ?? row.STATUS_ID ?? ""),
-            entityId: categoryId === "0" ? "DEAL_STAGE" : `DEAL_STAGE_${categoryId}`,
+            entityId,
             categoryId,
-            sort: sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
-              ? Number(sortRaw)
-              : undefined,
+            sort:
+              sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
+                ? Number(sortRaw)
+                : undefined,
             source: "dealcategory.stage.list",
-          });
-        });
-      }
-    } catch {
-      // fallthrough — crm.status.list will still pick up stages below
+          })
+        ) {
+          added += 1;
+        }
+      });
+      recordAttempt({
+        source: "dealcategory.stage.list",
+        entityId,
+        categoryId,
+        ok: true,
+        count: added,
+      });
+    } catch (err) {
+      recordAttempt({
+        source: "dealcategory.stage.list",
+        entityId,
+        categoryId,
+        ok: false,
+        count: 0,
+        error: errorMessage(err),
+      });
     }
+  }
 
-    // Also pull stages via crm.status.list for all DEAL_STAGE* entities so
-    // anything missing above (or in exotic pipelines) is still captured.
+  // 3) crm.status.entity.types — pull real entity list if the server supports it.
+  const entityIds = new Set<string>();
+  entityIds.add("DEAL_STAGE");
+  try {
+    const entities = await callBx<Array<Record<string, unknown>>>(
+      "crm.status.entity.types",
+      {},
+    );
+    const list = Array.isArray(entities) ? entities : [];
+    list.forEach((row) => {
+      const id = String(row.ID ?? row.id ?? "");
+      if (id.startsWith("DEAL_STAGE")) entityIds.add(id);
+    });
+    recordAttempt({
+      source: "status.entity.types",
+      ok: true,
+      count: list.length,
+    });
+  } catch (err) {
+    recordAttempt({
+      source: "status.entity.types",
+      ok: false,
+      count: 0,
+      error: errorMessage(err),
+    });
+  }
+
+  // 4) Add DEAL_STAGE_<categoryId> for every discovered category, plus a bounded
+  // range of DEAL_STAGE_0..DEAL_STAGE_50 as a defensive fallback in case neither
+  // dealcategory.list nor status.entity.types returned anything useful.
+  diagnostics.categoryIds.forEach((categoryId) => {
+    if (categoryId === "0") return;
+    entityIds.add(`DEAL_STAGE_${categoryId}`);
+  });
+  for (let i = 0; i <= MAX_FALLBACK_CATEGORY_ID; i += 1) {
+    entityIds.add(`DEAL_STAGE_${i}`);
+  }
+
+  // 5) crm.status.list per entityId. Catches any pipeline not surfaced above.
+  for (const entityId of Array.from(entityIds).sort()) {
     try {
-      const entities = await callBx<Array<Record<string, unknown>>>("crm.status.entity.types", {}).catch(
-        () => [] as Array<Record<string, unknown>>,
-      );
-      const dealEntityIds = (Array.isArray(entities) ? entities : [])
-        .map((row) => String(row.ID ?? row.id ?? ""))
-        .filter((id) => id.startsWith("DEAL_STAGE"));
-      for (const entityId of dealEntityIds) {
-        const stages = await callBx<Array<Record<string, unknown>>>("crm.status.list", {
+      const stagesRes = await callBx<Array<Record<string, unknown>>>(
+        "crm.status.list",
+        {
           filter: { ENTITY_ID: entityId },
           order: { SORT: "ASC" },
-        }).catch(() => [] as Array<Record<string, unknown>>);
-        (Array.isArray(stages) ? stages : []).forEach((row) => {
-          const id = String(row.STATUS_ID ?? "");
-          const sortRaw = row.SORT ?? row.sort;
+        },
+      );
+      const list = Array.isArray(stagesRes) ? stagesRes : [];
+      let added = 0;
+      list.forEach((row) => {
+        const id = String(row.STATUS_ID ?? "");
+        const sortRaw = row.SORT ?? row.sort;
+        if (
           add({
             id,
             title: String(row.NAME ?? id),
             entityId,
             categoryId: entityIdToCategoryId(entityId),
-            sort: sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
-              ? Number(sortRaw)
-              : undefined,
+            sort:
+              sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
+                ? Number(sortRaw)
+                : undefined,
             source: "status.list",
-          });
-        });
-      }
-    } catch {
-      // ignore — we still have the default pipeline
+          })
+        ) {
+          added += 1;
+        }
+      });
+      recordAttempt({
+        source: "status.list",
+        entityId,
+        categoryId: entityIdToCategoryId(entityId),
+        ok: true,
+        count: added,
+      });
+    } catch (err) {
+      recordAttempt({
+        source: "status.list",
+        entityId,
+        categoryId: entityIdToCategoryId(entityId),
+        ok: false,
+        count: 0,
+        error: errorMessage(err),
+      });
     }
-    return rows;
+  }
+
+  return { stages, diagnostics };
+}
+
+export async function fetchDealStages(): Promise<StatusRef[]> {
+  try {
+    const { stages } = await fetchDealStagesDetailed();
+    return stages;
   } catch {
     return [];
   }

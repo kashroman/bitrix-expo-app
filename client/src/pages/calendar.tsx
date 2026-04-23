@@ -16,10 +16,11 @@ import {
   ExpoItem,
   fetchExpoList,
   fetchDealStages,
+  fetchDealStagesDetailed,
   isFoundAggregate,
   statusTitleMap,
 } from "@/lib/expo-data";
-import type { StatusRef } from "@/lib/expo-data";
+import type { DealStagesResult, StatusRef } from "@/lib/expo-data";
 import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
 import { isInsideBitrix } from "@/lib/bitrix";
@@ -411,19 +412,21 @@ function GanttDiagnostics({
   expos: ExpoItem[];
 }) {
   const enabled = isInsideBitrix();
-  const stagesQuery = useQuery({
-    queryKey: ["deal-stages"],
-    queryFn: fetchDealStages,
+  const stagesQuery = useQuery<DealStagesResult>({
+    queryKey: ["deal-stages-detailed"],
+    queryFn: fetchDealStagesDetailed,
     enabled,
     staleTime: 5 * 60_000,
   });
+  const stages = stagesQuery.data?.stages ?? [];
+  const stagesDiagnostics = stagesQuery.data?.diagnostics;
 
   const matches: Record<DealStatusKey, { count: number; examples: { id: string; title: string }[] }> = {
     signingContract: { count: 0, examples: [] },
     building: { count: 0, examples: [] },
     projectCompleted: { count: 0, examples: [] },
   };
-  (stagesQuery.data ?? []).forEach((stage) => {
+  stages.forEach((stage) => {
     const status = matchDealStatus(stage.id, stage.title);
     if (!status) return;
     matches[status].count += 1;
@@ -530,9 +533,99 @@ function GanttDiagnostics({
           </div>
         )}
 
-        <AllDealStagesTable stages={stagesQuery.data ?? []} />
+        {stagesDiagnostics && (
+          <StageFetchDiagnostics diagnostics={stagesDiagnostics} totalStages={stages.length} />
+        )}
+
+        <AllDealStagesTable stages={stages} />
       </CardContent>
     </Card>
+  );
+}
+
+function StageFetchDiagnostics({
+  diagnostics,
+  totalStages,
+}: {
+  diagnostics: import("@/lib/expo-data").DealStagesDiagnostics;
+  totalStages: number;
+}) {
+  const [open, setOpen] = useState(true);
+  const failedAttempts = diagnostics.attempts.filter((a) => !a.ok);
+  const successfulAttempts = diagnostics.attempts.filter((a) => a.ok && a.count > 0);
+  const bySourceEntries = Object.entries(diagnostics.bySource).sort(([a], [b]) => a.localeCompare(b));
+  const byEntityEntries = Object.entries(diagnostics.byEntityId).sort(([a], [b]) => a.localeCompare(b));
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between rounded-md border bg-muted/30 p-2 text-left"
+          data-testid="gantt-diag-stage-fetch-toggle"
+        >
+          <span>
+            Диагностика загрузки стадий · всего получено: <b>{totalStages}</b> · успешных
+            источников: <b>{successfulAttempts.length}</b> · ошибок:{" "}
+            <b>{failedAttempts.length}</b>
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
+        <div className="text-muted-foreground">
+          Category IDs обнаружено:{" "}
+          <code>{diagnostics.categoryIds.join(", ") || "—"}</code>
+        </div>
+
+        {bySourceEntries.length > 0 && (
+          <div>
+            <div className="font-medium">Счётчики по источникам</div>
+            <ul className="ml-4 list-disc">
+              {bySourceEntries.map(([src, count]) => (
+                <li key={src}>
+                  <code>{src}</code>: <b>{count}</b>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {byEntityEntries.length > 0 && (
+          <div>
+            <div className="font-medium">Счётчики по entityId</div>
+            <ul className="ml-4 list-disc">
+              {byEntityEntries.map(([entityId, count]) => (
+                <li key={entityId}>
+                  <code>{entityId}</code>: <b>{count}</b>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {failedAttempts.length > 0 && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            <div className="font-medium">Ошибки запросов ({failedAttempts.length})</div>
+            <ul className="ml-4 list-disc" data-testid="gantt-diag-stage-fetch-errors">
+              {failedAttempts.map((a, idx) => (
+                <li key={idx}>
+                  <code>{a.source}</code>
+                  {a.entityId ? (
+                    <>
+                      [<code>{a.entityId}</code>]
+                    </>
+                  ) : null}
+                  : {a.error ?? "неизвестная ошибка"}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 
