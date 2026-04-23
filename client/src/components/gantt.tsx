@@ -1,203 +1,527 @@
-import { useMemo } from "react";
-import { PHASE_COLORS } from "@/lib/config";
+import { useMemo, useState, useEffect } from "react";
+import { ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  DEAL_STATUS_COLORS,
+  DEAL_STATUS_LABELS,
+  DEAL_STATUS_ORDER,
+  DealStatusKey,
+  PHASE_FILLS,
+  matchDealStatus,
+} from "@/lib/config";
 import { ExpoItem } from "@/lib/expo-data";
-import { formatDate, parseDate } from "@/lib/format";
+import { parseDate } from "@/lib/format";
+import { Button } from "@/components/ui/button";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 
-type Phase = { key: "mount" | "expo" | "dismantle"; start?: Date; end?: Date };
+export type GanttDealBar = {
+  id: string | number;
+  status: DealStatusKey;
+  clientName?: string;
+  manager?: string;
+  budget?: string;
+  title?: string;
+};
 
-const LEFT_COL_PX = 260;
-const MIN_PX_PER_DAY = 6;
-const MAX_PX_PER_DAY = 28;
-const DEFAULT_PX_PER_DAY = 10;
-const ROW_HEIGHT = 48;
+export type GanttDealsProvider = (expo: ExpoItem) => GanttDealBar[];
+
+const LEFT_COL_PX = 240;
+const MONTH_NAMES_RU = [
+  "Январь",
+  "Февраль",
+  "Март",
+  "Апрель",
+  "Май",
+  "Июнь",
+  "Июль",
+  "Август",
+  "Сентябрь",
+  "Октябрь",
+  "Ноябрь",
+  "Декабрь",
+];
+const DAY_HEIGHT_BASE = 56; // base row height before adding deal bars
+const DEAL_BAR_HEIGHT = 18;
+const DEAL_BAR_GAP = 3;
+const DEAL_BAR_VERTICAL_PADDING = 6;
+
+type Phase = { key: "mount" | "expo" | "dismantle"; start: Date; end: Date };
+
+function stripTime(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate());
+}
+
+function monthStartOf(year: number, month: number): Date {
+  return new Date(year, month, 1);
+}
+
+function monthEndOf(year: number, month: number): Date {
+  return new Date(year, month + 1, 0);
+}
+
+function daysInMonth(year: number, month: number): number {
+  return monthEndOf(year, month).getDate();
+}
 
 function phasesOf(expo: ExpoItem): Phase[] {
-  const event: Phase = {
-    key: "expo",
-    start: parseDate(expo.expoStart),
-    end: parseDate(expo.expoEnd),
-  };
+  const expoStart = parseDate(expo.expoStart);
+  const expoEnd = parseDate(expo.expoEnd);
+  const result: Phase[] = [];
   const mountStart = parseDate(expo.installStart);
-  const mountEnd = parseDate(expo.installEnd) ?? event.start;
-  const mount: Phase = { key: "mount", start: mountStart, end: mountEnd };
-  const dismantleStart = parseDate(expo.dismantleStart) ?? event.end;
+  const mountEnd = parseDate(expo.installEnd) ?? expoStart;
+  if (mountStart && mountEnd) result.push({ key: "mount", start: mountStart, end: mountEnd });
+  if (expoStart && expoEnd) result.push({ key: "expo", start: expoStart, end: expoEnd });
+  const dismantleStart = parseDate(expo.dismantleStart) ?? expoEnd;
   const dismantleEnd = parseDate(expo.dismantleEnd) ?? dismantleStart;
-  const dismantle: Phase = { key: "dismantle", start: dismantleStart, end: dismantleEnd };
-  return [mount, event, dismantle].filter((phase) => phase.start && phase.end);
+  if (dismantleStart && dismantleEnd) result.push({ key: "dismantle", start: dismantleStart, end: dismantleEnd });
+  return result;
+}
+
+// Clip a [start, end] range (by day) to the 1..N day index of the selected month.
+// Returns inclusive 1-based startDay/endDay or undefined if disjoint.
+function clipToMonth(
+  range: { start: Date; end: Date },
+  year: number,
+  month: number,
+): { startDay: number; endDay: number } | undefined {
+  const monthStart = stripTime(monthStartOf(year, month)).getTime();
+  const monthEnd = stripTime(monthEndOf(year, month)).getTime();
+  const s = stripTime(range.start).getTime();
+  const e = stripTime(range.end).getTime();
+  if (e < monthStart || s > monthEnd) return undefined;
+  const clippedStart = Math.max(s, monthStart);
+  const clippedEnd = Math.min(e, monthEnd);
+  const startDay = new Date(clippedStart).getDate();
+  const endDay = new Date(clippedEnd).getDate();
+  return { startDay, endDay };
 }
 
 export function GanttTimeline({
   expos,
   onSelect,
   renderRight,
+  dealsFor,
+  initialMonth,
+  onMonthChange,
 }: {
   expos: ExpoItem[];
   onSelect: (expo: ExpoItem) => void;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
+  dealsFor?: GanttDealsProvider;
+  initialMonth?: Date;
+  onMonthChange?: (monthStart: Date) => void;
 }) {
-  const { minDate, maxDate, span, pxPerDay, timelineWidth, months } = useMemo(() => {
-    let min: number | undefined;
-    let max: number | undefined;
-    for (const expo of expos) {
-      for (const phase of phasesOf(expo)) {
-        const s = phase.start?.getTime();
-        const e = phase.end?.getTime();
-        if (s !== undefined) min = min === undefined ? s : Math.min(min, s);
-        if (e !== undefined) max = max === undefined ? e : Math.max(max, e);
-      }
-    }
-    const now = Date.now();
-    let minMs: number;
-    let maxMs: number;
-    if (min === undefined || max === undefined || min === max) {
-      minMs = now - 30 * 86400000;
-      maxMs = now + 60 * 86400000;
-    } else {
-      const pad = Math.max((max - min) * 0.02, 86400000 * 2);
-      minMs = min - pad;
-      maxMs = max + pad;
-    }
-    const minD = new Date(minMs);
-    const maxD = new Date(maxMs);
-    const spanMs = maxMs - minMs;
-    const days = Math.max(1, Math.round(spanMs / 86400000));
-    // Target: 1400..4200 px. Clamp per-day.
-    let pxPd = Math.max(MIN_PX_PER_DAY, Math.min(MAX_PX_PER_DAY, 1400 / days));
-    if (days < 120) pxPd = Math.max(pxPd, DEFAULT_PX_PER_DAY);
-    const width = Math.max(720, Math.round(days * pxPd));
-    return {
-      minDate: minD,
-      maxDate: maxD,
-      span: spanMs,
-      pxPerDay: pxPd,
-      timelineWidth: width,
-      months: monthMarkers(minD, maxD),
-    };
+  const [cursor, setCursor] = useState<Date>(() => {
+    if (initialMonth) return monthStartOf(initialMonth.getFullYear(), initialMonth.getMonth());
+    const now = new Date();
+    return monthStartOf(now.getFullYear(), now.getMonth());
+  });
+
+  useEffect(() => {
+    onMonthChange?.(cursor);
+  }, [cursor, onMonthChange]);
+
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  const totalDays = daysInMonth(year, month);
+
+  const sortedExpos = useMemo(() => {
+    return [...expos].sort((a, b) => {
+      const sa = parseDate(a.expoStart)?.getTime() ?? Number.POSITIVE_INFINITY;
+      const sb = parseDate(b.expoStart)?.getTime() ?? Number.POSITIVE_INFINITY;
+      if (sa === sb) return a.title.localeCompare(b.title, "ru-RU");
+      return sa - sb;
+    });
   }, [expos]);
 
+  const yearOptions = useMemo(() => {
+    const set = new Set<number>();
+    const currentYear = new Date().getFullYear();
+    for (let y = currentYear - 2; y <= currentYear + 3; y++) set.add(y);
+    expos.forEach((expo) => {
+      const s = parseDate(expo.expoStart);
+      const e = parseDate(expo.expoEnd);
+      if (s) set.add(s.getFullYear());
+      if (e) set.add(e.getFullYear());
+    });
+    return Array.from(set).sort((a, b) => a - b);
+  }, [expos]);
+
+  const goPrev = () => setCursor(monthStartOf(year, month - 1));
+  const goNext = () => setCursor(monthStartOf(year, month + 1));
+  const goToday = () => {
+    const now = new Date();
+    setCursor(monthStartOf(now.getFullYear(), now.getMonth()));
+  };
+
   if (!expos.length) {
-    return <div className="rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">Нет выставок для отображения.</div>;
+    return (
+      <div>
+        <MonthControls
+          cursor={cursor}
+          onPrev={goPrev}
+          onNext={goNext}
+          onToday={goToday}
+          onSelect={(d) => setCursor(d)}
+          yearOptions={yearOptions}
+        />
+        <div className="mt-3 rounded-lg border border-dashed p-6 text-center text-sm text-muted-foreground">
+          Нет выставок для отображения.
+        </div>
+      </div>
+    );
   }
 
-  // Limit month tick label density: show full label only every N months if too narrow
-  const avgMonthPx = months.length > 1 ? timelineWidth / months.length : timelineWidth;
-  const monthLabelStep = avgMonthPx < 48 ? 3 : avgMonthPx < 80 ? 2 : 1;
+  const today = stripTime(new Date());
+  const todayIndex =
+    today.getFullYear() === year && today.getMonth() === month ? today.getDate() : -1;
 
   return (
-    <div className="relative overflow-x-auto overscroll-x-contain rounded-md border bg-background">
-      {/* Header */}
-      <div
-        className="sticky top-0 z-20 flex border-b bg-background/95 backdrop-blur"
-        style={{ width: `${LEFT_COL_PX + timelineWidth}px` }}
-      >
+    <div>
+      <MonthControls
+        cursor={cursor}
+        onPrev={goPrev}
+        onNext={goNext}
+        onToday={goToday}
+        onSelect={(d) => setCursor(d)}
+        yearOptions={yearOptions}
+      />
+
+      <div className="mt-3 overflow-hidden rounded-md border bg-background">
         <div
-          className="sticky left-0 z-30 flex items-center border-r bg-background px-3 text-xs font-medium uppercase tracking-wide text-muted-foreground"
-          style={{ width: `${LEFT_COL_PX}px`, minWidth: `${LEFT_COL_PX}px` }}
+          className="grid min-w-0 items-stretch border-b bg-background/95 text-xs"
+          style={{
+            gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
+          }}
         >
-          Выставка
-        </div>
-        <div className="relative h-9" style={{ width: `${timelineWidth}px` }}>
-          {months.map((m, idx) => {
-            const leftPct = ((m.getTime() - minDate.getTime()) / span) * 100;
-            const showLabel = idx % monthLabelStep === 0;
+          <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-muted-foreground">
+            Выставка
+          </div>
+          {Array.from({ length: totalDays }, (_, i) => {
+            const dayNum = i + 1;
+            const date = new Date(year, month, dayNum);
+            const dow = date.getDay();
+            const isWeekend = dow === 0 || dow === 6;
+            const isToday = dayNum === todayIndex;
             return (
               <div
-                key={idx}
-                className="absolute top-0 bottom-0 flex items-end border-l border-border/60"
-                style={{ left: `${leftPct}%` }}
+                key={dayNum}
+                className={`flex min-w-0 flex-col items-center justify-center border-r py-1 text-[10px] tabular-nums ${
+                  isWeekend ? "bg-muted/40" : ""
+                } ${isToday ? "bg-primary/10 font-semibold text-primary" : "text-muted-foreground"}`}
+                title={date.toLocaleDateString("ru-RU", { weekday: "long", day: "numeric", month: "long" })}
               >
-                {showLabel && (
-                  <span className="whitespace-nowrap px-1 pb-1 text-[10px] text-muted-foreground">
-                    {m.toLocaleDateString("ru-RU", {
-                      month: "short",
-                      year: "2-digit",
-                    })}
-                  </span>
-                )}
+                <span className="leading-none">{dayNum}</span>
+                <span className="leading-none text-[9px] opacity-70">
+                  {["вс", "пн", "вт", "ср", "чт", "пт", "сб"][dow]}
+                </span>
               </div>
             );
           })}
         </div>
-      </div>
 
-      {/* Rows */}
-      <div
-        className="relative"
-        style={{ width: `${LEFT_COL_PX + timelineWidth}px` }}
-      >
-        {expos.map((expo, rowIndex) => (
-          <div
-            key={expo.id}
-            className={`flex items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
-          >
-            <button
-              type="button"
-              onClick={() => onSelect(expo)}
-              className="sticky left-0 z-10 flex flex-col justify-center border-r bg-background px-3 py-2 text-left text-sm hover:bg-accent/60"
-              style={{ width: `${LEFT_COL_PX}px`, minWidth: `${LEFT_COL_PX}px`, minHeight: `${ROW_HEIGHT}px` }}
-              data-testid={`gantt-row-${expo.id}`}
-              title={expo.title}
-            >
-              <div className="truncate font-medium">{expo.title}</div>
-              <div className="truncate text-xs text-muted-foreground">
-                {formatDate(expo.expoStart)} — {formatDate(expo.expoEnd)}
-              </div>
-              {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
-            </button>
-            <button
-              type="button"
-              onClick={() => onSelect(expo)}
-              className="relative flex-shrink-0 hover:bg-accent/30"
-              style={{ width: `${timelineWidth}px`, minHeight: `${ROW_HEIGHT}px` }}
-              aria-label={`Открыть ${expo.title}`}
-            >
-              {/* Month grid background */}
-              {months.map((m, idx) => (
-                <div
-                  key={idx}
-                  className="absolute top-0 bottom-0 border-l border-border/40"
-                  style={{
-                    left: `${((m.getTime() - minDate.getTime()) / span) * 100}%`,
-                  }}
-                />
-              ))}
-              {phasesOf(expo).map((phase) => {
-                if (!phase.start || !phase.end) return null;
-                const leftPct = ((phase.start.getTime() - minDate.getTime()) / span) * 100;
-                const widthPct = Math.max(
-                  ((phase.end.getTime() - phase.start.getTime()) / span) * 100,
-                  0.3,
-                );
-                return (
-                  <span
-                    key={phase.key}
-                    className="absolute rounded"
-                    style={{
-                      top: "10px",
-                      height: `${ROW_HEIGHT - 20}px`,
-                      left: `${leftPct}%`,
-                      width: `${widthPct}%`,
-                      minWidth: "3px",
-                      background: PHASE_COLORS[phase.key],
-                      opacity: phase.key === "expo" ? 0.95 : 0.8,
-                    }}
-                    title={`${phaseLabel(phase.key)}: ${formatDate(phase.start.toISOString())} — ${formatDate(phase.end.toISOString())}`}
-                  />
-                );
-              })}
-            </button>
-          </div>
-        ))}
-      </div>
-      <div className="flex items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
-        <LegendDot color={PHASE_COLORS.mount} label="Монтаж" />
-        <LegendDot color={PHASE_COLORS.expo} label="Проведение" />
-        <LegendDot color={PHASE_COLORS.dismantle} label="Демонтаж" />
-        <span className="ml-auto hidden md:inline">
-          {expos.length} выставок · {Math.round(pxPerDay * 10) / 10} px/день
-        </span>
+        {sortedExpos.map((expo, rowIndex) => {
+          const deals = (dealsFor?.(expo) ?? []).filter((d) =>
+            DEAL_STATUS_ORDER.includes(d.status),
+          );
+          const rowHeight =
+            DAY_HEIGHT_BASE +
+            (deals.length > 0
+              ? deals.length * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP) - DEAL_BAR_GAP + DEAL_BAR_VERTICAL_PADDING * 2
+              : 0);
+          const phases = phasesOf(expo);
+          const expoPhase = phases.find((p) => p.key === "expo");
+          return (
+            <ExpoRow
+              key={expo.id}
+              expo={expo}
+              rowIndex={rowIndex}
+              year={year}
+              month={month}
+              totalDays={totalDays}
+              phases={phases}
+              deals={deals}
+              expoPhase={expoPhase}
+              rowHeight={rowHeight}
+              onSelect={onSelect}
+              renderRight={renderRight}
+            />
+          );
+        })}
+
+        <GanttLegendBar />
       </div>
     </div>
+  );
+}
+
+function ExpoRow({
+  expo,
+  rowIndex,
+  year,
+  month,
+  totalDays,
+  phases,
+  deals,
+  expoPhase,
+  rowHeight,
+  onSelect,
+  renderRight,
+}: {
+  expo: ExpoItem;
+  rowIndex: number;
+  year: number;
+  month: number;
+  totalDays: number;
+  phases: Phase[];
+  deals: GanttDealBar[];
+  expoPhase: Phase | undefined;
+  rowHeight: number;
+  onSelect: (expo: ExpoItem) => void;
+  renderRight?: (expo: ExpoItem) => React.ReactNode;
+}) {
+  return (
+    <div
+      className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
+      style={{
+        gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
+        minHeight: `${rowHeight}px`,
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => onSelect(expo)}
+        className="flex flex-col justify-center border-r bg-background/70 px-3 py-2 text-left text-sm hover:bg-accent/60"
+        data-testid={`gantt-row-${expo.id}`}
+        title={expo.title}
+      >
+        <div className="truncate font-medium">{expo.title}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {formatShortRange(expo.expoStart, expo.expoEnd)}
+        </div>
+        {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
+      </button>
+      <div
+        className="relative col-span-full -col-start-2 row-span-1"
+        style={{
+          gridColumn: `2 / span ${totalDays}`,
+          minHeight: `${rowHeight}px`,
+        }}
+      >
+        <div
+          className="absolute inset-0 grid"
+          style={{
+            gridTemplateColumns: `repeat(${totalDays}, minmax(0, 1fr))`,
+          }}
+          aria-hidden
+        >
+          {Array.from({ length: totalDays }, (_, i) => {
+            const dayNum = i + 1;
+            const date = new Date(year, month, dayNum);
+            const dow = date.getDay();
+            const isWeekend = dow === 0 || dow === 6;
+            return (
+              <div
+                key={dayNum}
+                className={`border-r border-border/40 ${isWeekend ? "bg-muted/30" : ""}`}
+              />
+            );
+          })}
+        </div>
+
+        {phases.map((phase) => {
+          const clip = clipToMonth(phase, year, month);
+          if (!clip) return null;
+          const left = ((clip.startDay - 1) / totalDays) * 100;
+          const width = ((clip.endDay - clip.startDay + 1) / totalDays) * 100;
+          return (
+            <div
+              key={phase.key}
+              className="absolute top-1 bottom-1 rounded"
+              style={{
+                left: `${left}%`,
+                width: `${width}%`,
+                background: PHASE_FILLS[phase.key],
+              }}
+              title={`${phaseLabel(phase.key)}: ${formatShort(phase.start)} — ${formatShort(phase.end)}`}
+            />
+          );
+        })}
+
+        {deals.length > 0 && expoPhase ? (
+          <DealBars
+            expoPhase={expoPhase}
+            deals={deals}
+            year={year}
+            month={month}
+            totalDays={totalDays}
+          />
+        ) : null}
+
+        <button
+          type="button"
+          onClick={() => onSelect(expo)}
+          className="absolute inset-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/50"
+          aria-label={`Открыть ${expo.title}`}
+        />
+      </div>
+    </div>
+  );
+}
+
+function DealBars({
+  expoPhase,
+  deals,
+  year,
+  month,
+  totalDays,
+}: {
+  expoPhase: Phase;
+  deals: GanttDealBar[];
+  year: number;
+  month: number;
+  totalDays: number;
+}) {
+  const clip = clipToMonth(expoPhase, year, month);
+  if (!clip) return null;
+  const left = ((clip.startDay - 1) / totalDays) * 100;
+  const width = ((clip.endDay - clip.startDay + 1) / totalDays) * 100;
+  return (
+    <div
+      className="absolute"
+      style={{
+        left: `${left}%`,
+        width: `${width}%`,
+        top: `${DEAL_BAR_VERTICAL_PADDING + 10}px`,
+        bottom: `${DEAL_BAR_VERTICAL_PADDING}px`,
+      }}
+    >
+      {deals.map((deal, idx) => {
+        const top = idx * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP);
+        const parts: string[] = [];
+        if (deal.clientName) parts.push(deal.clientName);
+        if (deal.manager) parts.push(deal.manager);
+        if (deal.budget) parts.push(deal.budget);
+        const text = parts.join(" · ") || deal.title || DEAL_STATUS_LABELS[deal.status];
+        return (
+          <div
+            key={`${deal.id}-${idx}`}
+            className="absolute left-0 right-0 flex items-center overflow-hidden rounded px-1.5 text-[10px] font-medium text-white shadow-sm"
+            style={{
+              top: `${top}px`,
+              height: `${DEAL_BAR_HEIGHT}px`,
+              background: DEAL_STATUS_COLORS[deal.status],
+            }}
+            title={`${DEAL_STATUS_LABELS[deal.status]} · ${text}`}
+          >
+            <span className="truncate">{text}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function MonthControls({
+  cursor,
+  onPrev,
+  onNext,
+  onToday,
+  onSelect,
+  yearOptions,
+}: {
+  cursor: Date;
+  onPrev: () => void;
+  onNext: () => void;
+  onToday: () => void;
+  onSelect: (d: Date) => void;
+  yearOptions: number[];
+}) {
+  const year = cursor.getFullYear();
+  const month = cursor.getMonth();
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button variant="outline" size="icon" onClick={onPrev} aria-label="Предыдущий месяц" data-testid="gantt-prev">
+        <ChevronLeft className="h-4 w-4" />
+      </Button>
+      <Button variant="outline" size="sm" onClick={onToday} data-testid="gantt-today">
+        Сегодня
+      </Button>
+      <Button variant="outline" size="icon" onClick={onNext} aria-label="Следующий месяц" data-testid="gantt-next">
+        <ChevronRight className="h-4 w-4" />
+      </Button>
+      <Select
+        value={String(month)}
+        onValueChange={(v) => onSelect(monthStartOf(year, Number(v)))}
+      >
+        <SelectTrigger className="w-[160px]" data-testid="gantt-month"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {MONTH_NAMES_RU.map((name, idx) => (
+            <SelectItem key={idx} value={String(idx)}>{name}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <Select
+        value={String(year)}
+        onValueChange={(v) => onSelect(monthStartOf(Number(v), month))}
+      >
+        <SelectTrigger className="w-[120px]" data-testid="gantt-year"><SelectValue /></SelectTrigger>
+        <SelectContent>
+          {yearOptions.map((y) => (
+            <SelectItem key={y} value={String(y)}>{y}</SelectItem>
+          ))}
+        </SelectContent>
+      </Select>
+      <div className="ml-auto text-sm text-muted-foreground">
+        {MONTH_NAMES_RU[month]} {year}
+      </div>
+    </div>
+  );
+}
+
+function GanttLegendBar() {
+  return (
+    <div className="flex flex-wrap items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
+      <LegendSwatch color={PHASE_FILLS.mount} label="Монтаж" />
+      <LegendSwatch color={PHASE_FILLS.expo} label="Проведение" />
+      <LegendSwatch color={PHASE_FILLS.dismantle} label="Демонтаж" />
+      <span className="mx-2 h-3 w-px bg-border" aria-hidden />
+      {DEAL_STATUS_ORDER.map((key) => (
+        <LegendSwatch
+          key={key}
+          color={DEAL_STATUS_COLORS[key]}
+          label={DEAL_STATUS_LABELS[key]}
+          solid
+        />
+      ))}
+    </div>
+  );
+}
+
+export function GanttLegend() {
+  return (
+    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
+      <LegendSwatch color={PHASE_FILLS.mount} label="Монтаж" />
+      <LegendSwatch color={PHASE_FILLS.expo} label="Проведение" />
+      <LegendSwatch color={PHASE_FILLS.dismantle} label="Демонтаж" />
+    </div>
+  );
+}
+
+function LegendSwatch({ color, label, solid }: { color: string; label: string; solid?: boolean }) {
+  return (
+    <span className="flex items-center gap-1.5">
+      <span
+        className={`h-3 w-4 rounded ${solid ? "" : "border border-border/60"}`}
+        style={{ background: color }}
+      />
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -205,31 +529,20 @@ function phaseLabel(key: "mount" | "expo" | "dismantle") {
   return key === "mount" ? "Монтаж" : key === "expo" ? "Проведение" : "Демонтаж";
 }
 
-export function GanttLegend() {
-  return (
-    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs text-muted-foreground">
-      <LegendDot color={PHASE_COLORS.mount} label="Монтаж" />
-      <LegendDot color={PHASE_COLORS.expo} label="Проведение" />
-      <LegendDot color={PHASE_COLORS.dismantle} label="Демонтаж" />
-    </div>
-  );
+function formatShort(d: Date): string {
+  return d.toLocaleDateString("ru-RU", { day: "2-digit", month: "2-digit", year: "2-digit" });
 }
 
-function LegendDot({ color, label }: { color: string; label: string }) {
-  return (
-    <span className="flex items-center gap-1.5">
-      <span className="h-3 w-4 rounded" style={{ background: color }} />
-      <span>{label}</span>
-    </span>
-  );
+function formatShortRange(from: unknown, to: unknown): string {
+  const a = parseDate(from);
+  const b = parseDate(to);
+  if (!a && !b) return "даты не указаны";
+  if (a && !b) return formatShort(a);
+  if (!a && b) return formatShort(b);
+  return `${formatShort(a!)} — ${formatShort(b!)}`;
 }
 
-function monthMarkers(min: Date, max: Date): Date[] {
-  const out: Date[] = [];
-  const cur = new Date(min.getFullYear(), min.getMonth(), 1);
-  while (cur <= max) {
-    out.push(new Date(cur));
-    cur.setMonth(cur.getMonth() + 1);
-  }
-  return out;
-}
+// Re-export helper for the deal-status matcher so consumers can import from
+// gantt-related code without pulling config directly when they already have
+// the stage text. Kept inline to avoid extra lib files.
+export { matchDealStatus };

@@ -109,6 +109,93 @@ export const PHASE_COLORS = {
   dismantle: "#0891b2",
 };
 
+// Monthly Gantt phase fills (background layers behind deal bars).
+// Montage/dismantle are very light transparent gray; exhibition working days
+// are a stronger semi-transparent gray so the event span stands out.
+export const PHASE_FILLS = {
+  mount: "rgba(100, 116, 139, 0.12)",
+  expo: "rgba(71, 85, 105, 0.32)",
+  dismantle: "rgba(100, 116, 139, 0.12)",
+};
+
+// --- Deal status bars inside Gantt exhibition rows ---
+// The three statuses the user asked to visualize on the monthly Gantt:
+//   signingContract = "Подписываем договор" → yellow
+//   building        = "Строим"              → blue
+//   projectCompleted = "Проект завершён"    → green
+// Stage IDs were not confirmed from Bitrix, so the config stays null by default
+// and the UI falls back to case-insensitive name matching against the deal's
+// stage title. Set the explicit Bitrix stage ID (e.g. "C5:PREPAYMENT_INVOICE")
+// to pin the mapping once confirmed.
+export type DealStatusKey = "signingContract" | "building" | "projectCompleted";
+
+export const dealStageIds: Record<DealStatusKey, string | null> = {
+  signingContract: null,
+  building: null,
+  projectCompleted: null,
+};
+
+export const DEAL_STATUS_LABELS: Record<DealStatusKey, string> = {
+  signingContract: "Подписываем договор",
+  building: "Строим",
+  projectCompleted: "Проект завершён",
+};
+
+export const DEAL_STATUS_COLORS: Record<DealStatusKey, string> = {
+  signingContract: "#eab308", // yellow-500
+  building: "#2563eb", // blue-600
+  projectCompleted: "#16a34a", // green-600
+};
+
+// Order drives stacking inside a row and legend order.
+export const DEAL_STATUS_ORDER: DealStatusKey[] = [
+  "signingContract",
+  "building",
+  "projectCompleted",
+];
+
+function normalizeStageText(value: string): string {
+  return value
+    .toLocaleLowerCase("ru-RU")
+    .replace(/ё/g, "е")
+    .replace(/[^a-zа-я0-9]+/g, " ")
+    .trim();
+}
+
+// Normalized keywords used to match a stage NAME to one of the three
+// supported statuses when dealStageIds are not pinned.
+const STATUS_NAME_MATCHERS: Record<DealStatusKey, (normalized: string) => boolean> = {
+  signingContract: (n) => n.includes("подпис") && n.includes("договор"),
+  building: (n) => n === "строим" || n.startsWith("строим ") || n.includes(" строим"),
+  projectCompleted: (n) =>
+    (n.includes("проект") && (n.includes("заверш") || n.includes("законч"))) ||
+    n === "проект завершен",
+};
+
+export function matchDealStatusByName(title: string | undefined | null): DealStatusKey | undefined {
+  if (!title) return undefined;
+  const n = normalizeStageText(String(title));
+  if (!n) return undefined;
+  for (const key of DEAL_STATUS_ORDER) {
+    if (STATUS_NAME_MATCHERS[key](n)) return key;
+  }
+  return undefined;
+}
+
+export function matchDealStatus(
+  stageId: string | undefined | null,
+  stageTitle: string | undefined | null,
+): DealStatusKey | undefined {
+  const id = String(stageId ?? "").trim();
+  if (id) {
+    for (const key of DEAL_STATUS_ORDER) {
+      const pinned = dealStageIds[key];
+      if (pinned && (pinned === id || pinned === id.split(":").pop())) return key;
+    }
+  }
+  return matchDealStatusByName(stageTitle);
+}
+
 export function groupForLead(statusId: unknown): LeadGroupKey | undefined {
   const id = String(statusId ?? "");
   if (!id) return undefined;

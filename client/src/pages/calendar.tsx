@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState, useCallback } from "react";
+import { useQuery, useQueries } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -7,27 +7,45 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
-import { GanttTimeline } from "@/components/gantt";
+import { GanttTimeline, GanttDealBar } from "@/components/gantt";
 import { CalendarView } from "@/components/calendar-view";
 import {
   buildExpoAggregate,
   ExpoAggregate,
   ExpoItem,
   fetchExpoList,
+  fetchDealStages,
   isFoundAggregate,
+  statusTitleMap,
 } from "@/lib/expo-data";
-import { formatDateRange } from "@/lib/format";
+import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
 import { isInsideBitrix } from "@/lib/bitrix";
+import {
+  DEAL_STATUS_LABELS,
+  DEAL_STATUS_ORDER,
+  DealStatusKey,
+  EXPO_DATE_FIELDS,
+  dealExpoFieldCode,
+  dealStageIds,
+  leadExpoFieldCode,
+  matchDealStatus,
+} from "@/lib/config";
 
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
+
+const MAX_MONTH_DEAL_ENRICH = 24; // bound on concurrent deal lookups per month
 
 export default function CalendarPage() {
   const [view, setView] = useState<ViewMode>("gantt");
   const [period, setPeriod] = useState<PeriodMode>("all");
   const [responsible, setResponsible] = useState<string>("all");
   const [search, setSearch] = useState("");
+  const [activeMonth, setActiveMonth] = useState<Date>(() => {
+    const now = new Date();
+    return new Date(now.getFullYear(), now.getMonth(), 1);
+  });
 
   const expos = useQuery({
     queryKey: ["expo-list"],
@@ -141,7 +159,11 @@ export default function CalendarPage() {
           ) : !filtered.length ? (
             <Empty text="Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс." />
           ) : view === "gantt" ? (
-            <GanttView expos={filtered} />
+            <GanttView
+              expos={filtered}
+              activeMonth={activeMonth}
+              onMonthChange={setActiveMonth}
+            />
           ) : view === "calendar" ? (
             <CalendarView expos={filtered} onSelect={(expo) => navigateToEvent(expo.id)} />
           ) : (
@@ -149,6 +171,10 @@ export default function CalendarPage() {
           )}
         </CardContent>
       </Card>
+
+      {view === "gantt" && isInsideBitrix() && filtered.length > 0 ? (
+        <GanttDiagnostics activeMonth={activeMonth} expos={filtered} />
+      ) : null}
     </Shell>
   );
 }
@@ -180,13 +206,274 @@ function ViewButton({
   );
 }
 
-function GanttView({ expos }: { expos: ExpoItem[] }) {
+function exposOverlappingMonth(expos: ExpoItem[], monthStart: Date): ExpoItem[] {
+  const mStart = new Date(monthStart.getFullYear(), monthStart.getMonth(), 1).getTime();
+  const mEnd = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0).getTime();
+  return expos.filter((expo) => {
+    const s = parseDate(expo.installStart)?.getTime() ?? parseDate(expo.expoStart)?.getTime();
+    const e = parseDate(expo.dismantleEnd)?.getTime() ?? parseDate(expo.expoEnd)?.getTime();
+    if (s === undefined && e === undefined) return false;
+    const start = s ?? e!;
+    const end = e ?? s!;
+    return end >= mStart && start <= mEnd;
+  });
+}
+
+function GanttView({
+  expos,
+  activeMonth,
+  onMonthChange,
+}: {
+  expos: ExpoItem[];
+  activeMonth: Date;
+  onMonthChange: (d: Date) => void;
+}) {
+  const visible = useMemo(
+    () => exposOverlappingMonth(expos, activeMonth).slice(0, MAX_MONTH_DEAL_ENRICH),
+    [expos, activeMonth],
+  );
+  const enabled = isInsideBitrix();
+
+  const aggregates = useQueries({
+    queries: visible.map((expo) => ({
+      queryKey: ["expo-aggregate", expo.id],
+      queryFn: () => buildExpoAggregate(expo.id),
+      enabled,
+      staleTime: 60_000,
+    })),
+  });
+
+  const stageTitleMap = useMemo(() => {
+    const map = new Map<string | number, string>();
+    aggregates.forEach((q) => {
+      const data = q.data as ExpoAggregate | undefined;
+      if (!isFoundAggregate(data)) return;
+      data.deals.forEach((deal) => {
+        const stageId = deal.STAGE_ID ?? (deal as Record<string, unknown>).stageId;
+        const stageTitle =
+          (deal as Record<string, unknown>).STAGE_NAME ||
+          (deal as Record<string, unknown>).stageName;
+        if (stageId && typeof stageTitle === "string" && stageTitle) {
+          map.set(String(stageId), stageTitle);
+        }
+      });
+    });
+    return map;
+  }, [aggregates]);
+
+  // Look up stage titles from crm for any rows where the deal row only has IDs.
+  const stagesQuery = useQuery({
+    queryKey: ["deal-stages"],
+    queryFn: fetchDealStages,
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+  const stageTitlesFromCrm = useMemo(
+    () => statusTitleMap(stagesQuery.data ?? []),
+    [stagesQuery.data],
+  );
+
+  const byExpoId = useMemo(() => {
+    const out = new Map<number | string, GanttDealBar[]>();
+    aggregates.forEach((q, idx) => {
+      const expo = visible[idx];
+      if (!expo) return;
+      const data = q.data as ExpoAggregate | undefined;
+      if (!isFoundAggregate(data)) return;
+      const bars: GanttDealBar[] = [];
+      data.deals.forEach((deal) => {
+        const stageId = String(
+          (deal as Record<string, unknown>).STAGE_ID ??
+            (deal as Record<string, unknown>).stageId ??
+            "",
+        );
+        const titleFromAgg = stageTitleMap.get(stageId);
+        const title = titleFromAgg ?? stageTitlesFromCrm.get(stageId);
+        const status = matchDealStatus(stageId, title);
+        if (!status) return;
+        const clientName = extractClientName(deal);
+        const manager = extractManager(deal);
+        const budget = extractBudget(deal);
+        bars.push({
+          id: String((deal as Record<string, unknown>).ID ?? (deal as Record<string, unknown>).id ?? ""),
+          status,
+          clientName,
+          manager,
+          budget,
+          title: String((deal as Record<string, unknown>).TITLE ?? ""),
+        });
+      });
+      // Order by configured status order so colors stack consistently.
+      bars.sort((a, b) => DEAL_STATUS_ORDER.indexOf(a.status) - DEAL_STATUS_ORDER.indexOf(b.status));
+      out.set(expo.id, bars);
+    });
+    return out;
+  }, [aggregates, visible, stageTitleMap, stageTitlesFromCrm]);
+
+  const dealsFor = useCallback(
+    (expo: ExpoItem): GanttDealBar[] => byExpoId.get(expo.id) ?? [],
+    [byExpoId],
+  );
+
   return (
     <GanttTimeline
       expos={expos}
       onSelect={(expo) => navigateToEvent(expo.id)}
       renderRight={(expo) => <StatsMini expoId={expo.id} />}
+      dealsFor={dealsFor}
+      initialMonth={activeMonth}
+      onMonthChange={onMonthChange}
     />
+  );
+}
+
+function extractClientName(deal: Record<string, unknown>): string | undefined {
+  const fromCompany =
+    deal.COMPANY_TITLE ?? deal.companyTitle ?? deal.COMPANY_NAME ?? deal.companyName;
+  if (typeof fromCompany === "string" && fromCompany) return fromCompany;
+  const fromContact = deal.CONTACT_NAME ?? deal.contactName;
+  if (typeof fromContact === "string" && fromContact) return fromContact;
+  const fromTitle = deal.TITLE ?? deal.title;
+  return typeof fromTitle === "string" && fromTitle ? fromTitle : undefined;
+}
+
+function extractManager(deal: Record<string, unknown>): string | undefined {
+  const name =
+    deal.ASSIGNED_BY_NAME ??
+    deal.assignedByName ??
+    deal.ASSIGNED_BY_FULL_NAME ??
+    deal.assignedByFullName;
+  if (typeof name === "string" && name) return name;
+  const id = deal.ASSIGNED_BY_ID ?? deal.assignedById;
+  if (id !== undefined && id !== null && id !== "") return `ID ${id}`;
+  return undefined;
+}
+
+function extractBudget(deal: Record<string, unknown>): string | undefined {
+  const amount = deal.OPPORTUNITY ?? deal.opportunity;
+  if (amount === undefined || amount === null || amount === "") return undefined;
+  const currency = String(deal.CURRENCY_ID ?? deal.currencyId ?? "").trim();
+  const num = Number(amount);
+  const formatted = Number.isFinite(num)
+    ? new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(num)
+    : String(amount);
+  return currency ? `${formatted} ${currency}` : formatted;
+}
+
+function GanttDiagnostics({
+  activeMonth,
+  expos,
+}: {
+  activeMonth: Date;
+  expos: ExpoItem[];
+}) {
+  const enabled = isInsideBitrix();
+  const stagesQuery = useQuery({
+    queryKey: ["deal-stages"],
+    queryFn: fetchDealStages,
+    enabled,
+    staleTime: 5 * 60_000,
+  });
+
+  const matches: Record<DealStatusKey, { count: number; examples: { id: string; title: string }[] }> = {
+    signingContract: { count: 0, examples: [] },
+    building: { count: 0, examples: [] },
+    projectCompleted: { count: 0, examples: [] },
+  };
+  (stagesQuery.data ?? []).forEach((stage) => {
+    const status = matchDealStatus(stage.id, stage.title);
+    if (!status) return;
+    matches[status].count += 1;
+    if (matches[status].examples.length < 3) {
+      matches[status].examples.push({ id: stage.id, title: stage.title });
+    }
+  });
+
+  const monthLabel = activeMonth.toLocaleDateString("ru-RU", { month: "long", year: "numeric" });
+  const visibleCount = exposOverlappingMonth(expos, activeMonth).length;
+  const mountMissing = !EXPO_DATE_FIELDS.mountStart && !EXPO_DATE_FIELDS.mountEnd;
+  const dismantleMissing = !EXPO_DATE_FIELDS.dismantleStart && !EXPO_DATE_FIELDS.dismantleEnd;
+
+  return (
+    <Card className="mt-4" data-testid="gantt-diagnostics">
+      <CardHeader>
+        <CardTitle className="text-base">Диагностика Gantt</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-xs">
+        <div className="grid gap-1">
+          <div>
+            Активный месяц: <b>{monthLabel}</b> · выставок, пересекающих месяц: <b>{visibleCount}</b>
+          </div>
+          <div>
+            Lead UF: <code>{leadExpoFieldCode ?? "—"}</code> · Deal UF:{" "}
+            <code>{dealExpoFieldCode ?? "—"}</code>
+          </div>
+          <div>
+            Event start UF: <code>{EXPO_DATE_FIELDS.eventStart}</code> · end:{" "}
+            <code>{EXPO_DATE_FIELDS.eventEnd}</code>
+          </div>
+          <div>
+            Montage: <code>{EXPO_DATE_FIELDS.mountStart ?? "—"}</code> →{" "}
+            <code>{EXPO_DATE_FIELDS.mountEnd ?? "—"}</code> · Dismantle:{" "}
+            <code>{EXPO_DATE_FIELDS.dismantleStart ?? "—"}</code> →{" "}
+            <code>{EXPO_DATE_FIELDS.dismantleEnd ?? "—"}</code>
+          </div>
+        </div>
+
+        {(mountMissing || dismantleMissing) && (
+          <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+            {mountMissing ? "Поля монтажа не настроены в EXPO_DATE_FIELDS. " : null}
+            {dismantleMissing ? "Поля демонтажа не настроены в EXPO_DATE_FIELDS. " : null}
+            Фазы монтажа/демонтажа будут пустыми — видно только фон проведения.
+          </div>
+        )}
+
+        <div className="grid gap-2">
+          <div className="font-medium">Сопоставление статусов сделок</div>
+          {DEAL_STATUS_ORDER.map((key) => {
+            const pinned = dealStageIds[key];
+            const matched = matches[key];
+            return (
+              <div key={key} className="rounded-md border bg-muted/30 p-2">
+                <div className="flex items-center justify-between">
+                  <span>
+                    <b>{DEAL_STATUS_LABELS[key]}</b>
+                  </span>
+                  <span className="text-muted-foreground">
+                    pinned ID:{" "}
+                    <code>{pinned ?? "—"}</code>
+                  </span>
+                </div>
+                <div className="mt-1 text-muted-foreground">
+                  Совпадений по названию стадии: <b>{matched.count}</b>
+                  {matched.examples.length > 0 ? (
+                    <>
+                      {" "}· примеры:{" "}
+                      {matched.examples
+                        .map((e) => `${e.id}=${e.title}`)
+                        .join("; ")}
+                    </>
+                  ) : null}
+                </div>
+                {!pinned && matched.count === 0 && (
+                  <div className="mt-1 rounded border border-amber-300 bg-amber-50 p-1 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+                    Ни pinned ID, ни название не совпадают. Цветные бары не будут
+                    показаны, если в загруженных сделках тоже нет совпадения по
+                    названию стадии.
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+
+        {stagesQuery.isError && (
+          <div className="text-red-600">
+            Ошибка загрузки стадий: {formatValue((stagesQuery.error as Error)?.message ?? stagesQuery.error)}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

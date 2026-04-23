@@ -299,8 +299,37 @@ export async function fetchDealStages(): Promise<StatusRef[]> {
       rows.push({
         id: String(row.STATUS_ID ?? ""),
         title: String(row.NAME ?? row.STATUS_ID ?? ""),
+        entityId: "DEAL_STAGE",
       });
     });
+    // Also pull stages via crm.status.list for all DEAL_STAGE* entities so
+    // non-default pipelines are covered. Bitrix uses entityId names like
+    // "DEAL_STAGE" (default) and "DEAL_STAGE_N" for each additional category.
+    try {
+      const entities = await callBx<Array<Record<string, unknown>>>("crm.status.entity.types", {}).catch(
+        () => [] as Array<Record<string, unknown>>,
+      );
+      const dealEntityIds = (Array.isArray(entities) ? entities : [])
+        .map((row) => String(row.ID ?? row.id ?? ""))
+        .filter((id) => id.startsWith("DEAL_STAGE"));
+      for (const entityId of dealEntityIds) {
+        const stages = await callBx<Array<Record<string, unknown>>>("crm.status.list", {
+          filter: { ENTITY_ID: entityId },
+          order: { SORT: "ASC" },
+        }).catch(() => [] as Array<Record<string, unknown>>);
+        (Array.isArray(stages) ? stages : []).forEach((row) => {
+          const id = String(row.STATUS_ID ?? "");
+          if (!id || rows.some((r) => r.id === id)) return;
+          rows.push({
+            id,
+            title: String(row.NAME ?? id),
+            entityId,
+          });
+        });
+      }
+    } catch {
+      // ignore — we still have the default pipeline
+    }
     return rows;
   } catch {
     return [];
