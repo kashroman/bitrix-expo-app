@@ -119,13 +119,55 @@ export function callBx<T = unknown>(
   return withTimeout(promise, timeoutMs, method);
 }
 
+export type ListAllBxOptions = {
+  timeoutMs?: number;
+  maxPages?: number;
+  // Overall time budget across all pages. When the budget is exceeded
+  // between pages, paging stops and partial results are returned. Pages
+  // already in flight still run to their own per-page timeout.
+  deadlineMs?: number;
+  // Optional reporter invoked after each page settles. Lets the caller
+  // surface live paging progress in diagnostics without wrapping the
+  // call themselves.
+  onProgress?: (info: {
+    page: number;
+    rowsSoFar: number;
+    elapsedMs: number;
+    hasMore: boolean;
+  }) => void;
+};
+
+export type ListAllBxResult<T> = {
+  rows: T[];
+  pagesLoaded: number;
+  elapsedMs: number;
+  // True when the SDK reported more pages but we stopped (deadline or
+  // maxPages). Callers should surface this in diagnostics.
+  truncated: boolean;
+  // True when the overall deadlineMs budget was reached.
+  deadlineReached: boolean;
+};
+
 export async function listAllBx<T = unknown>(
   method: string,
   params: Record<string, unknown> = {},
-  options: { timeoutMs?: number; maxPages?: number } = {},
+  options: ListAllBxOptions = {},
 ): Promise<T[]> {
+  const result = await listAllBxDetailed<T>(method, params, options);
+  return result.rows;
+}
+
+export async function listAllBxDetailed<T = unknown>(
+  method: string,
+  params: Record<string, unknown> = {},
+  options: ListAllBxOptions = {},
+): Promise<ListAllBxResult<T>> {
   const timeoutMs = options.timeoutMs ?? LIST_BX_TIMEOUT_MS;
   const maxPages = options.maxPages ?? 40;
+  const deadlineMs = options.deadlineMs;
+  const started = Date.now();
+  const overBudget = () =>
+    typeof deadlineMs === "number" && Date.now() - started > deadlineMs;
 
   const firstPromise = new Promise<BxResult<{ items?: T[]; types?: T[]; result?: T[] } | T[]>>(
     (resolve, reject) => {
@@ -153,10 +195,23 @@ export async function listAllBx<T = unknown>(
   };
 
   collect(first.data());
+  options.onProgress?.({
+    page: 1,
+    rowsSoFar: rows.length,
+    elapsedMs: Date.now() - started,
+    hasMore: Boolean(first.more && first.more()),
+  });
 
   let current = first;
   let pages = 1;
+  let deadlineReached = false;
+  let truncated = false;
   while (current.more && current.more() && current.next && pages < maxPages) {
+    if (overBudget()) {
+      deadlineReached = true;
+      truncated = true;
+      break;
+    }
     const nextPromise = new Promise<typeof current>((resolve, reject) => {
       current.next?.((nextResult) => {
         if (nextResult.error()) {
@@ -169,9 +224,28 @@ export async function listAllBx<T = unknown>(
     current = await withTimeout(nextPromise, timeoutMs, `${method} page ${pages + 1}`);
     collect(current.data());
     pages += 1;
+    options.onProgress?.({
+      page: pages,
+      rowsSoFar: rows.length,
+      elapsedMs: Date.now() - started,
+      hasMore: Boolean(current.more && current.more()),
+    });
+    if (overBudget() && current.more && current.more()) {
+      deadlineReached = true;
+      truncated = true;
+      break;
+    }
   }
 
-  return rows;
+  if (current.more && current.more() && pages >= maxPages) truncated = true;
+
+  return {
+    rows,
+    pagesLoaded: pages,
+    elapsedMs: Date.now() - started,
+    truncated,
+    deadlineReached,
+  };
 }
 
 export function getPlacementInfo(): PlacementInfo {

@@ -1,4 +1,4 @@
-import { callBx, CrmItem, listAllBx } from "./bitrix";
+import { callBx, CrmItem, listAllBx, listAllBxDetailed } from "./bitrix";
 import {
   DEAL_GROUP_LABELS,
   DEAL_STATUS_ORDER,
@@ -278,23 +278,34 @@ async function tryMonthFilter(
 }> {
   const start = Date.now();
   try {
-    const items = await listAllBx<CrmItem>(
+    const detailed = await listAllBxDetailed<CrmItem>(
       "crm.item.list",
       {
         entityTypeId: EXPO_ENTITY_TYPE_ID,
         filter,
+        // Explicit minimal select — never rely on Bitrix' default "*" + "UF_*".
         select: MONTH_EXPO_SELECT,
+        // Explicit order so paging is deterministic.
         order: { id: "DESC" },
+        // Explicit start so the first page is always the newest.
+        start: 0,
       },
       {
         timeoutMs: MONTH_EXPO_REQUEST_TIMEOUT_MS,
         maxPages: MONTH_EXPO_MAX_PAGES,
+        // Overall time budget so the UI never stays "loading" forever —
+        // if the filtered call paginates slowly we abort early.
+        deadlineMs: MONTH_EXPO_REQUEST_TIMEOUT_MS * 2,
       },
     );
-    // Approximate pages from item count (server returns up to 50 per page).
-    const pagesLoaded = Math.max(1, Math.ceil(items.length / 50));
     void strategy;
-    return { ok: true, items, pagesLoaded, durationMs: Date.now() - start };
+    return {
+      ok: true,
+      items: detailed.rows,
+      pagesLoaded: detailed.pagesLoaded,
+      durationMs: detailed.elapsedMs,
+      timedOut: detailed.deadlineReached || undefined,
+    };
   } catch (err) {
     const message = errorMessage(err);
     return {
@@ -869,6 +880,13 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
   return { stages, diagnostics };
 }
 
+// Minimal select for crm.deal.list calls in the Gantt path. Anything not
+// needed to render a bar or to diagnose stage bucketing is dropped so each
+// page of 50 rows stays as small as Bitrix will serve. DATE_CREATE /
+// DATE_MODIFY were removed — the Gantt never reads them. The UF link field
+// is required to bucket by expo; STAGE_SEMANTIC_ID / CATEGORY_ID are kept
+// only because the diagnostics panel surfaces them while operators verify
+// pinned stage IDs.
 const DEAL_STAGE_DIAGNOSTIC_SELECT = [
   "ID",
   "TITLE",
@@ -880,14 +898,18 @@ const DEAL_STAGE_DIAGNOSTIC_SELECT = [
   "ASSIGNED_BY_ID",
   "COMPANY_TITLE",
   "CONTACT_NAME",
-  "DATE_CREATE",
-  "DATE_MODIFY",
   "UF_CRM_6989BC521C964",
 ];
 
 export type DealStageProbeOptions = {
   categoryId?: string | number;
   limit?: number; // max rows to collect (default 300, hard cap 500)
+  // Per-page Bitrix timeout (applies to each individual crm.deal.list
+  // page). Kept short so a hung page frees the slot quickly.
+  perPageTimeoutMs?: number;
+  // Overall time budget across all pages. When exceeded between pages,
+  // paging stops and partial deals + deadlineReached=true are returned.
+  deadlineMs?: number;
 };
 
 export type DealStageProbeResult = {
@@ -897,7 +919,28 @@ export type DealStageProbeResult = {
   requestedLimit: number;
   categoryId?: string | number;
   error?: string;
+  // Wall-clock time spent inside crm.deal.list. Surfaced in diagnostics.
+  elapsedMs: number;
+  // True when the overall deadlineMs was hit and paging stopped early.
+  deadlineReached: boolean;
+  // Per-page Bitrix timeout that was used.
+  perPageTimeoutMs: number;
+  // Overall time budget that was used (undefined = none).
+  deadlineMs?: number;
+  // The exact REST shape used — echoed here so diagnostics can show the
+  // operator what the app actually sent to Bitrix.
+  requestShape: {
+    method: "crm.deal.list";
+    order: Record<string, "ASC" | "DESC">;
+    filter: Record<string, unknown>;
+    select: string[];
+    start: number;
+    maxPages: number;
+  };
 };
+
+const DEFAULT_DEAL_PROBE_PAGE_TIMEOUT_MS = 12_000;
+const DEFAULT_DEAL_PROBE_DEADLINE_MS = 20_000;
 
 export async function fetchDealsForStageProbe(
   options: DealStageProbeOptions = {},
@@ -906,50 +949,77 @@ export async function fetchDealsForStageProbe(
     1,
     Math.min(500, Math.floor(options.limit ?? 300)),
   );
+  const perPageTimeoutMs = Math.max(
+    2_000,
+    Math.floor(options.perPageTimeoutMs ?? DEFAULT_DEAL_PROBE_PAGE_TIMEOUT_MS),
+  );
+  const deadlineMs =
+    options.deadlineMs === undefined
+      ? DEFAULT_DEAL_PROBE_DEADLINE_MS
+      : Math.max(perPageTimeoutMs, Math.floor(options.deadlineMs));
   const filter: Record<string, unknown> = {};
   if (options.categoryId !== undefined && options.categoryId !== "") {
     filter.CATEGORY_ID = options.categoryId;
   }
 
-  const deals: CrmItem[] = [];
-  let pages = 0;
-  let truncated = false;
+  const maxPages = Math.max(1, Math.ceil(requestedLimit / 50));
+  const params = {
+    order: { ID: "DESC" as const },
+    filter,
+    select: DEAL_STAGE_DIAGNOSTIC_SELECT,
+    // Always page from the start so "recent" really means most-recent by ID.
+    start: 0,
+  };
+  const requestShape: DealStageProbeResult["requestShape"] = {
+    method: "crm.deal.list",
+    order: params.order,
+    filter,
+    select: DEAL_STAGE_DIAGNOSTIC_SELECT,
+    start: 0,
+    maxPages,
+  };
+
+  const started = Date.now();
   try {
-    const rows = await listAllBx<CrmItem>(
-      "crm.deal.list",
-      {
-        order: { ID: "DESC" },
-        filter,
-        select: DEAL_STAGE_DIAGNOSTIC_SELECT,
-      },
-      { maxPages: Math.max(1, Math.ceil(requestedLimit / 50)) + 1 },
-    );
-    for (const row of rows) {
-      if (deals.length >= requestedLimit) {
-        truncated = true;
-        break;
-      }
-      deals.push(row);
-      pages = Math.floor(deals.length / 50) + 1;
-    }
-    if (!truncated && rows.length > requestedLimit) truncated = true;
-  } catch (err) {
+    const { rows, pagesLoaded, elapsedMs, truncated, deadlineReached } =
+      await listAllBxDetailed<CrmItem>(
+        "crm.deal.list",
+        params,
+        {
+          maxPages,
+          timeoutMs: perPageTimeoutMs,
+          deadlineMs,
+        },
+      );
+    const deals = rows.slice(0, requestedLimit);
+    const hitRequestedLimit = rows.length >= requestedLimit;
     return {
       deals,
-      pages,
-      truncated,
+      pages: pagesLoaded,
+      truncated: truncated || hitRequestedLimit,
+      requestedLimit,
+      categoryId: options.categoryId,
+      elapsedMs,
+      deadlineReached,
+      perPageTimeoutMs,
+      deadlineMs,
+      requestShape,
+    };
+  } catch (err) {
+    return {
+      deals: [],
+      pages: 0,
+      truncated: false,
       requestedLimit,
       categoryId: options.categoryId,
       error: errorMessage(err),
+      elapsedMs: Date.now() - started,
+      deadlineReached: false,
+      perPageTimeoutMs,
+      deadlineMs,
+      requestShape,
     };
   }
-  return {
-    deals,
-    pages,
-    truncated,
-    requestedLimit,
-    categoryId: options.categoryId,
-  };
 }
 
 export type MonthlyDealBatchOutcome = {
@@ -1466,6 +1536,13 @@ export type RecentScanResult = {
   truncated: boolean;
   warning: string;
   scanError?: string;
+  // Exact REST shape echoed for diagnostics.
+  requestShape: DealStageProbeResult["requestShape"];
+  // Timeout / deadline that were in force for this scan.
+  perPageTimeoutMs: number;
+  deadlineMs?: number;
+  // True when the overall deadline was reached and paging stopped early.
+  deadlineReached: boolean;
   // Which code path loaded the deals. When set to
   // "stageIdFinder-compatible" the scan delegated to
   // fetchDealsForStageProbe — the exact same request shape that
@@ -1476,7 +1553,12 @@ export type RecentScanResult = {
 
 export async function fetchMonthlyDealsByRecentScan(
   visibleExpoIds: Array<number | string>,
-  options: { linkField?: string; limit?: number } = {},
+  options: {
+    linkField?: string;
+    limit?: number;
+    perPageTimeoutMs?: number;
+    deadlineMs?: number;
+  } = {},
 ): Promise<RecentScanResult> {
   const linkField = options.linkField ?? "UF_CRM_6989BC521C964";
   const requestedLimit = Math.max(
@@ -1520,7 +1602,7 @@ export async function fetchMonthlyDealsByRecentScan(
   };
 
   const start = Date.now();
-  const warning = `Bounded recent-deal scan (stageIdFinder-compatible path): reads up to ${requestedLimit} most-recent deals via fetchDealsForStageProbe — the exact same crm.deal.list request shape StageIdFinderPanel uses and has proven loads 300 deals reliably — then client-side filters to pinned stages (8/9/WON) linked to visible expos. Older deals are not included; limit can be raised later.`;
+  const warning = `Bounded recent-deal scan (crm.deal.list, order ID DESC, start=0, minimal select, per-page timeout + overall deadline): reads up to ${requestedLimit} most-recent deals, then client-side filters to pinned stages (8/9/WON) linked to visible expos. Older deals are not included; if the overall deadline is hit, partial deals are shown and diagnostics flag the timeout.`;
 
   let allScanned: CrmItem[] = [];
   let pagesLoaded = 0;
@@ -1530,7 +1612,11 @@ export async function fetchMonthlyDealsByRecentScan(
   // function/request shape that StageIdFinderPanel uses. Any divergence
   // (paging, select, filter, timeout) between the two paths is eliminated
   // by reusing the single function.
-  const probe = await fetchDealsForStageProbe({ limit: requestedLimit });
+  const probe = await fetchDealsForStageProbe({
+    limit: requestedLimit,
+    perPageTimeoutMs: options.perPageTimeoutMs,
+    deadlineMs: options.deadlineMs,
+  });
   if (probe.error) {
     scanError = probe.error;
   }
@@ -1580,7 +1666,9 @@ export async function fetchMonthlyDealsByRecentScan(
     ? /timeout|таймаут/i.test(scanError)
       ? "timeout"
       : "failed"
-    : "ok";
+    : probe.deadlineReached
+      ? "timeout"
+      : "ok";
   const outcomes: RecentScanOutcome[] = requested
     .filter(
       (r): r is { status: DealStatusKey; stageId: string } =>
@@ -1633,6 +1721,10 @@ export async function fetchMonthlyDealsByRecentScan(
     warning,
     scanError,
     scanSource: "stageIdFinder-compatible",
+    requestShape: probe.requestShape,
+    perPageTimeoutMs: probe.perPageTimeoutMs,
+    deadlineMs: probe.deadlineMs,
+    deadlineReached: probe.deadlineReached,
   };
 }
 

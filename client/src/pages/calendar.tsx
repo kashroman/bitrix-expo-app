@@ -53,13 +53,18 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-// Recent-deal-scan page cap. Tuned to be a safe default: 300 covers
-// the deals a monthly Gantt usually needs, while keeping the scan
-// bounded. The StageIdFinderPanel has proven this request shape (no
-// filter, order by ID DESC, limited select) loads reliably in the live
-// Bitrix24 environment where per-expo UF filters and per-STAGE_ID scans
-// both time out. Adjust here to widen or narrow the scan.
-const RECENT_SCAN_LIMIT = 300;
+// Recent-deal-scan tuning. The Gantt renders exhibitions first (a
+// separate, fast crm.item.list query) and the deal scan is a secondary
+// progressive load triggered by the user. Two preset widths are offered:
+//   - FAST: 200 deals / 4 pages — tuned for rendering bars in a single
+//     round-trip. Hits in ~1–2 s on a healthy account.
+//   - WIDE: 500 deals / 10 pages — for months that need more history.
+// Every request carries an overall deadline so the UI never stalls.
+const RECENT_SCAN_FAST_LIMIT = 200;
+const RECENT_SCAN_WIDE_LIMIT = 500;
+const RECENT_SCAN_PER_PAGE_TIMEOUT_MS = 12_000;
+const RECENT_SCAN_FAST_DEADLINE_MS = 15_000;
+const RECENT_SCAN_WIDE_DEADLINE_MS = 35_000;
 
 function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -312,6 +317,18 @@ function exposOverlappingMonth(expos: ExpoItem[], monthStart: Date): ExpoItem[] 
   );
 }
 
+type ScanWidth = "fast" | "wide";
+
+function scanLimitFor(width: ScanWidth): number {
+  return width === "wide" ? RECENT_SCAN_WIDE_LIMIT : RECENT_SCAN_FAST_LIMIT;
+}
+
+function scanDeadlineFor(width: ScanWidth): number {
+  return width === "wide"
+    ? RECENT_SCAN_WIDE_DEADLINE_MS
+    : RECENT_SCAN_FAST_DEADLINE_MS;
+}
+
 function GanttView({
   expos,
   activeMonth,
@@ -329,26 +346,41 @@ function GanttView({
   );
   const enabled = isInsideBitrix();
 
-  // Recent-deal-scan strategy: per-expo UF filter calls and per-STAGE_ID
-  // scans both time out in the live Bitrix24 environment (12–20 s each).
-  // The StageIdFinderPanel proved that the simplest crm.deal.list shape
-  // (no filter, order ID DESC, limited select) returns 300 deals quickly
-  // and includes the target pinned-stage deals. Reuse that shape: scan a
-  // bounded number of recent deals, then client-side bucket by pinned
-  // STAGE_ID (8/9/WON) and by UF_CRM_6989BC521C964 → visible expo IDs.
+  // Recent-deal-scan: single bounded crm.deal.list (order ID DESC, start=0,
+  // minimal select, per-page timeout + overall deadline). Exhibitions
+  // render first via the separate month-scoped crm.item.list query; the
+  // scan below only adds colored deal bars on top and never blocks the
+  // Gantt from showing rows. The scan is user-controllable — default FAST
+  // (200 deals / ~15 s deadline), widen to 500 with the button.
   const monthKey = monthKeyOf(activeMonth);
   const overlappingIds = useMemo(
     () => overlapping.map((e) => Number(e.id)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
     [overlapping],
   );
 
+  const [scanWidth, setScanWidth] = useState<ScanWidth>("fast");
+  // Cancel switch: flipped false when the user clicks "Отменить". The
+  // React Query stays disabled until the user requests another scan.
+  const [scanEnabled, setScanEnabled] = useState<boolean>(true);
+
+  const scanLimit = scanLimitFor(scanWidth);
+  const scanDeadline = scanDeadlineFor(scanWidth);
+
   const monthBatch = useQuery<RecentScanResult>({
-    queryKey: ["gantt-monthly-deals-recent-scan", monthKey, RECENT_SCAN_LIMIT, overlappingIds],
+    queryKey: [
+      "gantt-monthly-deals-recent-scan",
+      monthKey,
+      scanWidth,
+      scanLimit,
+      overlappingIds,
+    ],
     queryFn: () =>
       fetchMonthlyDealsByRecentScan(overlappingIds, {
-        limit: RECENT_SCAN_LIMIT,
+        limit: scanLimit,
+        perPageTimeoutMs: RECENT_SCAN_PER_PAGE_TIMEOUT_MS,
+        deadlineMs: scanDeadline,
       }),
-    enabled: enabled && overlappingIds.length > 0,
+    enabled: enabled && scanEnabled && overlappingIds.length > 0,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -409,16 +441,116 @@ function GanttView({
       ? "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
       : "Ни одна выставка не попадает в выбранный месяц (по периодам монтажа / проведения / демонтажа).");
 
+  const batch = monthBatch.data;
+  const isScanning = monthBatch.isFetching;
+  const scanError = (monthBatch.error as Error | undefined)?.message;
+  const deadlineReached = Boolean(batch?.deadlineReached);
+  const pagesLoaded = batch?.pagesLoaded ?? 0;
+  const dealsScanned = batch?.scannedDealCount ?? 0;
+  const linkedToVisible = batch?.linkedToVisibleCount ?? 0;
+  const elapsedMs = batch?.durationMs;
+
+  const cancelScan = useCallback(() => setScanEnabled(false), []);
+  const reloadScan = useCallback(() => {
+    setScanEnabled(true);
+    queryClient.invalidateQueries({
+      queryKey: ["gantt-monthly-deals-recent-scan", monthKey],
+    });
+  }, [monthKey]);
+
   return (
-    <GanttTimeline
-      expos={overlapping}
-      onSelect={(expo) => navigateToEvent(expo.id)}
-      renderRight={(expo) => <StatsMini expoId={expo.id} />}
-      dealsFor={dealsFor}
-      initialMonth={activeMonth}
-      onMonthChange={onMonthChange}
-      emptyMessage={effectiveEmpty}
-    />
+    <div className="space-y-2">
+      <div
+        className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2 text-xs"
+        data-testid="gantt-scan-controls"
+      >
+        <span className="font-medium">Загрузка сделок:</span>
+        <div className="flex rounded-md border overflow-hidden">
+          <button
+            type="button"
+            onClick={() => {
+              setScanWidth("fast");
+              setScanEnabled(true);
+            }}
+            className={`px-2 py-1 ${
+              scanWidth === "fast"
+                ? "bg-primary text-primary-foreground"
+                : "bg-background hover:bg-muted"
+            }`}
+            data-testid="button-scan-fast"
+          >
+            Быстрый ({RECENT_SCAN_FAST_LIMIT})
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setScanWidth("wide");
+              setScanEnabled(true);
+            }}
+            className={`border-l px-2 py-1 ${
+              scanWidth === "wide"
+                ? "bg-primary text-primary-foreground"
+                : "bg-background hover:bg-muted"
+            }`}
+            data-testid="button-scan-wide"
+          >
+            Широкий ({RECENT_SCAN_WIDE_LIMIT})
+          </button>
+        </div>
+        {isScanning ? (
+          <button
+            type="button"
+            onClick={cancelScan}
+            className="rounded border border-red-300 bg-red-50 px-2 py-1 text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+            data-testid="button-scan-cancel"
+          >
+            Отменить
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={reloadScan}
+            className="rounded border px-2 py-1 hover:bg-muted"
+            data-testid="button-scan-reload"
+          >
+            Перезагрузить
+          </button>
+        )}
+        <span className="ml-auto text-muted-foreground" data-testid="gantt-scan-status">
+          {!scanEnabled ? (
+            <>Скан отменён</>
+          ) : overlappingIds.length === 0 ? (
+            <>Нет выставок в месяце</>
+          ) : isScanning ? (
+            <>Сканирование… (лимит {scanLimit}, дедлайн {Math.round(scanDeadline / 1000)} с)</>
+          ) : scanError ? (
+            <span className="text-red-600">Ошибка: {scanError}</span>
+          ) : batch ? (
+            <>
+              Страниц: <b>{pagesLoaded}</b>, сделок: <b>{dealsScanned}</b>, связано:{" "}
+              <b>{linkedToVisible}</b>
+              {typeof elapsedMs === "number" ? <> · {Math.round(elapsedMs)} мс</> : null}
+              {deadlineReached ? (
+                <span className="ml-1 text-amber-700 dark:text-amber-300">
+                  · таймаут ({Math.round(scanDeadline / 1000)} с) — показаны частичные данные
+                </span>
+              ) : null}
+            </>
+          ) : (
+            <>Ожидание запроса</>
+          )}
+        </span>
+      </div>
+      <GanttTimeline
+        expos={overlapping}
+        onSelect={(expo) => navigateToEvent(expo.id)}
+        renderRight={(expo) => <StatsMini expoId={expo.id} />}
+        dealsFor={dealsFor}
+        initialMonth={activeMonth}
+        onMonthChange={onMonthChange}
+        emptyMessage={effectiveEmpty}
+      />
+    </div>
   );
 }
 
@@ -493,13 +625,21 @@ function GanttDiagnostics({
     [monthTargets],
   );
   const monthKey = monthKeyOf(activeMonth);
-  // Reuse the same query key as GanttView — React Query dedupes so this
-  // just reads from cache without re-firing the batch call.
+  // Reuse the same query key as GanttView's default FAST scan — React Query
+  // dedupes so this just reads from cache without re-firing the batch call.
   const monthBatchQuery = useQuery<RecentScanResult>({
-    queryKey: ["gantt-monthly-deals-recent-scan", monthKey, RECENT_SCAN_LIMIT, monthTargetIds],
+    queryKey: [
+      "gantt-monthly-deals-recent-scan",
+      monthKey,
+      "fast",
+      RECENT_SCAN_FAST_LIMIT,
+      monthTargetIds,
+    ],
     queryFn: () =>
       fetchMonthlyDealsByRecentScan(monthTargetIds, {
-        limit: RECENT_SCAN_LIMIT,
+        limit: RECENT_SCAN_FAST_LIMIT,
+        perPageTimeoutMs: RECENT_SCAN_PER_PAGE_TIMEOUT_MS,
+        deadlineMs: RECENT_SCAN_FAST_DEADLINE_MS,
       }),
     enabled: enabled && monthTargetIds.length > 0,
     staleTime: 60_000,
@@ -982,15 +1122,16 @@ function MonthlyBatchDiagnosticsPanel({
           <code>ID DESC</code>, <code>select</code> с минимально
           необходимыми полями) — та же форма запроса, которую использует
           StageIdFinderPanel и которая стабильно возвращает сотни сделок.
-          Сканируется до <b>{data?.requestedLimit ?? RECENT_SCAN_LIMIT}</b>{" "}
-          самых свежих сделок, далее на клиенте отбираются сделки с
-          закреплёнными STAGE_ID (<code>signingContract=8</code>,{" "}
-          <code>building=9</code>, <code>projectCompleted=WON</code>) и
-          связанные с видимыми выставками по полю{" "}
+          Сканируется до{" "}
+          <b>{data?.requestedLimit ?? RECENT_SCAN_FAST_LIMIT}</b> самых свежих
+          сделок, далее на клиенте отбираются сделки с закреплёнными STAGE_ID
+          (<code>signingContract=8</code>, <code>building=9</code>,{" "}
+          <code>projectCompleted=WON</code>) и связанные с видимыми выставками
+          по полю{" "}
           <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>. Это
           ограниченный скан: более старые сделки в него не попадают — если
-          нужно шире, измените <code>RECENT_SCAN_LIMIT</code> в{" "}
-          <code>client/src/pages/calendar.tsx</code>.
+          нужно шире, переключите режим сканирования на{" "}
+          <b>Широкий ({RECENT_SCAN_WIDE_LIMIT})</b> в блоке Gantt.
         </div>
         {data && (
           <div
@@ -1012,10 +1153,26 @@ function MonthlyBatchDiagnosticsPanel({
             <b data-testid="gantt-diag-month-scan-count">{data.scannedDealCount}</b>
             {" · источник: "}
             <b data-testid="gantt-diag-month-scan-source">{data.scanSource}</b>
+            {" · за "}
+            <b data-testid="gantt-diag-month-scan-elapsed">
+              {Math.round(data.durationMs)}
+            </b>
+            {" мс"}
             {data.truncated ? (
               <>
                 {" · "}
                 <b className="text-amber-700 dark:text-amber-300">достигнут лимит</b>
+              </>
+            ) : null}
+            {data.deadlineReached ? (
+              <>
+                {" · "}
+                <b
+                  className="text-red-600"
+                  data-testid="gantt-diag-month-scan-deadline"
+                >
+                  дедлайн сработал — частичные данные
+                </b>
               </>
             ) : null}
             {data.scanError ? (
@@ -1024,6 +1181,45 @@ function MonthlyBatchDiagnosticsPanel({
                 <span className="text-red-600">scan error: {data.scanError}</span>
               </>
             ) : null}
+          </div>
+        )}
+        {data && (
+          <div
+            className="rounded border bg-background p-2 font-mono text-[11px] leading-5 text-muted-foreground"
+            data-testid="gantt-diag-month-request-shape"
+          >
+            <div>
+              <b className="text-foreground">REST:</b> <code>{data.requestShape.method}</code>
+            </div>
+            <div>
+              <b className="text-foreground">order:</b>{" "}
+              <code>{JSON.stringify(data.requestShape.order)}</code>
+            </div>
+            <div>
+              <b className="text-foreground">filter:</b>{" "}
+              <code>{JSON.stringify(data.requestShape.filter)}</code>
+            </div>
+            <div>
+              <b className="text-foreground">select:</b>{" "}
+              <code>{data.requestShape.select.join(", ")}</code>
+            </div>
+            <div>
+              <b className="text-foreground">start:</b>{" "}
+              <code>{data.requestShape.start}</code>
+              {" · "}
+              <b className="text-foreground">maxPages:</b>{" "}
+              <code>{data.requestShape.maxPages}</code>
+              {" · "}
+              <b className="text-foreground">per-page timeout:</b>{" "}
+              <code>{Math.round(data.perPageTimeoutMs / 1000)} с</code>
+              {typeof data.deadlineMs === "number" ? (
+                <>
+                  {" · "}
+                  <b className="text-foreground">дедлайн:</b>{" "}
+                  <code>{Math.round(data.deadlineMs / 1000)} с</code>
+                </>
+              ) : null}
+            </div>
           </div>
         )}
         <div>
