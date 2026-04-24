@@ -421,6 +421,22 @@ function GanttDiagnostics({
   const stages = stagesQuery.data?.stages ?? [];
   const stagesDiagnostics = stagesQuery.data?.diagnostics;
 
+  // Reuse the same query keys as GanttView — React Query dedupes by key so the
+  // aggregates are not refetched, just read from cache.
+  const monthTargets = useMemo(
+    () => exposOverlappingMonth(expos, activeMonth).slice(0, MAX_MONTH_DEAL_ENRICH),
+    [expos, activeMonth],
+  );
+  const monthAggregates = useQueries({
+    queries: monthTargets.map((expo) => ({
+      queryKey: ["expo-aggregate", expo.id],
+      queryFn: () => buildExpoAggregate(expo.id),
+      enabled,
+      staleTime: 60_000,
+    })),
+  });
+  const crmStageTitles = useMemo(() => statusTitleMap(stages), [stages]);
+
   const matches: Record<DealStatusKey, { count: number; examples: { id: string; title: string }[] }> = {
     signingContract: { count: 0, examples: [] },
     building: { count: 0, examples: [] },
@@ -537,9 +553,360 @@ function GanttDiagnostics({
           <StageFetchDiagnostics diagnostics={stagesDiagnostics} totalStages={stages.length} />
         )}
 
+        <LoadedDealStagesPanel
+          aggregates={monthAggregates}
+          targets={monthTargets}
+          crmStageTitles={crmStageTitles}
+        />
+
         <AllDealStagesTable stages={stages} />
       </CardContent>
     </Card>
+  );
+}
+
+type LoadedDealRow = {
+  expoId: number;
+  expoTitle: string;
+  dealId: string;
+  dealTitle: string;
+  stageId: string;
+  stageTitleCrm?: string;
+  stageSemanticId?: string;
+  categoryId?: string;
+  opportunity?: string;
+  currencyId?: string;
+  clientName?: string;
+  assignedById?: string;
+  linkFieldCode?: string;
+  linkFieldValue?: string;
+  candidate?: DealStatusKey;
+  exact?: DealStatusKey;
+};
+
+function extractLinkFieldValue(
+  deal: Record<string, unknown>,
+  fieldCode: string | undefined,
+): string | undefined {
+  if (!fieldCode) return undefined;
+  const variants = [
+    fieldCode,
+    fieldCode.toUpperCase(),
+    fieldCode.toLowerCase(),
+    fieldCode.replace(/_([a-z])/g, (_, c) => (c as string).toUpperCase()),
+  ];
+  for (const key of variants) {
+    const v = deal[key];
+    if (v !== undefined && v !== null && v !== "") {
+      return Array.isArray(v) ? JSON.stringify(v) : String(v);
+    }
+  }
+  return undefined;
+}
+
+function collectLoadedDealRows(
+  aggregates: { data?: ExpoAggregate }[],
+  targets: ExpoItem[],
+  crmStageTitles: Map<string, string>,
+): LoadedDealRow[] {
+  const out: LoadedDealRow[] = [];
+  aggregates.forEach((q, idx) => {
+    const expo = targets[idx];
+    if (!expo) return;
+    const data = q.data as ExpoAggregate | undefined;
+    if (!isFoundAggregate(data)) return;
+    const linkField = data.diagnostics.deal.chosenField ?? dealExpoFieldCode ?? undefined;
+    data.deals.forEach((deal) => {
+      const r = deal as Record<string, unknown>;
+      const dealId = String(r.ID ?? r.id ?? "");
+      if (!dealId) return;
+      const stageId = String(r.STAGE_ID ?? r.stageId ?? "");
+      const stageTitleCrm = stageId ? crmStageTitles.get(stageId) : undefined;
+      const stageSemanticId = r.STAGE_SEMANTIC_ID
+        ? String(r.STAGE_SEMANTIC_ID)
+        : r.stageSemanticId
+          ? String(r.stageSemanticId)
+          : undefined;
+      const categoryId = r.CATEGORY_ID
+        ? String(r.CATEGORY_ID)
+        : r.categoryId
+          ? String(r.categoryId)
+          : undefined;
+      const opportunityRaw = r.OPPORTUNITY ?? r.opportunity;
+      const opportunity =
+        opportunityRaw !== undefined && opportunityRaw !== null && opportunityRaw !== ""
+          ? String(opportunityRaw)
+          : undefined;
+      const currencyId = r.CURRENCY_ID
+        ? String(r.CURRENCY_ID)
+        : r.currencyId
+          ? String(r.currencyId)
+          : undefined;
+      const exact = matchDealStatus(stageId, stageTitleCrm);
+      const candidate = exact ?? candidateDealStatusByName(stageTitleCrm);
+      out.push({
+        expoId: expo.id,
+        expoTitle: expo.title,
+        dealId,
+        dealTitle: String(r.TITLE ?? r.title ?? ""),
+        stageId,
+        stageTitleCrm,
+        stageSemanticId,
+        categoryId,
+        opportunity,
+        currencyId,
+        clientName: extractClientName(r),
+        assignedById: r.ASSIGNED_BY_ID
+          ? String(r.ASSIGNED_BY_ID)
+          : r.assignedById
+            ? String(r.assignedById)
+            : undefined,
+        linkFieldCode: linkField,
+        linkFieldValue: extractLinkFieldValue(r, linkField),
+        candidate,
+        exact,
+      });
+    });
+  });
+  return out;
+}
+
+function LoadedDealStagesPanel({
+  aggregates,
+  targets,
+  crmStageTitles,
+}: {
+  aggregates: { data?: ExpoAggregate; isLoading?: boolean; isError?: boolean }[];
+  targets: ExpoItem[];
+  crmStageTitles: Map<string, string>;
+}) {
+  const [open, setOpen] = useState(true);
+
+  const rows = useMemo(
+    () => collectLoadedDealRows(aggregates, targets, crmStageTitles),
+    [aggregates, targets, crmStageTitles],
+  );
+
+  const loading = aggregates.filter((q) => q.isLoading).length;
+  const errored = aggregates.filter((q) => q.isError).length;
+  const enrichedExpos = aggregates.filter((q) => isFoundAggregate(q.data)).length;
+
+  const stageSummary = useMemo(() => {
+    type Entry = {
+      stageId: string;
+      count: number;
+      stageTitle?: string;
+      semanticIds: Set<string>;
+      categoryIds: Set<string>;
+      examples: LoadedDealRow[];
+    };
+    const map = new Map<string, Entry>();
+    rows.forEach((row) => {
+      const key = row.stageId || "—";
+      const entry =
+        map.get(key) ??
+        ({
+          stageId: row.stageId,
+          count: 0,
+          stageTitle: row.stageTitleCrm,
+          semanticIds: new Set<string>(),
+          categoryIds: new Set<string>(),
+          examples: [],
+        } satisfies Entry);
+      entry.count += 1;
+      if (!entry.stageTitle && row.stageTitleCrm) entry.stageTitle = row.stageTitleCrm;
+      if (row.stageSemanticId) entry.semanticIds.add(row.stageSemanticId);
+      if (row.categoryId) entry.categoryIds.add(row.categoryId);
+      if (entry.examples.length < 5) entry.examples.push(row);
+      map.set(key, entry);
+    });
+    return Array.from(map.values()).sort((a, b) => b.count - a.count);
+  }, [rows]);
+
+  const highlight = (row: LoadedDealRow): { cls: string; label: string } | undefined => {
+    const key = row.exact ?? row.candidate;
+    if (!key) return undefined;
+    return { cls: STAGE_HIGHLIGHT[key].cls, label: STAGE_HIGHLIGHT[key].label };
+  };
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between rounded-md border bg-muted/30 p-2 text-left"
+          data-testid="gantt-diag-loaded-deals-toggle"
+        >
+          <span>
+            Стадии загруженных сделок · уникальных STAGE_ID:{" "}
+            <b>{stageSummary.length}</b> · всего сделок: <b>{rows.length}</b> ·
+            выставок с данными: <b>{enrichedExpos}</b>/<b>{targets.length}</b>
+            {loading > 0 ? (
+              <>
+                {" "}· загружается: <b>{loading}</b>
+              </>
+            ) : null}
+            {errored > 0 ? (
+              <>
+                {" "}· ошибок: <b className="text-red-600">{errored}</b>
+              </>
+            ) : null}
+          </span>
+          <ChevronDown
+            className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-3">
+        <div className="text-muted-foreground">
+          Раздел показывает STAGE_ID, реально встреченные в сделках, подтянутых
+          за текущий месяц (через <code>crm.deal.list</code> по полю
+          <code className="ml-1">{dealExpoFieldCode ?? "—"}</code>). Используйте
+          эти ID, чтобы закрепить значения в{" "}
+          <code>dealStageIds</code> (client/src/lib/config.ts), если общий
+          справочник стадий недоступен.
+        </div>
+
+        {rows.length === 0 ? (
+          <div className="rounded border border-dashed p-2 text-muted-foreground">
+            В выбранном месяце не загружено ни одной сделки — нечего показать.
+            Проверьте поле связи сделки с выставкой и фильтры выставок.
+          </div>
+        ) : (
+          <>
+            <div className="overflow-x-auto">
+              <table
+                className="w-full text-[11px]"
+                data-testid="gantt-diag-loaded-stage-summary"
+              >
+                <thead>
+                  <tr className="border-b text-left uppercase tracking-wide text-muted-foreground">
+                    <th className="px-2 py-1">STAGE_ID</th>
+                    <th className="px-2 py-1">Название (CRM)</th>
+                    <th className="px-2 py-1">Semantic</th>
+                    <th className="px-2 py-1">Category</th>
+                    <th className="px-2 py-1">Сделок</th>
+                    <th className="px-2 py-1">Совпадение</th>
+                    <th className="px-2 py-1">Примеры (ID · title · клиент · сумма · выставка)</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {stageSummary.map((entry) => {
+                    const exampleMatch = entry.examples.find((e) => e.exact ?? e.candidate);
+                    const key = exampleMatch?.exact ?? exampleMatch?.candidate;
+                    const hl = key ? STAGE_HIGHLIGHT[key] : undefined;
+                    return (
+                      <tr
+                        key={entry.stageId || "blank"}
+                        className={`border-b align-top ${hl ? hl.cls : ""}`}
+                        data-testid={`gantt-diag-loaded-stage-${entry.stageId || "blank"}`}
+                      >
+                        <td className="px-2 py-1 font-mono">{entry.stageId || "—"}</td>
+                        <td className="px-2 py-1">{entry.stageTitle || "—"}</td>
+                        <td className="px-2 py-1 font-mono">
+                          {Array.from(entry.semanticIds).join(", ") || "—"}
+                        </td>
+                        <td className="px-2 py-1 font-mono">
+                          {Array.from(entry.categoryIds).join(", ") || "—"}
+                        </td>
+                        <td className="px-2 py-1 tabular-nums">{entry.count}</td>
+                        <td className="px-2 py-1">
+                          {exampleMatch?.exact ? (
+                            <span>
+                              <b>точное</b> → {STAGE_HIGHLIGHT[exampleMatch.exact].label}
+                            </span>
+                          ) : exampleMatch?.candidate ? (
+                            <span>
+                              кандидат →{" "}
+                              {STAGE_HIGHLIGHT[exampleMatch.candidate].label}
+                            </span>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </td>
+                        <td className="px-2 py-1">
+                          <ul className="space-y-0.5">
+                            {entry.examples.map((ex) => (
+                              <li key={ex.dealId} className="break-all">
+                                <code>#{ex.dealId}</code>
+                                {ex.dealTitle ? ` · ${ex.dealTitle}` : ""}
+                                {ex.clientName ? ` · ${ex.clientName}` : ""}
+                                {ex.opportunity
+                                  ? ` · ${ex.opportunity}${ex.currencyId ? " " + ex.currencyId : ""}`
+                                  : ""}
+                                {" · "}
+                                <span className="text-muted-foreground">
+                                  {ex.expoTitle} (#{ex.expoId})
+                                </span>
+                              </li>
+                            ))}
+                          </ul>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table
+                className="w-full text-[11px]"
+                data-testid="gantt-diag-loaded-deals-table"
+              >
+                <thead>
+                  <tr className="border-b text-left uppercase tracking-wide text-muted-foreground">
+                    <th className="px-2 py-1">Deal ID</th>
+                    <th className="px-2 py-1">Title</th>
+                    <th className="px-2 py-1">Клиент</th>
+                    <th className="px-2 py-1">STAGE_ID</th>
+                    <th className="px-2 py-1">Stage title</th>
+                    <th className="px-2 py-1">Opportunity</th>
+                    <th className="px-2 py-1">Assigned</th>
+                    <th className="px-2 py-1">Выставка</th>
+                    <th className="px-2 py-1">
+                      Link value (<code>{dealExpoFieldCode ?? "—"}</code>)
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((row) => {
+                    const hl = highlight(row);
+                    return (
+                      <tr
+                        key={`${row.expoId}-${row.dealId}`}
+                        className={`border-b align-top ${hl ? hl.cls : ""}`}
+                        data-testid={`gantt-diag-loaded-deal-row-${row.dealId}`}
+                      >
+                        <td className="px-2 py-1 font-mono">#{row.dealId}</td>
+                        <td className="px-2 py-1">{row.dealTitle || "—"}</td>
+                        <td className="px-2 py-1">{row.clientName || "—"}</td>
+                        <td className="px-2 py-1 font-mono">{row.stageId || "—"}</td>
+                        <td className="px-2 py-1">{row.stageTitleCrm || "—"}</td>
+                        <td className="px-2 py-1 tabular-nums">
+                          {row.opportunity
+                            ? `${row.opportunity}${row.currencyId ? " " + row.currencyId : ""}`
+                            : "—"}
+                        </td>
+                        <td className="px-2 py-1 font-mono">
+                          {row.assignedById ?? "—"}
+                        </td>
+                        <td className="px-2 py-1">
+                          {row.expoTitle} <span className="text-muted-foreground">(#{row.expoId})</span>
+                        </td>
+                        <td className="px-2 py-1 font-mono">
+                          {row.linkFieldValue ?? "—"}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
   );
 }
 

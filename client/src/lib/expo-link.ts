@@ -198,14 +198,22 @@ const DEAL_SELECT = [
   "ID",
   "TITLE",
   "STAGE_ID",
+  "STAGE_SEMANTIC_ID",
   "CATEGORY_ID",
   "ASSIGNED_BY_ID",
   "DATE_CREATE",
   "DATE_MODIFY",
   "OPPORTUNITY",
+  "OPPORTUNITY_ACCOUNT",
   "CURRENCY_ID",
+  "ACCOUNT_CURRENCY_ID",
   "COMPANY_ID",
+  "COMPANY_TITLE",
   "CONTACT_ID",
+  "CONTACT_IDS",
+  "SOURCE_ID",
+  "TYPE_ID",
+  "CLOSED",
 ];
 
 async function tryListWithField(
