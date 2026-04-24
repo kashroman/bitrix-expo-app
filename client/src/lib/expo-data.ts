@@ -1097,6 +1097,239 @@ export async function fetchMonthlyDealsByStageScan(
   };
 }
 
+// --- Recent-deal-scan strategy (primary for Gantt) -------------------------
+//
+// Both the per-expo UF filter (fetchMonthlyDealsForExpos) and the per-pinned
+// STAGE_ID scan (fetchMonthlyDealsByStageScan) time out consistently in the
+// live Bitrix24 environment (12–20 s per request). The diagnostics panel's
+// StageIdFinderPanel, however, reliably loads ~300 real deals quickly with
+// the simplest possible shape: no filters except optional CATEGORY_ID, same
+// select, order by ID DESC.
+//
+// Strategy: reuse that known-working shape. Scan a bounded number of recent
+// deals (RECENT_DEAL_SCAN_DEFAULT_LIMIT), then client-side bucket them by
+// pinned STAGE_ID (8, 9, WON) AND by the UF link field UF_CRM_6989BC521C964
+// → visible expo IDs. Older deals are never visible in the current month's
+// Gantt anyway, so scanning by ID DESC is a reasonable proxy for "recent
+// enough to matter".
+//
+// This is a bounded scan — it will not page past the configured limit. If
+// the Bitrix account exceeds that many deals newer than the pinned-stage
+// matches, some bars may be missing. Bump the limit in code to widen the
+// scan.
+
+// Configurable page cap. Default 1000 (20 pages of 50). Hard cap 2000
+// (40 pages) to keep the request bounded. StageIdFinderPanel proved 300
+// loads in a few seconds; 1000 still completes in well under the SDK's
+// 45s ceiling on a warm channel.
+const RECENT_DEAL_SCAN_DEFAULT_LIMIT = 1000;
+const RECENT_DEAL_SCAN_HARD_CAP = 2000;
+
+export type RecentScanOutcome = {
+  status: DealStatusKey;
+  stageId: string;
+  phase: "ok" | "failed" | "timeout";
+  deals: CrmItem[];
+  pages: number;
+  error?: string;
+  durationMs: number;
+};
+
+export type RecentScanResult = {
+  strategy: "recent-deal-scan";
+  linkField: string;
+  requestedStageIds: Array<{ status: DealStatusKey; stageId: string | null }>;
+  outcomes: RecentScanOutcome[];
+  deals: CrmItem[];
+  byExpoId: Map<number, CrmItem[]>;
+  unlinkedDeals: CrmItem[];
+  visibleExpoIds: number[];
+  linkedToVisibleCount: number;
+  perStageLinkedCount: Record<DealStatusKey, number>;
+  durationMs: number;
+  successCount: number;
+  failedCount: number;
+  timeoutCount: number;
+  timedOut: boolean;
+  // Extra diagnostics specific to this strategy:
+  scannedDealCount: number;
+  pagesLoaded: number;
+  requestedLimit: number;
+  truncated: boolean;
+  warning: string;
+  scanError?: string;
+};
+
+export async function fetchMonthlyDealsByRecentScan(
+  visibleExpoIds: Array<number | string>,
+  options: { linkField?: string; limit?: number } = {},
+): Promise<RecentScanResult> {
+  const linkField = options.linkField ?? "UF_CRM_6989BC521C964";
+  const requestedLimit = Math.max(
+    50,
+    Math.min(
+      RECENT_DEAL_SCAN_HARD_CAP,
+      Math.floor(options.limit ?? RECENT_DEAL_SCAN_DEFAULT_LIMIT),
+    ),
+  );
+  const visible = Array.from(
+    new Set(
+      visibleExpoIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  ).sort((a, b) => a - b);
+  const visibleSet = new Set(visible);
+
+  const byExpoId = new Map<number, CrmItem[]>();
+  visible.forEach((id) => byExpoId.set(id, []));
+
+  const requested: Array<{ status: DealStatusKey; stageId: string | null }> =
+    DEAL_STATUS_ORDER.map((status) => ({
+      status,
+      stageId: dealStageIds[status],
+    }));
+  const stageIdToStatus = new Map<string, DealStatusKey>();
+  requested.forEach((r) => {
+    if (r.stageId) stageIdToStatus.set(r.stageId, r.status);
+  });
+
+  const perStageLinkedCount: Record<DealStatusKey, number> = {
+    signingContract: 0,
+    building: 0,
+    projectCompleted: 0,
+  };
+  const perStageOutcomeDeals: Record<DealStatusKey, CrmItem[]> = {
+    signingContract: [],
+    building: [],
+    projectCompleted: [],
+  };
+
+  const start = Date.now();
+  const warning = `Bounded recent-deal scan: reads up to ${requestedLimit} most-recent deals via crm.deal.list (no filter), then client-side filters to pinned stages (8/9/WON) linked to visible expos. Older deals are not included.`;
+
+  let allScanned: CrmItem[] = [];
+  let pagesLoaded = 0;
+  let truncated = false;
+  let scanError: string | undefined;
+  try {
+    const rows = await listAllBx<CrmItem>(
+      "crm.deal.list",
+      {
+        order: { ID: "DESC" },
+        filter: {},
+        select: DEAL_STAGE_DIAGNOSTIC_SELECT,
+      },
+      {
+        maxPages: Math.max(1, Math.ceil(requestedLimit / 50)) + 1,
+      },
+    );
+    if (rows.length >= requestedLimit) {
+      allScanned = rows.slice(0, requestedLimit);
+      truncated = rows.length > requestedLimit;
+    } else {
+      allScanned = rows;
+    }
+    pagesLoaded = Math.max(1, Math.ceil(allScanned.length / 50));
+  } catch (err) {
+    scanError = errorMessage(err);
+  }
+
+  const linkedDeals: CrmItem[] = [];
+  const unlinkedDeals: CrmItem[] = [];
+  const seenDealIds = new Set<string>();
+  for (const deal of allScanned) {
+    const rec = deal as Record<string, unknown>;
+    const dealId = String(rec.ID ?? rec.id ?? "");
+    if (!dealId || seenDealIds.has(dealId)) continue;
+    seenDealIds.add(dealId);
+
+    const rawStageId = String(rec.STAGE_ID ?? rec.stageId ?? "");
+    if (!rawStageId) continue;
+    const pinnedStatus =
+      stageIdToStatus.get(rawStageId) ??
+      stageIdToStatus.get(rawStageId.split(":").pop() ?? rawStageId);
+    if (!pinnedStatus) continue;
+
+    linkedDeals.push(deal);
+    perStageOutcomeDeals[pinnedStatus].push(deal);
+
+    const linkedExpoIds = extractExpoIdsFromDeal(deal, linkField);
+    let matched = false;
+    for (const linkedId of linkedExpoIds) {
+      if (!visibleSet.has(linkedId)) continue;
+      const bucket = byExpoId.get(linkedId);
+      if (bucket) {
+        bucket.push(deal);
+        matched = true;
+      }
+    }
+    if (matched) perStageLinkedCount[pinnedStatus] += 1;
+    else unlinkedDeals.push(deal);
+  }
+
+  // Synthesize per-stage outcomes from the single scan so the existing
+  // diagnostics panel can render the same layout as stage-scan. The whole
+  // scan either succeeded or failed, so the phase reflects that.
+  const phase: "ok" | "failed" | "timeout" = scanError
+    ? /timeout|таймаут/i.test(scanError)
+      ? "timeout"
+      : "failed"
+    : "ok";
+  const outcomes: RecentScanOutcome[] = requested
+    .filter(
+      (r): r is { status: DealStatusKey; stageId: string } =>
+        typeof r.stageId === "string" && r.stageId.length > 0,
+    )
+    .map((r) => ({
+      status: r.status,
+      stageId: r.stageId,
+      phase,
+      deals: perStageOutcomeDeals[r.status],
+      pages: phase === "ok" ? pagesLoaded : 0,
+      error: scanError,
+      durationMs: Date.now() - start,
+    }));
+
+  let successCount = 0;
+  let failedCount = 0;
+  let timeoutCount = 0;
+  for (const o of outcomes) {
+    if (o.phase === "ok") successCount += 1;
+    else if (o.phase === "timeout") timeoutCount += 1;
+    else failedCount += 1;
+  }
+
+  let linkedToVisibleCount = 0;
+  byExpoId.forEach((list) => {
+    linkedToVisibleCount += list.length;
+  });
+
+  return {
+    strategy: "recent-deal-scan",
+    linkField,
+    requestedStageIds: requested,
+    outcomes,
+    deals: linkedDeals,
+    byExpoId,
+    unlinkedDeals,
+    visibleExpoIds: visible,
+    linkedToVisibleCount,
+    perStageLinkedCount,
+    durationMs: Date.now() - start,
+    successCount,
+    failedCount,
+    timeoutCount,
+    timedOut: timeoutCount > 0,
+    scannedDealCount: allScanned.length,
+    pagesLoaded,
+    requestedLimit,
+    truncated,
+    warning,
+    scanError,
+  };
+}
+
 export async function fetchDealStages(): Promise<StatusRef[]> {
   try {
     const { stages } = await fetchDealStagesDetailed();

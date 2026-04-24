@@ -18,7 +18,7 @@ import {
   fetchExpoList,
   fetchDealStages,
   fetchDealStagesDetailed,
-  fetchMonthlyDealsByStageScan,
+  fetchMonthlyDealsByRecentScan,
   isFoundAggregate,
   probeDealById,
   statusTitleMap,
@@ -27,7 +27,7 @@ import type {
   DealProbeLookup,
   DealStageProbeResult,
   DealStagesResult,
-  StageScanResult,
+  RecentScanResult,
   StatusRef,
 } from "@/lib/expo-data";
 import type { CrmItem } from "@/lib/bitrix";
@@ -51,12 +51,13 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-// Stage-scan strategy concurrency: one crm.deal.list request per pinned
-// STAGE_ID (signingContract=8, building=9, projectCompleted=WON). Issued
-// serially by default to keep the BX24 SDK channel calm. Results are
-// deduplicated and grouped by visible expo IDs client-side using the UF
-// link field (UF_CRM_6989BC521C964).
-const STAGE_SCAN_CONCURRENCY = 1;
+// Recent-deal-scan page cap. Tuned to be a safe default: 1000 covers
+// ~2x the deals a monthly Gantt usually needs, while keeping the scan
+// bounded. The StageIdFinderPanel has proven this request shape (no
+// filter, order by ID DESC, limited select) loads reliably in the live
+// Bitrix24 environment where per-expo UF filters and per-STAGE_ID scans
+// both time out. Adjust here to widen or narrow the scan.
+const RECENT_SCAN_LIMIT = 1000;
 
 function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -283,21 +284,24 @@ function GanttView({
   );
   const enabled = isInsideBitrix();
 
-  // Stage-scan strategy: instead of issuing one crm.deal.list per expo
-  // (which consistently times out on UF_CRM_6989BC521C964), issue one call
-  // per pinned STAGE_ID (8, 9, WON) with a higher page budget, then bucket
-  // the returned deals by UF link value into the currently visible expos.
+  // Recent-deal-scan strategy: per-expo UF filter calls and per-STAGE_ID
+  // scans both time out in the live Bitrix24 environment (12–20 s each).
+  // The StageIdFinderPanel proved that the simplest crm.deal.list shape
+  // (no filter, order ID DESC, limited select) returns 300 deals quickly
+  // and includes the target pinned-stage deals. Reuse that shape: scan a
+  // bounded number of recent deals, then client-side bucket by pinned
+  // STAGE_ID (8/9/WON) and by UF_CRM_6989BC521C964 → visible expo IDs.
   const monthKey = monthKeyOf(activeMonth);
   const overlappingIds = useMemo(
     () => overlapping.map((e) => Number(e.id)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
     [overlapping],
   );
 
-  const monthBatch = useQuery<StageScanResult>({
-    queryKey: ["gantt-monthly-deals-stage-scan", monthKey, overlappingIds],
+  const monthBatch = useQuery<RecentScanResult>({
+    queryKey: ["gantt-monthly-deals-recent-scan", monthKey, RECENT_SCAN_LIMIT, overlappingIds],
     queryFn: () =>
-      fetchMonthlyDealsByStageScan(overlappingIds, {
-        concurrency: STAGE_SCAN_CONCURRENCY,
+      fetchMonthlyDealsByRecentScan(overlappingIds, {
+        limit: RECENT_SCAN_LIMIT,
       }),
     enabled: enabled && overlappingIds.length > 0,
     staleTime: 60_000,
@@ -440,11 +444,11 @@ function GanttDiagnostics({
   const monthKey = monthKeyOf(activeMonth);
   // Reuse the same query key as GanttView — React Query dedupes so this
   // just reads from cache without re-firing the batch call.
-  const monthBatchQuery = useQuery<StageScanResult>({
-    queryKey: ["gantt-monthly-deals-stage-scan", monthKey, monthTargetIds],
+  const monthBatchQuery = useQuery<RecentScanResult>({
+    queryKey: ["gantt-monthly-deals-recent-scan", monthKey, RECENT_SCAN_LIMIT, monthTargetIds],
     queryFn: () =>
-      fetchMonthlyDealsByStageScan(monthTargetIds, {
-        concurrency: STAGE_SCAN_CONCURRENCY,
+      fetchMonthlyDealsByRecentScan(monthTargetIds, {
+        limit: RECENT_SCAN_LIMIT,
       }),
     enabled: enabled && monthTargetIds.length > 0,
     staleTime: 60_000,
@@ -631,7 +635,7 @@ function extractLinkFieldValue(
 }
 
 function collectLoadedDealRowsFromBatch(
-  batch: StageScanResult | undefined,
+  batch: RecentScanResult | undefined,
   targets: ExpoItem[],
   crmStageTitles: Map<string, string>,
 ): LoadedDealRow[] {
@@ -705,7 +709,7 @@ function MonthlyBatchDiagnosticsPanel({
   monthKey: string;
   targets: ExpoItem[];
   query: {
-    data?: StageScanResult;
+    data?: RecentScanResult;
     isLoading: boolean;
     isFetching: boolean;
     isError: boolean;
@@ -714,7 +718,7 @@ function MonthlyBatchDiagnosticsPanel({
 }) {
   const [open, setOpen] = useState(true);
   const data = query.data;
-  const strategy = data?.strategy ?? "stage-scan";
+  const strategy = data?.strategy ?? "recent-deal-scan";
   const settled = data?.successCount ?? 0;
   const failed = data?.failedCount ?? 0;
   const timedOut = data?.timeoutCount ?? 0;
@@ -740,7 +744,7 @@ function MonthlyBatchDiagnosticsPanel({
   }, [data, targets]);
 
   const failureSummary = useMemo(() => {
-    if (!data) return [] as StageScanResult["outcomes"];
+    if (!data) return [] as RecentScanResult["outcomes"];
     return data.outcomes.filter((o) => o && o.phase !== "ok");
   }, [data]);
 
@@ -798,21 +802,55 @@ function MonthlyBatchDiagnosticsPanel({
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-2 space-y-2">
         <div className="text-muted-foreground">
-          Стратегия <code>stage-scan</code>: вместо{" "}
-          {targets.length || "N"} per-expo запросов с UF-фильтром (который в
-          живом Bitrix24 надёжно уходит в таймаут) выполняется по одному{" "}
-          <code>crm.deal.list</code> на каждый закреплённый{" "}
-          <code>STAGE_ID</code>{" "}
-          (<code>signingContract=8</code>, <code>building=9</code>,{" "}
-          <code>projectCompleted=WON</code>). Параллельно — не более{" "}
-          {STAGE_SCAN_CONCURRENCY} запроса; каждый ограничен таймаутом ~20 с и
-          {" "}{STAGE_SCAN_CONCURRENCY === 1 ? "выполняется последовательно" : "низкой параллельностью"}.
-          Результаты дедуплицируются по ID сделки и раскладываются по видимым
-          выставкам по значению поля{" "}
-          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>. Сделки,
-          чей UF не совпадает ни с одной видимой выставкой, попадают в
-          &laquo;unlinked&raquo; и в Gantt не показываются.
+          Стратегия <code>recent-deal-scan</code>: per-expo UF-фильтр и
+          per-STAGE_ID сканирование в живом Bitrix24 стабильно уходят в
+          таймаут (12–20 с каждый запрос). Вместо них выполняется один{" "}
+          <code>crm.deal.list</code> без фильтров (<code>order</code>:{" "}
+          <code>ID DESC</code>, <code>select</code> с минимально
+          необходимыми полями) — та же форма запроса, которую использует
+          StageIdFinderPanel и которая стабильно возвращает сотни сделок.
+          Сканируется до <b>{data?.requestedLimit ?? RECENT_SCAN_LIMIT}</b>{" "}
+          самых свежих сделок, далее на клиенте отбираются сделки с
+          закреплёнными STAGE_ID (<code>signingContract=8</code>,{" "}
+          <code>building=9</code>, <code>projectCompleted=WON</code>) и
+          связанные с видимыми выставками по полю{" "}
+          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>. Это
+          ограниченный скан: более старые сделки в него не попадают — если
+          нужно шире, измените <code>RECENT_SCAN_LIMIT</code> в{" "}
+          <code>client/src/pages/calendar.tsx</code>.
         </div>
+        {data && (
+          <div
+            className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+            data-testid="gantt-diag-month-scan-warning"
+          >
+            {data.warning}
+            {data.truncated
+              ? " Достигнут лимит — возможно, есть ещё более старые сделки с нужными стадиями, которые не загружены."
+              : ""}
+          </div>
+        )}
+        {data && (
+          <div>
+            Скан: лимит <b data-testid="gantt-diag-month-scan-limit">{data.requestedLimit}</b>
+            {" · страниц загружено: "}
+            <b data-testid="gantt-diag-month-scan-pages">{data.pagesLoaded}</b>
+            {" · сделок просканировано: "}
+            <b data-testid="gantt-diag-month-scan-count">{data.scannedDealCount}</b>
+            {data.truncated ? (
+              <>
+                {" · "}
+                <b className="text-amber-700 dark:text-amber-300">достигнут лимит</b>
+              </>
+            ) : null}
+            {data.scanError ? (
+              <>
+                {" · "}
+                <span className="text-red-600">scan error: {data.scanError}</span>
+              </>
+            ) : null}
+          </div>
+        )}
         <div>
           Запрошенные STAGE_ID:{" "}
           {DEAL_STATUS_ORDER.map((key) => (
@@ -905,7 +943,7 @@ function LoadedDealStagesPanel({
   targets,
   crmStageTitles,
 }: {
-  batch: StageScanResult | undefined;
+  batch: RecentScanResult | undefined;
   isLoading: boolean;
   isError: boolean;
   targets: ExpoItem[];
