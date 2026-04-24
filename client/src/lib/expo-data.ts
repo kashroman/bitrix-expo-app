@@ -226,6 +226,26 @@ export async function fetchDealById(id: string | number): Promise<CrmItem | unde
   return mergeWithCrmItem(2, id, base);
 }
 
+export type DealProbeLookup =
+  | { status: "found"; deal: CrmItem }
+  | { status: "not-found" }
+  | { status: "failed"; error: string };
+
+export async function probeDealById(id: string | number): Promise<DealProbeLookup> {
+  try {
+    const deal = await callBx<CrmItem>("crm.deal.get", { id });
+    if (!deal || (typeof deal === "object" && Object.keys(deal).length === 0)) {
+      return { status: "not-found" };
+    }
+    return { status: "found", deal };
+  } catch (err) {
+    return {
+      status: "failed",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 export function computeLeadStats(leads: CrmItem[], leadStatusMap?: Map<string, string>): LeadStats {
   const byGroup: Record<LeadGroupKey, CrmItem[]> = {
     new: [],
@@ -538,6 +558,89 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
   }
 
   return { stages, diagnostics };
+}
+
+const DEAL_STAGE_DIAGNOSTIC_SELECT = [
+  "ID",
+  "TITLE",
+  "STAGE_ID",
+  "STAGE_SEMANTIC_ID",
+  "CATEGORY_ID",
+  "OPPORTUNITY",
+  "CURRENCY_ID",
+  "ASSIGNED_BY_ID",
+  "COMPANY_TITLE",
+  "CONTACT_NAME",
+  "DATE_CREATE",
+  "DATE_MODIFY",
+  "UF_CRM_6989BC521C964",
+];
+
+export type DealStageProbeOptions = {
+  categoryId?: string | number;
+  limit?: number; // max rows to collect (default 300, hard cap 500)
+};
+
+export type DealStageProbeResult = {
+  deals: CrmItem[];
+  pages: number;
+  truncated: boolean;
+  requestedLimit: number;
+  categoryId?: string | number;
+  error?: string;
+};
+
+export async function fetchDealsForStageProbe(
+  options: DealStageProbeOptions = {},
+): Promise<DealStageProbeResult> {
+  const requestedLimit = Math.max(
+    1,
+    Math.min(500, Math.floor(options.limit ?? 300)),
+  );
+  const filter: Record<string, unknown> = {};
+  if (options.categoryId !== undefined && options.categoryId !== "") {
+    filter.CATEGORY_ID = options.categoryId;
+  }
+
+  const deals: CrmItem[] = [];
+  let pages = 0;
+  let truncated = false;
+  try {
+    const rows = await listAllBx<CrmItem>(
+      "crm.deal.list",
+      {
+        order: { ID: "DESC" },
+        filter,
+        select: DEAL_STAGE_DIAGNOSTIC_SELECT,
+      },
+      { maxPages: Math.max(1, Math.ceil(requestedLimit / 50)) + 1 },
+    );
+    for (const row of rows) {
+      if (deals.length >= requestedLimit) {
+        truncated = true;
+        break;
+      }
+      deals.push(row);
+      pages = Math.floor(deals.length / 50) + 1;
+    }
+    if (!truncated && rows.length > requestedLimit) truncated = true;
+  } catch (err) {
+    return {
+      deals,
+      pages,
+      truncated,
+      requestedLimit,
+      categoryId: options.categoryId,
+      error: errorMessage(err),
+    };
+  }
+  return {
+    deals,
+    pages,
+    truncated,
+    requestedLimit,
+    categoryId: options.categoryId,
+  };
 }
 
 export async function fetchDealStages(): Promise<StatusRef[]> {
