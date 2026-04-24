@@ -1,12 +1,15 @@
 import { callBx, CrmItem, listAllBx } from "./bitrix";
 import {
   DEAL_GROUP_LABELS,
+  DEAL_STATUS_ORDER,
   DealGroupKey,
+  DealStatusKey,
   EXPO_DATE_FIELDS,
   EXPO_ENTITY_TYPE_ID,
   EXPO_LINK_FIELD,
   LEAD_GROUP_LABELS,
   LeadGroupKey,
+  dealStageIds,
   fallbackDealGroup,
   fallbackLeadGroup,
   groupForDeal,
@@ -846,6 +849,251 @@ export async function fetchMonthlyDealsForExpos(
     successCount,
     failedCount,
     timeoutCount,
+  };
+}
+
+// --- Stage-scan strategy for monthly Gantt deal bars -----------------------
+//
+// Problem: per-expo UF filter calls (fetchMonthlyDealsForExpos) consistently
+// timeout in the live Bitrix24 environment for UF_CRM_6989BC521C964 — June
+// 2026 diagnostics showed 24 expos queried, success=3, timeouts=21, deals=4.
+//
+// Strategy: the Gantt only needs bars for pinned stages signingContract (8),
+// building (9), projectCompleted (WON). Rather than issuing N per-expo
+// UF-filter calls, issue a small, bounded number of calls filtered by
+// STAGE_ID only, then group by expo client-side using the UF field.
+//
+// Bitrix24's REST crm.deal.list STAGE_ID filter accepts a scalar value; it
+// also accepts arrays for many fields but STAGE_ID is not guaranteed to
+// support array-in syntax consistently across accounts. To stay safe we
+// issue one call per pinned STAGE_ID with low concurrency (serial by
+// default), merge and deduplicate by deal ID, then bucket by UF value.
+
+const STAGE_SCAN_SELECT = DEAL_STAGE_DIAGNOSTIC_SELECT;
+// Per-request timeout for a single STAGE_ID scan. Each stage is expected to
+// have many more deals than one expo's UF bucket, so we allow more pages.
+const STAGE_SCAN_REQUEST_TIMEOUT_MS = 20_000;
+const STAGE_SCAN_MAX_PAGES_PER_STAGE = 10; // 10 * 50 = 500 deals per stage
+const STAGE_SCAN_DEFAULT_CONCURRENCY = 1;
+
+export type StageScanOutcome = {
+  status: DealStatusKey;
+  stageId: string;
+  phase: "ok" | "failed" | "timeout";
+  deals: CrmItem[];
+  pages: number;
+  error?: string;
+  durationMs: number;
+};
+
+export type StageScanResult = {
+  strategy: "stage-scan";
+  linkField: string;
+  requestedStageIds: Array<{ status: DealStatusKey; stageId: string | null }>;
+  outcomes: StageScanOutcome[];
+  deals: CrmItem[];
+  byExpoId: Map<number, CrmItem[]>;
+  // Deals that arrived but whose UF link value is missing or does not resolve
+  // to a visible expo. Exposed for diagnostics only — they will not render.
+  unlinkedDeals: CrmItem[];
+  visibleExpoIds: number[];
+  linkedToVisibleCount: number;
+  perStageLinkedCount: Record<DealStatusKey, number>;
+  durationMs: number;
+  successCount: number;
+  failedCount: number;
+  timeoutCount: number;
+  timedOut: boolean;
+};
+
+async function fetchDealsForSingleStage(
+  status: DealStatusKey,
+  stageId: string,
+): Promise<StageScanOutcome> {
+  const start = Date.now();
+  try {
+    const rows = await Promise.race<CrmItem[]>([
+      listAllBx<CrmItem>(
+        "crm.deal.list",
+        {
+          order: { ID: "DESC" },
+          filter: { STAGE_ID: stageId },
+          select: STAGE_SCAN_SELECT,
+        },
+        {
+          maxPages: STAGE_SCAN_MAX_PAGES_PER_STAGE,
+          timeoutMs: STAGE_SCAN_REQUEST_TIMEOUT_MS,
+        },
+      ),
+      new Promise<CrmItem[]>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `crm.deal.list timeout (${Math.round(
+                  STAGE_SCAN_REQUEST_TIMEOUT_MS / 1000,
+                )}s) for STAGE_ID ${stageId}`,
+              ),
+            ),
+          STAGE_SCAN_REQUEST_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+    return {
+      status,
+      stageId,
+      phase: "ok",
+      deals: rows,
+      pages: Math.max(1, Math.ceil(rows.length / 50)),
+      durationMs: Date.now() - start,
+    };
+  } catch (err) {
+    const message = errorMessage(err);
+    const isTimeout = /timeout|таймаут/i.test(message);
+    return {
+      status,
+      stageId,
+      phase: isTimeout ? "timeout" : "failed",
+      deals: [],
+      pages: 0,
+      error: message,
+      durationMs: Date.now() - start,
+    };
+  }
+}
+
+export async function fetchMonthlyDealsByStageScan(
+  visibleExpoIds: Array<number | string>,
+  options: { linkField?: string; concurrency?: number } = {},
+): Promise<StageScanResult> {
+  const linkField = options.linkField ?? "UF_CRM_6989BC521C964";
+  const concurrency = Math.max(
+    1,
+    Math.min(options.concurrency ?? STAGE_SCAN_DEFAULT_CONCURRENCY, 3),
+  );
+  const visible = Array.from(
+    new Set(
+      visibleExpoIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  ).sort((a, b) => a - b);
+  const visibleSet = new Set(visible);
+
+  const requested: Array<{ status: DealStatusKey; stageId: string | null }> =
+    DEAL_STATUS_ORDER.map((status) => ({
+      status,
+      stageId: dealStageIds[status],
+    }));
+  const tasks = requested.filter(
+    (t): t is { status: DealStatusKey; stageId: string } =>
+      typeof t.stageId === "string" && t.stageId.length > 0,
+  );
+
+  const byExpoId = new Map<number, CrmItem[]>();
+  visible.forEach((id) => byExpoId.set(id, []));
+  const allDeals: CrmItem[] = [];
+  const unlinked: CrmItem[] = [];
+  const seenDealIds = new Set<string>();
+  const perStageLinkedCount: Record<DealStatusKey, number> = {
+    signingContract: 0,
+    building: 0,
+    projectCompleted: 0,
+  };
+
+  const start = Date.now();
+
+  if (tasks.length === 0) {
+    return {
+      strategy: "stage-scan",
+      linkField,
+      requestedStageIds: requested,
+      outcomes: [],
+      deals: [],
+      byExpoId,
+      unlinkedDeals: [],
+      visibleExpoIds: visible,
+      linkedToVisibleCount: 0,
+      perStageLinkedCount,
+      durationMs: 0,
+      successCount: 0,
+      failedCount: 0,
+      timeoutCount: 0,
+      timedOut: false,
+    };
+  }
+
+  const outcomes: StageScanOutcome[] = new Array(tasks.length);
+
+  let nextIndex = 0;
+  const worker = async () => {
+    while (true) {
+      const idx = nextIndex++;
+      if (idx >= tasks.length) return;
+      const task = tasks[idx];
+      const outcome = await fetchDealsForSingleStage(task.status, task.stageId);
+      outcomes[idx] = outcome;
+      if (outcome.phase === "ok") {
+        for (const deal of outcome.deals) {
+          const rec = deal as Record<string, unknown>;
+          const dealId = String(rec.ID ?? rec.id ?? "");
+          if (!dealId || seenDealIds.has(dealId)) continue;
+          seenDealIds.add(dealId);
+          allDeals.push(deal);
+          const linkedExpoIds = extractExpoIdsFromDeal(deal, linkField);
+          let matched = false;
+          for (const linkedId of linkedExpoIds) {
+            if (!visibleSet.has(linkedId)) continue;
+            const bucket = byExpoId.get(linkedId);
+            if (bucket) {
+              bucket.push(deal);
+              matched = true;
+            }
+          }
+          if (matched) perStageLinkedCount[task.status] += 1;
+          else unlinked.push(deal);
+        }
+      }
+    }
+  };
+
+  const workers: Promise<void>[] = [];
+  for (let w = 0; w < Math.min(concurrency, tasks.length); w++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+
+  let successCount = 0;
+  let failedCount = 0;
+  let timeoutCount = 0;
+  for (const o of outcomes) {
+    if (!o) continue;
+    if (o.phase === "ok") successCount += 1;
+    else if (o.phase === "timeout") timeoutCount += 1;
+    else failedCount += 1;
+  }
+
+  let linkedToVisibleCount = 0;
+  byExpoId.forEach((list) => {
+    linkedToVisibleCount += list.length;
+  });
+
+  return {
+    strategy: "stage-scan",
+    linkField,
+    requestedStageIds: requested,
+    outcomes,
+    deals: allDeals,
+    byExpoId,
+    unlinkedDeals: unlinked,
+    visibleExpoIds: visible,
+    linkedToVisibleCount,
+    perStageLinkedCount,
+    durationMs: Date.now() - start,
+    successCount,
+    failedCount,
+    timeoutCount,
+    timedOut: timeoutCount > 0,
   };
 }
 

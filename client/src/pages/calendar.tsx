@@ -18,7 +18,7 @@ import {
   fetchExpoList,
   fetchDealStages,
   fetchDealStagesDetailed,
-  fetchMonthlyDealsForExpos,
+  fetchMonthlyDealsByStageScan,
   isFoundAggregate,
   probeDealById,
   statusTitleMap,
@@ -27,7 +27,7 @@ import type {
   DealProbeLookup,
   DealStageProbeResult,
   DealStagesResult,
-  MonthlyDealBatchResult,
+  StageScanResult,
   StatusRef,
 } from "@/lib/expo-data";
 import type { CrmItem } from "@/lib/bitrix";
@@ -51,10 +51,12 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-// How many per-expo crm.deal.list requests to run in parallel. Kept low so
-// the BX24 SDK channel does not get starved and the Gantt can render partial
-// results while slow expos finish or time out individually.
-const MONTH_DEAL_CONCURRENCY = 3;
+// Stage-scan strategy concurrency: one crm.deal.list request per pinned
+// STAGE_ID (signingContract=8, building=9, projectCompleted=WON). Issued
+// serially by default to keep the BX24 SDK channel calm. Results are
+// deduplicated and grouped by visible expo IDs client-side using the UF
+// link field (UF_CRM_6989BC521C964).
+const STAGE_SCAN_CONCURRENCY = 1;
 
 function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -281,21 +283,21 @@ function GanttView({
   );
   const enabled = isInsideBitrix();
 
-  // Batch all visible expos' deals into a single crm.deal.list call per
-  // month (chunked if the id set is huge). This replaces the per-expo
-  // buildExpoAggregate storm that used to stall the BX24 SDK channel and
-  // leave the Gantt "загружается" indefinitely.
+  // Stage-scan strategy: instead of issuing one crm.deal.list per expo
+  // (which consistently times out on UF_CRM_6989BC521C964), issue one call
+  // per pinned STAGE_ID (8, 9, WON) with a higher page budget, then bucket
+  // the returned deals by UF link value into the currently visible expos.
   const monthKey = monthKeyOf(activeMonth);
   const overlappingIds = useMemo(
     () => overlapping.map((e) => Number(e.id)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
     [overlapping],
   );
 
-  const monthBatch = useQuery<MonthlyDealBatchResult>({
-    queryKey: ["gantt-monthly-deals", monthKey, overlappingIds],
+  const monthBatch = useQuery<StageScanResult>({
+    queryKey: ["gantt-monthly-deals-stage-scan", monthKey, overlappingIds],
     queryFn: () =>
-      fetchMonthlyDealsForExpos(overlappingIds, {
-        concurrency: MONTH_DEAL_CONCURRENCY,
+      fetchMonthlyDealsByStageScan(overlappingIds, {
+        concurrency: STAGE_SCAN_CONCURRENCY,
       }),
     enabled: enabled && overlappingIds.length > 0,
     staleTime: 60_000,
@@ -438,11 +440,11 @@ function GanttDiagnostics({
   const monthKey = monthKeyOf(activeMonth);
   // Reuse the same query key as GanttView — React Query dedupes so this
   // just reads from cache without re-firing the batch call.
-  const monthBatchQuery = useQuery<MonthlyDealBatchResult>({
-    queryKey: ["gantt-monthly-deals", monthKey, monthTargetIds],
+  const monthBatchQuery = useQuery<StageScanResult>({
+    queryKey: ["gantt-monthly-deals-stage-scan", monthKey, monthTargetIds],
     queryFn: () =>
-      fetchMonthlyDealsForExpos(monthTargetIds, {
-        concurrency: MONTH_DEAL_CONCURRENCY,
+      fetchMonthlyDealsByStageScan(monthTargetIds, {
+        concurrency: STAGE_SCAN_CONCURRENCY,
       }),
     enabled: enabled && monthTargetIds.length > 0,
     staleTime: 60_000,
@@ -629,7 +631,7 @@ function extractLinkFieldValue(
 }
 
 function collectLoadedDealRowsFromBatch(
-  batch: MonthlyDealBatchResult | undefined,
+  batch: StageScanResult | undefined,
   targets: ExpoItem[],
   crmStageTitles: Map<string, string>,
 ): LoadedDealRow[] {
@@ -703,7 +705,7 @@ function MonthlyBatchDiagnosticsPanel({
   monthKey: string;
   targets: ExpoItem[];
   query: {
-    data?: MonthlyDealBatchResult;
+    data?: StageScanResult;
     isLoading: boolean;
     isFetching: boolean;
     isError: boolean;
@@ -712,42 +714,34 @@ function MonthlyBatchDiagnosticsPanel({
 }) {
   const [open, setOpen] = useState(true);
   const data = query.data;
+  const strategy = data?.strategy ?? "stage-scan";
   const settled = data?.successCount ?? 0;
   const failed = data?.failedCount ?? 0;
   const timedOut = data?.timeoutCount ?? 0;
   const firstError =
-    data?.outcomes.find((o) => o && (o.status === "failed" || o.status === "timeout"))
+    data?.outcomes.find((o) => o && (o.phase === "failed" || o.phase === "timeout"))
       ?.error ??
     (query.isError ? String((query.error as Error)?.message ?? query.error) : undefined);
 
-  const stageSummary = useMemo(() => {
-    const counts: Record<DealStatusKey, number> = {
-      signingContract: 0,
-      building: 0,
-      projectCompleted: 0,
-    };
-    const uniqueStageIds = new Set<string>();
+  const uniqueStageIdCount = useMemo(() => {
+    const s = new Set<string>();
     data?.deals.forEach((deal) => {
       const stageId = String((deal as Record<string, unknown>).STAGE_ID ?? "");
-      if (!stageId) return;
-      uniqueStageIds.add(stageId);
-      for (const key of DEAL_STATUS_ORDER) {
-        if (dealStageIds[key] === stageId) counts[key] += 1;
-      }
+      if (stageId) s.add(stageId);
     });
-    return { counts, uniqueStageIds };
+    return s.size;
   }, [data]);
 
   const visibleIdsLabel = useMemo(() => {
-    const ids = data?.requestedExpoIds ?? targets.map((t) => Number(t.id));
+    const ids = data?.visibleExpoIds ?? targets.map((t) => Number(t.id));
     if (ids.length === 0) return "—";
     const preview = ids.slice(0, 20).join(", ");
     return ids.length > 20 ? `${preview}, … (+${ids.length - 20})` : preview;
   }, [data, targets]);
 
   const failureSummary = useMemo(() => {
-    if (!data) return [] as MonthlyDealBatchResult["outcomes"];
-    return data.outcomes.filter((o) => o && o.status !== "ok");
+    if (!data) return [] as StageScanResult["outcomes"];
+    return data.outcomes.filter((o) => o && o.phase !== "ok");
   }, [data]);
 
   return (
@@ -759,11 +753,14 @@ function MonthlyBatchDiagnosticsPanel({
           data-testid="gantt-diag-monthly-batch-toggle"
         >
           <span>
-            Пакетная загрузка сделок за месяц · месяц <b>{monthKey}</b> · выставок
-            к опросу: <b data-testid="gantt-diag-month-expo-count">{targets.length}</b>
+            Пакетная загрузка сделок за месяц · стратегия{" "}
+            <code data-testid="gantt-diag-month-strategy">{strategy}</code> · месяц{" "}
+            <b>{monthKey}</b> · выставок на экране:{" "}
+            <b data-testid="gantt-diag-month-expo-count">{targets.length}</b>
             {data ? (
               <>
-                {" "}· успешно: <b data-testid="gantt-diag-month-settled">{settled}</b>
+                {" "}· запросов к BX24: <b>{data.outcomes.length}</b> · успешно:{" "}
+                <b data-testid="gantt-diag-month-settled">{settled}</b>
                 {" · ошибок: "}
                 <b
                   className={failed > 0 ? "text-red-600" : undefined}
@@ -778,10 +775,15 @@ function MonthlyBatchDiagnosticsPanel({
                 >
                   {timedOut}
                 </b>{" "}
-                · сделок: <b data-testid="gantt-diag-month-deals">{data.deals.length}</b>
+                · сделок всего:{" "}
+                <b data-testid="gantt-diag-month-deals">{data.deals.length}</b>
+                {" · связано с видимыми выставками: "}
+                <b data-testid="gantt-diag-month-linked">
+                  {data.linkedToVisibleCount}
+                </b>
                 {" · уникальных STAGE_ID: "}
                 <b data-testid="gantt-diag-month-unique-stages">
-                  {stageSummary.uniqueStageIds.size}
+                  {uniqueStageIdCount}
                 </b>
                 · за <b>{Math.round(data.durationMs)}</b> мс
               </>
@@ -796,30 +798,80 @@ function MonthlyBatchDiagnosticsPanel({
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-2 space-y-2">
         <div className="text-muted-foreground">
-          Для выбранного месяца на каждую выставку выполняется <b>отдельный</b>{" "}
-          запрос <code>crm.deal.list</code> с фильтром{" "}
-          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code> = ID выставки.
-          Параллельно выполняется не более {MONTH_DEAL_CONCURRENCY} запросов;
-          каждый ограничен таймаутом ~12 с и 10 страницами. Отдельный таймаут
-          выставки не блокирует остальных — успешные выставки получают бары
-          сразу, даже если часть запросов упала.
+          Стратегия <code>stage-scan</code>: вместо{" "}
+          {targets.length || "N"} per-expo запросов с UF-фильтром (который в
+          живом Bitrix24 надёжно уходит в таймаут) выполняется по одному{" "}
+          <code>crm.deal.list</code> на каждый закреплённый{" "}
+          <code>STAGE_ID</code>{" "}
+          (<code>signingContract=8</code>, <code>building=9</code>,{" "}
+          <code>projectCompleted=WON</code>). Параллельно — не более{" "}
+          {STAGE_SCAN_CONCURRENCY} запроса; каждый ограничен таймаутом ~20 с и
+          {" "}{STAGE_SCAN_CONCURRENCY === 1 ? "выполняется последовательно" : "низкой параллельностью"}.
+          Результаты дедуплицируются по ID сделки и раскладываются по видимым
+          выставкам по значению поля{" "}
+          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>. Сделки,
+          чей UF не совпадает ни с одной видимой выставкой, попадают в
+          &laquo;unlinked&raquo; и в Gantt не показываются.
         </div>
         <div>
-          Видимые ID выставок ({data?.requestedExpoIds.length ?? targets.length}):{" "}
+          Запрошенные STAGE_ID:{" "}
+          {DEAL_STATUS_ORDER.map((key) => (
+            <span key={key} className="mr-3" data-testid={`gantt-diag-month-requested-${key}`}>
+              <b>{DEAL_STATUS_LABELS[key]}</b>:{" "}
+              <code>{dealStageIds[key] ?? "—"}</code>
+            </span>
+          ))}
+        </div>
+        <div>
+          Видимые ID выставок ({data?.visibleExpoIds.length ?? targets.length}):{" "}
           <code data-testid="gantt-diag-month-visible-ids">{visibleIdsLabel}</code>
         </div>
         <div>
-          Совпадения по pinned STAGE_ID:{" "}
+          Сделок, связанных с видимыми выставками по pinned STAGE_ID:{" "}
           {DEAL_STATUS_ORDER.map((key) => (
             <span key={key} className="mr-3">
               <b>{DEAL_STATUS_LABELS[key]}</b> (
               <code>{dealStageIds[key] ?? "—"}</code>):{" "}
               <b data-testid={`gantt-diag-month-pinned-${key}`}>
-                {stageSummary.counts[key]}
+                {data?.perStageLinkedCount[key] ?? 0}
               </b>
             </span>
           ))}
         </div>
+        {data && data.outcomes.length > 0 && (
+          <div data-testid="gantt-diag-month-stage-outcomes">
+            <div className="font-medium">Результаты по стадиям:</div>
+            <ul className="ml-4 list-disc text-muted-foreground">
+              {data.outcomes.map((o, idx) => {
+                if (!o) return null;
+                const linked = data.perStageLinkedCount[o.status] ?? 0;
+                return (
+                  <li key={idx}>
+                    <b>{DEAL_STATUS_LABELS[o.status]}</b> · STAGE_ID{" "}
+                    <code>{o.stageId}</code> · <b>{o.phase}</b> · получено{" "}
+                    <b>{o.deals.length}</b> сделок, страниц:{" "}
+                    <b>{o.pages}</b>, связано с видимыми:{" "}
+                    <b>{linked}</b> · {Math.round(o.durationMs)} мс
+                    {o.error ? (
+                      <>
+                        {" · "}
+                        <span className="text-red-600">{o.error}</span>
+                      </>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ul>
+          </div>
+        )}
+        {data && data.unlinkedDeals.length > 0 && (
+          <div className="text-muted-foreground">
+            Получено сделок, не связанных с видимыми выставками:{" "}
+            <b>{data.unlinkedDeals.length}</b> (у UF-поля другое значение
+            или оно пустое — нормально, если загрузили сделки за другие
+            месяцы вместе с нужными).
+          </div>
+        )}
         {firstError && (
           <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
             Ошибка запроса: {firstError}
@@ -828,13 +880,14 @@ function MonthlyBatchDiagnosticsPanel({
         {failureSummary.length > 0 && (
           <div data-testid="gantt-diag-month-failures">
             <div className="font-medium">
-              Неуспешные выставки ({failureSummary.length}):
+              Неуспешные запросы по стадиям ({failureSummary.length}):
             </div>
             <ul className="ml-4 list-disc text-muted-foreground">
               {failureSummary.map((o, idx) => (
                 <li key={idx}>
-                  expo <code>#{o.expoId}</code>: <b>{o.status}</b> · {o.error ?? "—"}{" "}
-                  · {Math.round(o.durationMs)} мс
+                  STAGE_ID <code>{o.stageId}</code> (
+                  {DEAL_STATUS_LABELS[o.status]}): <b>{o.phase}</b> ·{" "}
+                  {o.error ?? "—"} · {Math.round(o.durationMs)} мс
                 </li>
               ))}
             </ul>
@@ -852,7 +905,7 @@ function LoadedDealStagesPanel({
   targets,
   crmStageTitles,
 }: {
-  batch: MonthlyDealBatchResult | undefined;
+  batch: StageScanResult | undefined;
   isLoading: boolean;
   isError: boolean;
   targets: ExpoItem[];
