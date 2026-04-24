@@ -643,10 +643,13 @@ export async function fetchDealsForStageProbe(
   };
 }
 
-export type MonthlyDealBatchOutcome =
-  | { status: "ok"; deals: CrmItem[] }
-  | { status: "failed"; error: string; deals: CrmItem[] }
-  | { status: "timeout"; error: string; deals: CrmItem[] };
+export type MonthlyDealBatchOutcome = {
+  expoId: number;
+  status: "ok" | "failed" | "timeout";
+  deals: CrmItem[];
+  error?: string;
+  durationMs: number;
+};
 
 export type MonthlyDealBatchResult = {
   requestedExpoIds: number[];
@@ -658,11 +661,22 @@ export type MonthlyDealBatchResult = {
   byExpoId: Map<number, CrmItem[]>;
   durationMs: number;
   timedOut: boolean;
+  successCount: number;
+  failedCount: number;
+  timeoutCount: number;
 };
 
-const MONTHLY_DEAL_BATCH_CHUNK = 50;
-const MONTHLY_DEAL_BATCH_TIMEOUT_MS = 20_000;
-const MONTHLY_DEAL_BATCH_MAX_PAGES = 20;
+// Per-request Bitrix24 timeout for a single expo's deal list.
+// Kept well below the SDK's own 45s ceiling so a stuck expo releases the
+// concurrency slot quickly and the rest of the month can still render.
+const MONTHLY_DEAL_REQUEST_TIMEOUT_MS = 12_000;
+// Cap on pages for a single expo. UF_CRM_6989BC521C964 returns deals
+// linked to that specific expo, so a handful of pages at most is expected.
+const MONTHLY_DEAL_MAX_PAGES_PER_EXPO = 10;
+// How many per-expo deal.list requests to run in parallel. Low enough to
+// avoid overloading the BX24 SDK channel, high enough to keep the total
+// time reasonable.
+const MONTHLY_DEAL_CONCURRENCY = 3;
 
 function extractExpoIdsFromDeal(
   deal: CrmItem,
@@ -684,21 +698,23 @@ function extractExpoIdsFromDeal(
   return out;
 }
 
-async function runOneBatchCall(
-  filter: Record<string, unknown>,
+async function fetchDealsForSingleExpo(
+  linkField: string,
+  expoId: number,
 ): Promise<MonthlyDealBatchOutcome> {
+  const start = Date.now();
   try {
     const rows = await Promise.race<CrmItem[]>([
       listAllBx<CrmItem>(
         "crm.deal.list",
         {
           order: { ID: "DESC" },
-          filter,
+          filter: { [linkField]: expoId },
           select: DEAL_STAGE_DIAGNOSTIC_SELECT,
         },
         {
-          maxPages: MONTHLY_DEAL_BATCH_MAX_PAGES,
-          timeoutMs: MONTHLY_DEAL_BATCH_TIMEOUT_MS,
+          maxPages: MONTHLY_DEAL_MAX_PAGES_PER_EXPO,
+          timeoutMs: MONTHLY_DEAL_REQUEST_TIMEOUT_MS,
         },
       ),
       new Promise<CrmItem[]>((_, reject) =>
@@ -706,40 +722,47 @@ async function runOneBatchCall(
           () =>
             reject(
               new Error(
-                `batch crm.deal.list timeout (${Math.round(
-                  MONTHLY_DEAL_BATCH_TIMEOUT_MS / 1000,
-                )}s)`,
+                `crm.deal.list timeout (${Math.round(
+                  MONTHLY_DEAL_REQUEST_TIMEOUT_MS / 1000,
+                )}s) for expo ${expoId}`,
               ),
             ),
-          MONTHLY_DEAL_BATCH_TIMEOUT_MS,
+          MONTHLY_DEAL_REQUEST_TIMEOUT_MS,
         ),
       ),
     ]);
-    return { status: "ok", deals: rows };
+    return {
+      expoId,
+      status: "ok",
+      deals: rows,
+      durationMs: Date.now() - start,
+    };
   } catch (err) {
     const message = errorMessage(err);
     const isTimeout = /timeout|таймаут/i.test(message);
     return {
+      expoId,
       status: isTimeout ? "timeout" : "failed",
-      error: message,
       deals: [],
+      error: message,
+      durationMs: Date.now() - start,
     };
   }
 }
 
 export async function fetchMonthlyDealsForExpos(
   expoIds: Array<number | string>,
-  options: { linkField?: string; chunkSize?: number } = {},
+  options: { linkField?: string; concurrency?: number } = {},
 ): Promise<MonthlyDealBatchResult> {
   const linkField = options.linkField ?? "UF_CRM_6989BC521C964";
-  const chunkSize = Math.max(1, options.chunkSize ?? MONTHLY_DEAL_BATCH_CHUNK);
+  const concurrency = Math.max(1, Math.min(options.concurrency ?? MONTHLY_DEAL_CONCURRENCY, 5));
   const uniqueIds = Array.from(
     new Set(
       expoIds
         .map((id) => Number(id))
         .filter((id) => Number.isFinite(id) && id > 0),
     ),
-  );
+  ).sort((a, b) => a - b);
   const start = Date.now();
   const byExpoId = new Map<number, CrmItem[]>();
   uniqueIds.forEach((id) => byExpoId.set(id, []));
@@ -754,31 +777,62 @@ export async function fetchMonthlyDealsForExpos(
       byExpoId,
       durationMs: 0,
       timedOut: false,
+      successCount: 0,
+      failedCount: 0,
+      timeoutCount: 0,
     };
   }
 
-  const outcomes: MonthlyDealBatchOutcome[] = [];
+  const outcomes: MonthlyDealBatchOutcome[] = new Array(uniqueIds.length);
   const allDeals: CrmItem[] = [];
   const seenDealIds = new Set<string>();
 
-  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
-    const chunk = uniqueIds.slice(i, i + chunkSize);
-    const outcome = await runOneBatchCall({ [linkField]: chunk });
-    outcomes.push(outcome);
-    for (const deal of outcome.deals) {
-      const id = String((deal as Record<string, unknown>).ID ?? "");
-      if (!id || seenDealIds.has(id)) continue;
-      seenDealIds.add(id);
-      allDeals.push(deal);
-      const linkedExpoIds = extractExpoIdsFromDeal(deal, linkField);
-      for (const expoId of linkedExpoIds) {
-        const bucket = byExpoId.get(expoId);
-        if (bucket) bucket.push(deal);
+  let nextIndex = 0;
+  const workers: Promise<void>[] = [];
+  const run = async () => {
+    while (true) {
+      const idx = nextIndex++;
+      if (idx >= uniqueIds.length) return;
+      const expoId = uniqueIds[idx];
+      const outcome = await fetchDealsForSingleExpo(linkField, expoId);
+      outcomes[idx] = outcome;
+      // Fold deals as soon as each outcome settles so partial results are
+      // preserved even if later requests fail or time out.
+      if (outcome.status === "ok") {
+        for (const deal of outcome.deals) {
+          const id = String((deal as Record<string, unknown>).ID ?? "");
+          if (!id || seenDealIds.has(id)) continue;
+          seenDealIds.add(id);
+          allDeals.push(deal);
+          const linkedExpoIds = extractExpoIdsFromDeal(deal, linkField);
+          if (linkedExpoIds.length === 0) {
+            const bucket = byExpoId.get(expoId);
+            if (bucket) bucket.push(deal);
+          } else {
+            for (const linkedId of linkedExpoIds) {
+              const bucket = byExpoId.get(linkedId);
+              if (bucket) bucket.push(deal);
+            }
+          }
+        }
       }
     }
+  };
+  for (let w = 0; w < Math.min(concurrency, uniqueIds.length); w++) {
+    workers.push(run());
+  }
+  await Promise.all(workers);
+
+  let successCount = 0;
+  let failedCount = 0;
+  let timeoutCount = 0;
+  for (const o of outcomes) {
+    if (!o) continue;
+    if (o.status === "ok") successCount += 1;
+    else if (o.status === "timeout") timeoutCount += 1;
+    else failedCount += 1;
   }
 
-  const timedOut = outcomes.some((o) => o.status === "timeout");
   return {
     requestedExpoIds: uniqueIds,
     queriedExpoIds: uniqueIds,
@@ -788,7 +842,10 @@ export async function fetchMonthlyDealsForExpos(
     deals: allDeals,
     byExpoId,
     durationMs: Date.now() - start,
-    timedOut,
+    timedOut: timeoutCount > 0,
+    successCount,
+    failedCount,
+    timeoutCount,
   };
 }
 

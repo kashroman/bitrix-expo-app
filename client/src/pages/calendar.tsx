@@ -51,10 +51,10 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-// Upper bound on how many visible expos we'll send per single crm.deal.list
-// filter array. Values are batched into chunks of this size — prevents the
-// Bitrix24 REST URL length limit from tripping on very large months.
-const MAX_MONTH_DEAL_BATCH_CHUNK = 50;
+// How many per-expo crm.deal.list requests to run in parallel. Kept low so
+// the BX24 SDK channel does not get starved and the Gantt can render partial
+// results while slow expos finish or time out individually.
+const MONTH_DEAL_CONCURRENCY = 3;
 
 function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
@@ -295,7 +295,7 @@ function GanttView({
     queryKey: ["gantt-monthly-deals", monthKey, overlappingIds],
     queryFn: () =>
       fetchMonthlyDealsForExpos(overlappingIds, {
-        chunkSize: MAX_MONTH_DEAL_BATCH_CHUNK,
+        concurrency: MONTH_DEAL_CONCURRENCY,
       }),
     enabled: enabled && overlappingIds.length > 0,
     staleTime: 60_000,
@@ -442,7 +442,7 @@ function GanttDiagnostics({
     queryKey: ["gantt-monthly-deals", monthKey, monthTargetIds],
     queryFn: () =>
       fetchMonthlyDealsForExpos(monthTargetIds, {
-        chunkSize: MAX_MONTH_DEAL_BATCH_CHUNK,
+        concurrency: MONTH_DEAL_CONCURRENCY,
       }),
     enabled: enabled && monthTargetIds.length > 0,
     staleTime: 60_000,
@@ -712,27 +712,30 @@ function MonthlyBatchDiagnosticsPanel({
 }) {
   const [open, setOpen] = useState(true);
   const data = query.data;
-  const settled = data?.outcomes.filter((o) => o.status === "ok").length ?? 0;
-  const failed = data?.outcomes.filter((o) => o.status === "failed").length ?? 0;
-  const timedOut = data?.outcomes.filter((o) => o.status === "timeout").length ?? 0;
+  const settled = data?.successCount ?? 0;
+  const failed = data?.failedCount ?? 0;
+  const timedOut = data?.timeoutCount ?? 0;
   const firstError =
-    data?.outcomes.find((o) => o.status === "failed" || o.status === "timeout")?.error ??
+    data?.outcomes.find((o) => o && (o.status === "failed" || o.status === "timeout"))
+      ?.error ??
     (query.isError ? String((query.error as Error)?.message ?? query.error) : undefined);
 
-  const pinnedMatches = useMemo(() => {
+  const stageSummary = useMemo(() => {
     const counts: Record<DealStatusKey, number> = {
       signingContract: 0,
       building: 0,
       projectCompleted: 0,
     };
+    const uniqueStageIds = new Set<string>();
     data?.deals.forEach((deal) => {
       const stageId = String((deal as Record<string, unknown>).STAGE_ID ?? "");
       if (!stageId) return;
+      uniqueStageIds.add(stageId);
       for (const key of DEAL_STATUS_ORDER) {
         if (dealStageIds[key] === stageId) counts[key] += 1;
       }
     });
-    return counts;
+    return { counts, uniqueStageIds };
   }, [data]);
 
   const visibleIdsLabel = useMemo(() => {
@@ -741,6 +744,11 @@ function MonthlyBatchDiagnosticsPanel({
     const preview = ids.slice(0, 20).join(", ");
     return ids.length > 20 ? `${preview}, … (+${ids.length - 20})` : preview;
   }, [data, targets]);
+
+  const failureSummary = useMemo(() => {
+    if (!data) return [] as MonthlyDealBatchResult["outcomes"];
+    return data.outcomes.filter((o) => o && o.status !== "ok");
+  }, [data]);
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -755,8 +763,8 @@ function MonthlyBatchDiagnosticsPanel({
             к опросу: <b data-testid="gantt-diag-month-expo-count">{targets.length}</b>
             {data ? (
               <>
-                {" "}· запросов выполнено: <b>{data.outcomes.length}</b> · успешно:{" "}
-                <b data-testid="gantt-diag-month-settled">{settled}</b> · ошибок:{" "}
+                {" "}· успешно: <b data-testid="gantt-diag-month-settled">{settled}</b>
+                {" · ошибок: "}
                 <b
                   className={failed > 0 ? "text-red-600" : undefined}
                   data-testid="gantt-diag-month-failed"
@@ -771,6 +779,10 @@ function MonthlyBatchDiagnosticsPanel({
                   {timedOut}
                 </b>{" "}
                 · сделок: <b data-testid="gantt-diag-month-deals">{data.deals.length}</b>
+                {" · уникальных STAGE_ID: "}
+                <b data-testid="gantt-diag-month-unique-stages">
+                  {stageSummary.uniqueStageIds.size}
+                </b>
                 · за <b>{Math.round(data.durationMs)}</b> мс
               </>
             ) : query.isLoading || query.isFetching ? (
@@ -784,12 +796,13 @@ function MonthlyBatchDiagnosticsPanel({
       </CollapsibleTrigger>
       <CollapsibleContent className="mt-2 space-y-2">
         <div className="text-muted-foreground">
-          Для выбранного месяца выполняется <b>один</b> (или несколько — если
-          количество выставок превышает {MAX_MONTH_DEAL_BATCH_CHUNK}) запрос{" "}
-          <code>crm.deal.list</code> с фильтром{" "}
-          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>: [массив id
-          видимых выставок]. Каждый запрос ограничен таймаутом 20 с и 20
-          страницами — «зависший» вызов вернёт ошибку, не повиснет.
+          Для выбранного месяца на каждую выставку выполняется <b>отдельный</b>{" "}
+          запрос <code>crm.deal.list</code> с фильтром{" "}
+          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code> = ID выставки.
+          Параллельно выполняется не более {MONTH_DEAL_CONCURRENCY} запросов;
+          каждый ограничен таймаутом ~12 с и 10 страницами. Отдельный таймаут
+          выставки не блокирует остальных — успешные выставки получают бары
+          сразу, даже если часть запросов упала.
         </div>
         <div>
           Видимые ID выставок ({data?.requestedExpoIds.length ?? targets.length}):{" "}
@@ -801,25 +814,31 @@ function MonthlyBatchDiagnosticsPanel({
             <span key={key} className="mr-3">
               <b>{DEAL_STATUS_LABELS[key]}</b> (
               <code>{dealStageIds[key] ?? "—"}</code>):{" "}
-              <b data-testid={`gantt-diag-month-pinned-${key}`}>{pinnedMatches[key]}</b>
+              <b data-testid={`gantt-diag-month-pinned-${key}`}>
+                {stageSummary.counts[key]}
+              </b>
             </span>
           ))}
         </div>
         {firstError && (
           <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
-            Ошибка пакетного запроса: {firstError}
+            Ошибка запроса: {firstError}
           </div>
         )}
-        {data && data.outcomes.length > 1 && (
-          <ul className="ml-4 list-disc text-muted-foreground">
-            {data.outcomes.map((o, idx) => (
-              <li key={idx}>
-                чанк #{idx + 1}: <b>{o.status}</b> · сделок:{" "}
-                <b>{o.deals.length}</b>
-                {o.status !== "ok" ? <> · {o.error}</> : null}
-              </li>
-            ))}
-          </ul>
+        {failureSummary.length > 0 && (
+          <div data-testid="gantt-diag-month-failures">
+            <div className="font-medium">
+              Неуспешные выставки ({failureSummary.length}):
+            </div>
+            <ul className="ml-4 list-disc text-muted-foreground">
+              {failureSummary.map((o, idx) => (
+                <li key={idx}>
+                  expo <code>#{o.expoId}</code>: <b>{o.status}</b> · {o.error ?? "—"}{" "}
+                  · {Math.round(o.durationMs)} мс
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
       </CollapsibleContent>
     </Collapsible>
