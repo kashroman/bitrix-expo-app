@@ -643,6 +643,155 @@ export async function fetchDealsForStageProbe(
   };
 }
 
+export type MonthlyDealBatchOutcome =
+  | { status: "ok"; deals: CrmItem[] }
+  | { status: "failed"; error: string; deals: CrmItem[] }
+  | { status: "timeout"; error: string; deals: CrmItem[] };
+
+export type MonthlyDealBatchResult = {
+  requestedExpoIds: number[];
+  queriedExpoIds: number[];
+  linkField: string;
+  linkFormat: "numeric" | "string";
+  outcomes: MonthlyDealBatchOutcome[];
+  deals: CrmItem[];
+  byExpoId: Map<number, CrmItem[]>;
+  durationMs: number;
+  timedOut: boolean;
+};
+
+const MONTHLY_DEAL_BATCH_CHUNK = 50;
+const MONTHLY_DEAL_BATCH_TIMEOUT_MS = 20_000;
+const MONTHLY_DEAL_BATCH_MAX_PAGES = 20;
+
+function extractExpoIdsFromDeal(
+  deal: CrmItem,
+  linkField: string,
+): number[] {
+  const r = deal as Record<string, unknown>;
+  const raw =
+    r[linkField] ??
+    r[linkField.toUpperCase()] ??
+    r[linkField.toLowerCase()] ??
+    r[linkField.replace(/_([a-z])/g, (_, c) => (c as string).toUpperCase())];
+  const values = Array.isArray(raw) ? raw : raw !== undefined ? [raw] : [];
+  const out: number[] = [];
+  for (const v of values) {
+    if (v === undefined || v === null || v === "") continue;
+    const num = Number(typeof v === "string" ? v.match(/\d+/)?.[0] ?? v : v);
+    if (Number.isFinite(num) && num > 0) out.push(num);
+  }
+  return out;
+}
+
+async function runOneBatchCall(
+  filter: Record<string, unknown>,
+): Promise<MonthlyDealBatchOutcome> {
+  try {
+    const rows = await Promise.race<CrmItem[]>([
+      listAllBx<CrmItem>(
+        "crm.deal.list",
+        {
+          order: { ID: "DESC" },
+          filter,
+          select: DEAL_STAGE_DIAGNOSTIC_SELECT,
+        },
+        {
+          maxPages: MONTHLY_DEAL_BATCH_MAX_PAGES,
+          timeoutMs: MONTHLY_DEAL_BATCH_TIMEOUT_MS,
+        },
+      ),
+      new Promise<CrmItem[]>((_, reject) =>
+        setTimeout(
+          () =>
+            reject(
+              new Error(
+                `batch crm.deal.list timeout (${Math.round(
+                  MONTHLY_DEAL_BATCH_TIMEOUT_MS / 1000,
+                )}s)`,
+              ),
+            ),
+          MONTHLY_DEAL_BATCH_TIMEOUT_MS,
+        ),
+      ),
+    ]);
+    return { status: "ok", deals: rows };
+  } catch (err) {
+    const message = errorMessage(err);
+    const isTimeout = /timeout|таймаут/i.test(message);
+    return {
+      status: isTimeout ? "timeout" : "failed",
+      error: message,
+      deals: [],
+    };
+  }
+}
+
+export async function fetchMonthlyDealsForExpos(
+  expoIds: Array<number | string>,
+  options: { linkField?: string; chunkSize?: number } = {},
+): Promise<MonthlyDealBatchResult> {
+  const linkField = options.linkField ?? "UF_CRM_6989BC521C964";
+  const chunkSize = Math.max(1, options.chunkSize ?? MONTHLY_DEAL_BATCH_CHUNK);
+  const uniqueIds = Array.from(
+    new Set(
+      expoIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  );
+  const start = Date.now();
+  const byExpoId = new Map<number, CrmItem[]>();
+  uniqueIds.forEach((id) => byExpoId.set(id, []));
+  if (uniqueIds.length === 0) {
+    return {
+      requestedExpoIds: uniqueIds,
+      queriedExpoIds: uniqueIds,
+      linkField,
+      linkFormat: "numeric",
+      outcomes: [],
+      deals: [],
+      byExpoId,
+      durationMs: 0,
+      timedOut: false,
+    };
+  }
+
+  const outcomes: MonthlyDealBatchOutcome[] = [];
+  const allDeals: CrmItem[] = [];
+  const seenDealIds = new Set<string>();
+
+  for (let i = 0; i < uniqueIds.length; i += chunkSize) {
+    const chunk = uniqueIds.slice(i, i + chunkSize);
+    const outcome = await runOneBatchCall({ [linkField]: chunk });
+    outcomes.push(outcome);
+    for (const deal of outcome.deals) {
+      const id = String((deal as Record<string, unknown>).ID ?? "");
+      if (!id || seenDealIds.has(id)) continue;
+      seenDealIds.add(id);
+      allDeals.push(deal);
+      const linkedExpoIds = extractExpoIdsFromDeal(deal, linkField);
+      for (const expoId of linkedExpoIds) {
+        const bucket = byExpoId.get(expoId);
+        if (bucket) bucket.push(deal);
+      }
+    }
+  }
+
+  const timedOut = outcomes.some((o) => o.status === "timeout");
+  return {
+    requestedExpoIds: uniqueIds,
+    queriedExpoIds: uniqueIds,
+    linkField,
+    linkFormat: "numeric",
+    outcomes,
+    deals: allDeals,
+    byExpoId,
+    durationMs: Date.now() - start,
+    timedOut,
+  };
+}
+
 export async function fetchDealStages(): Promise<StatusRef[]> {
   try {
     const { stages } = await fetchDealStagesDetailed();

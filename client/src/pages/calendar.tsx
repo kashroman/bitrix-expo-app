@@ -1,5 +1,5 @@
 import { useMemo, useState, useCallback } from "react";
-import { useQuery, useQueries } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -18,6 +18,7 @@ import {
   fetchExpoList,
   fetchDealStages,
   fetchDealStagesDetailed,
+  fetchMonthlyDealsForExpos,
   isFoundAggregate,
   probeDealById,
   statusTitleMap,
@@ -26,6 +27,7 @@ import type {
   DealProbeLookup,
   DealStageProbeResult,
   DealStagesResult,
+  MonthlyDealBatchResult,
   StatusRef,
 } from "@/lib/expo-data";
 import type { CrmItem } from "@/lib/bitrix";
@@ -49,7 +51,14 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-const MAX_MONTH_DEAL_ENRICH = 24; // bound on concurrent deal lookups per month
+// Upper bound on how many visible expos we'll send per single crm.deal.list
+// filter array. Values are batched into chunks of this size — prevents the
+// Bitrix24 REST URL length limit from tripping on very large months.
+const MAX_MONTH_DEAL_BATCH_CHUNK = 50;
+
+function monthKeyOf(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
 
 export default function CalendarPage() {
   const [view, setView] = useState<ViewMode>("gantt");
@@ -270,48 +279,39 @@ function GanttView({
     () => exposOverlappingMonth(expos, activeMonth),
     [expos, activeMonth],
   );
-  // Cap the concurrent deal-aggregate lookups per month so the first
-  // MAX_MONTH_DEAL_ENRICH rows drive enrichment, but every overlapping expo is
-  // still rendered in the Gantt grid.
-  const enrichTargets = useMemo(
-    () => overlapping.slice(0, MAX_MONTH_DEAL_ENRICH),
-    [overlapping],
-  );
   const enabled = isInsideBitrix();
 
-  const aggregates = useQueries({
-    queries: enrichTargets.map((expo) => ({
-      queryKey: ["expo-aggregate", expo.id],
-      queryFn: () => buildExpoAggregate(expo.id),
-      enabled,
-      staleTime: 60_000,
-    })),
+  // Batch all visible expos' deals into a single crm.deal.list call per
+  // month (chunked if the id set is huge). This replaces the per-expo
+  // buildExpoAggregate storm that used to stall the BX24 SDK channel and
+  // leave the Gantt "загружается" indefinitely.
+  const monthKey = monthKeyOf(activeMonth);
+  const overlappingIds = useMemo(
+    () => overlapping.map((e) => Number(e.id)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
+    [overlapping],
+  );
+
+  const monthBatch = useQuery<MonthlyDealBatchResult>({
+    queryKey: ["gantt-monthly-deals", monthKey, overlappingIds],
+    queryFn: () =>
+      fetchMonthlyDealsForExpos(overlappingIds, {
+        chunkSize: MAX_MONTH_DEAL_BATCH_CHUNK,
+      }),
+    enabled: enabled && overlappingIds.length > 0,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
 
-  const stageTitleMap = useMemo(() => {
-    const map = new Map<string | number, string>();
-    aggregates.forEach((q) => {
-      const data = q.data as ExpoAggregate | undefined;
-      if (!isFoundAggregate(data)) return;
-      data.deals.forEach((deal) => {
-        const stageId = deal.STAGE_ID ?? (deal as Record<string, unknown>).stageId;
-        const stageTitle =
-          (deal as Record<string, unknown>).STAGE_NAME ||
-          (deal as Record<string, unknown>).stageName;
-        if (stageId && typeof stageTitle === "string" && stageTitle) {
-          map.set(String(stageId), stageTitle);
-        }
-      });
-    });
-    return map;
-  }, [aggregates]);
-
-  // Look up stage titles from crm for any rows where the deal row only has IDs.
+  // Stage titles from CRM — cached for 5 minutes, single query shared with
+  // the diagnostics panel.
   const stagesQuery = useQuery({
     queryKey: ["deal-stages"],
     queryFn: fetchDealStages,
     enabled,
     staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
   const stageTitlesFromCrm = useMemo(
     () => statusTitleMap(stagesQuery.data ?? []),
@@ -320,43 +320,35 @@ function GanttView({
 
   const byExpoId = useMemo(() => {
     const out = new Map<number | string, GanttDealBar[]>();
-    aggregates.forEach((q, idx) => {
-      const expo = enrichTargets[idx];
-      if (!expo) return;
-      const data = q.data as ExpoAggregate | undefined;
-      if (!isFoundAggregate(data)) return;
+    const batch = monthBatch.data;
+    if (!batch) return out;
+    batch.byExpoId.forEach((deals, expoId) => {
       const bars: GanttDealBar[] = [];
-      data.deals.forEach((deal) => {
-        const stageId = String(
-          (deal as Record<string, unknown>).STAGE_ID ??
-            (deal as Record<string, unknown>).stageId ??
-            "",
-        );
-        const titleFromAgg = stageTitleMap.get(stageId);
-        const title = titleFromAgg ?? stageTitlesFromCrm.get(stageId);
+      deals.forEach((deal) => {
+        const r = deal as Record<string, unknown>;
+        const stageId = String(r.STAGE_ID ?? r.stageId ?? "");
+        const title = stageTitlesFromCrm.get(stageId);
         const status = matchDealStatus(stageId, title);
         if (!status) return;
-        const clientName = extractClientName(deal);
-        const manager = extractManager(deal);
-        const budget = extractBudget(deal);
         bars.push({
-          id: String((deal as Record<string, unknown>).ID ?? (deal as Record<string, unknown>).id ?? ""),
+          id: String(r.ID ?? r.id ?? ""),
           status,
-          clientName,
-          manager,
-          budget,
-          title: String((deal as Record<string, unknown>).TITLE ?? ""),
+          clientName: extractClientName(r),
+          manager: extractManager(r),
+          budget: extractBudget(r),
+          title: String(r.TITLE ?? ""),
         });
       });
-      // Order by configured status order so colors stack consistently.
-      bars.sort((a, b) => DEAL_STATUS_ORDER.indexOf(a.status) - DEAL_STATUS_ORDER.indexOf(b.status));
-      out.set(expo.id, bars);
+      bars.sort(
+        (a, b) => DEAL_STATUS_ORDER.indexOf(a.status) - DEAL_STATUS_ORDER.indexOf(b.status),
+      );
+      out.set(expoId, bars);
     });
     return out;
-  }, [aggregates, enrichTargets, stageTitleMap, stageTitlesFromCrm]);
+  }, [monthBatch.data, stageTitlesFromCrm]);
 
   const dealsFor = useCallback(
-    (expo: ExpoItem): GanttDealBar[] => byExpoId.get(expo.id) ?? [],
+    (expo: ExpoItem): GanttDealBar[] => byExpoId.get(Number(expo.id)) ?? byExpoId.get(expo.id) ?? [],
     [byExpoId],
   );
 
@@ -425,23 +417,37 @@ function GanttDiagnostics({
     queryFn: fetchDealStagesDetailed,
     enabled,
     staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
   const stages = stagesQuery.data?.stages ?? [];
   const stagesDiagnostics = stagesQuery.data?.diagnostics;
 
-  // Reuse the same query keys as GanttView — React Query dedupes by key so the
-  // aggregates are not refetched, just read from cache.
   const monthTargets = useMemo(
-    () => exposOverlappingMonth(expos, activeMonth).slice(0, MAX_MONTH_DEAL_ENRICH),
+    () => exposOverlappingMonth(expos, activeMonth),
     [expos, activeMonth],
   );
-  const monthAggregates = useQueries({
-    queries: monthTargets.map((expo) => ({
-      queryKey: ["expo-aggregate", expo.id],
-      queryFn: () => buildExpoAggregate(expo.id),
-      enabled,
-      staleTime: 60_000,
-    })),
+  const monthTargetIds = useMemo(
+    () =>
+      monthTargets
+        .map((e) => Number(e.id))
+        .filter((n) => Number.isFinite(n) && n > 0)
+        .sort((a, b) => a - b),
+    [monthTargets],
+  );
+  const monthKey = monthKeyOf(activeMonth);
+  // Reuse the same query key as GanttView — React Query dedupes so this
+  // just reads from cache without re-firing the batch call.
+  const monthBatchQuery = useQuery<MonthlyDealBatchResult>({
+    queryKey: ["gantt-monthly-deals", monthKey, monthTargetIds],
+    queryFn: () =>
+      fetchMonthlyDealsForExpos(monthTargetIds, {
+        chunkSize: MAX_MONTH_DEAL_BATCH_CHUNK,
+      }),
+    enabled: enabled && monthTargetIds.length > 0,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
   const crmStageTitles = useMemo(() => statusTitleMap(stages), [stages]);
 
@@ -561,8 +567,16 @@ function GanttDiagnostics({
           <StageFetchDiagnostics diagnostics={stagesDiagnostics} totalStages={stages.length} />
         )}
 
+        <MonthlyBatchDiagnosticsPanel
+          monthKey={monthKey}
+          targets={monthTargets}
+          query={monthBatchQuery}
+        />
+
         <LoadedDealStagesPanel
-          aggregates={monthAggregates}
+          batch={monthBatchQuery.data}
+          isLoading={monthBatchQuery.isLoading}
+          isError={monthBatchQuery.isError}
           targets={monthTargets}
           crmStageTitles={crmStageTitles}
         />
@@ -614,19 +628,19 @@ function extractLinkFieldValue(
   return undefined;
 }
 
-function collectLoadedDealRows(
-  aggregates: { data?: ExpoAggregate }[],
+function collectLoadedDealRowsFromBatch(
+  batch: MonthlyDealBatchResult | undefined,
   targets: ExpoItem[],
   crmStageTitles: Map<string, string>,
 ): LoadedDealRow[] {
+  if (!batch) return [];
   const out: LoadedDealRow[] = [];
-  aggregates.forEach((q, idx) => {
-    const expo = targets[idx];
-    if (!expo) return;
-    const data = q.data as ExpoAggregate | undefined;
-    if (!isFoundAggregate(data)) return;
-    const linkField = data.diagnostics.deal.chosenField ?? dealExpoFieldCode ?? undefined;
-    data.deals.forEach((deal) => {
+  const titlesById = new Map<number, string>();
+  targets.forEach((expo) => titlesById.set(Number(expo.id), expo.title));
+  const linkField = batch.linkField;
+  batch.byExpoId.forEach((deals, expoId) => {
+    const expoTitle = titlesById.get(expoId) ?? `#${expoId}`;
+    deals.forEach((deal) => {
       const r = deal as Record<string, unknown>;
       const dealId = String(r.ID ?? r.id ?? "");
       if (!dealId) return;
@@ -655,8 +669,8 @@ function collectLoadedDealRows(
       const exact = matchDealStatus(stageId, stageTitleCrm);
       const candidate = exact ?? candidateDealStatusByName(stageTitleCrm);
       out.push({
-        expoId: expo.id,
-        expoTitle: expo.title,
+        expoId,
+        expoTitle,
         dealId,
         dealTitle: String(r.TITLE ?? r.title ?? ""),
         stageId,
@@ -681,25 +695,162 @@ function collectLoadedDealRows(
   return out;
 }
 
+function MonthlyBatchDiagnosticsPanel({
+  monthKey,
+  targets,
+  query,
+}: {
+  monthKey: string;
+  targets: ExpoItem[];
+  query: {
+    data?: MonthlyDealBatchResult;
+    isLoading: boolean;
+    isFetching: boolean;
+    isError: boolean;
+    error?: unknown;
+  };
+}) {
+  const [open, setOpen] = useState(true);
+  const data = query.data;
+  const settled = data?.outcomes.filter((o) => o.status === "ok").length ?? 0;
+  const failed = data?.outcomes.filter((o) => o.status === "failed").length ?? 0;
+  const timedOut = data?.outcomes.filter((o) => o.status === "timeout").length ?? 0;
+  const firstError =
+    data?.outcomes.find((o) => o.status === "failed" || o.status === "timeout")?.error ??
+    (query.isError ? String((query.error as Error)?.message ?? query.error) : undefined);
+
+  const pinnedMatches = useMemo(() => {
+    const counts: Record<DealStatusKey, number> = {
+      signingContract: 0,
+      building: 0,
+      projectCompleted: 0,
+    };
+    data?.deals.forEach((deal) => {
+      const stageId = String((deal as Record<string, unknown>).STAGE_ID ?? "");
+      if (!stageId) return;
+      for (const key of DEAL_STATUS_ORDER) {
+        if (dealStageIds[key] === stageId) counts[key] += 1;
+      }
+    });
+    return counts;
+  }, [data]);
+
+  const visibleIdsLabel = useMemo(() => {
+    const ids = data?.requestedExpoIds ?? targets.map((t) => Number(t.id));
+    if (ids.length === 0) return "—";
+    const preview = ids.slice(0, 20).join(", ");
+    return ids.length > 20 ? `${preview}, … (+${ids.length - 20})` : preview;
+  }, [data, targets]);
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between rounded-md border bg-muted/30 p-2 text-left"
+          data-testid="gantt-diag-monthly-batch-toggle"
+        >
+          <span>
+            Пакетная загрузка сделок за месяц · месяц <b>{monthKey}</b> · выставок
+            к опросу: <b data-testid="gantt-diag-month-expo-count">{targets.length}</b>
+            {data ? (
+              <>
+                {" "}· запросов выполнено: <b>{data.outcomes.length}</b> · успешно:{" "}
+                <b data-testid="gantt-diag-month-settled">{settled}</b> · ошибок:{" "}
+                <b
+                  className={failed > 0 ? "text-red-600" : undefined}
+                  data-testid="gantt-diag-month-failed"
+                >
+                  {failed}
+                </b>{" "}
+                · таймаутов:{" "}
+                <b
+                  className={timedOut > 0 ? "text-red-600" : undefined}
+                  data-testid="gantt-diag-month-timeout"
+                >
+                  {timedOut}
+                </b>{" "}
+                · сделок: <b data-testid="gantt-diag-month-deals">{data.deals.length}</b>
+                · за <b>{Math.round(data.durationMs)}</b> мс
+              </>
+            ) : query.isLoading || query.isFetching ? (
+              <> · загружается…</>
+            ) : (
+              <> · ожидание запроса</>
+            )}
+          </span>
+          <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
+        <div className="text-muted-foreground">
+          Для выбранного месяца выполняется <b>один</b> (или несколько — если
+          количество выставок превышает {MAX_MONTH_DEAL_BATCH_CHUNK}) запрос{" "}
+          <code>crm.deal.list</code> с фильтром{" "}
+          <code>{data?.linkField ?? "UF_CRM_6989BC521C964"}</code>: [массив id
+          видимых выставок]. Каждый запрос ограничен таймаутом 20 с и 20
+          страницами — «зависший» вызов вернёт ошибку, не повиснет.
+        </div>
+        <div>
+          Видимые ID выставок ({data?.requestedExpoIds.length ?? targets.length}):{" "}
+          <code data-testid="gantt-diag-month-visible-ids">{visibleIdsLabel}</code>
+        </div>
+        <div>
+          Совпадения по pinned STAGE_ID:{" "}
+          {DEAL_STATUS_ORDER.map((key) => (
+            <span key={key} className="mr-3">
+              <b>{DEAL_STATUS_LABELS[key]}</b> (
+              <code>{dealStageIds[key] ?? "—"}</code>):{" "}
+              <b data-testid={`gantt-diag-month-pinned-${key}`}>{pinnedMatches[key]}</b>
+            </span>
+          ))}
+        </div>
+        {firstError && (
+          <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
+            Ошибка пакетного запроса: {firstError}
+          </div>
+        )}
+        {data && data.outcomes.length > 1 && (
+          <ul className="ml-4 list-disc text-muted-foreground">
+            {data.outcomes.map((o, idx) => (
+              <li key={idx}>
+                чанк #{idx + 1}: <b>{o.status}</b> · сделок:{" "}
+                <b>{o.deals.length}</b>
+                {o.status !== "ok" ? <> · {o.error}</> : null}
+              </li>
+            ))}
+          </ul>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
+}
+
 function LoadedDealStagesPanel({
-  aggregates,
+  batch,
+  isLoading,
+  isError,
   targets,
   crmStageTitles,
 }: {
-  aggregates: { data?: ExpoAggregate; isLoading?: boolean; isError?: boolean }[];
+  batch: MonthlyDealBatchResult | undefined;
+  isLoading: boolean;
+  isError: boolean;
   targets: ExpoItem[];
   crmStageTitles: Map<string, string>;
 }) {
   const [open, setOpen] = useState(true);
 
   const rows = useMemo(
-    () => collectLoadedDealRows(aggregates, targets, crmStageTitles),
-    [aggregates, targets, crmStageTitles],
+    () => collectLoadedDealRowsFromBatch(batch, targets, crmStageTitles),
+    [batch, targets, crmStageTitles],
   );
 
-  const loading = aggregates.filter((q) => q.isLoading).length;
-  const errored = aggregates.filter((q) => q.isError).length;
-  const enrichedExpos = aggregates.filter((q) => isFoundAggregate(q.data)).length;
+  const loading = isLoading ? 1 : 0;
+  const errored = isError ? 1 : 0;
+  const enrichedExpos = batch
+    ? Array.from(batch.byExpoId.values()).filter((list) => list.length > 0).length
+    : 0;
 
   const stageSummary = useMemo(() => {
     type Entry = {
