@@ -123,16 +123,18 @@ export const PHASE_FILLS = {
 //   signingContract = "Подписываем договор" → yellow
 //   building        = "Строим"              → blue
 //   projectCompleted = "Проект завершён"    → green
-// Stage IDs were not confirmed from Bitrix, so the config stays null by default
-// and the UI falls back to case-insensitive name matching against the deal's
-// stage title. Set the explicit Bitrix stage ID (e.g. "C5:PREPAYMENT_INVOICE")
-// to pin the mapping once confirmed.
+// Stage IDs verified from live Bitrix24 deal cards:
+//   signingContract ("Подписание договора")  → STAGE_ID "8"
+//   building        ("Строим")                → STAGE_ID "9"
+//   projectCompleted ("Проект завершён")      → STAGE_ID "WON"
+// Name-matching fallbacks below still apply if a deal's stage ID does not
+// match one of these pinned values.
 export type DealStatusKey = "signingContract" | "building" | "projectCompleted";
 
 export const dealStageIds: Record<DealStatusKey, string | null> = {
-  signingContract: null,
-  building: null,
-  projectCompleted: null,
+  signingContract: "8",
+  building: "9",
+  projectCompleted: "WON",
 };
 
 export const DEAL_STATUS_LABELS: Record<DealStatusKey, string> = {
