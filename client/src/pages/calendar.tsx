@@ -51,13 +51,13 @@ import {
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
-// Recent-deal-scan page cap. Tuned to be a safe default: 1000 covers
-// ~2x the deals a monthly Gantt usually needs, while keeping the scan
+// Recent-deal-scan page cap. Tuned to be a safe default: 300 covers
+// the deals a monthly Gantt usually needs, while keeping the scan
 // bounded. The StageIdFinderPanel has proven this request shape (no
 // filter, order by ID DESC, limited select) loads reliably in the live
 // Bitrix24 environment where per-expo UF filters and per-STAGE_ID scans
 // both time out. Adjust here to widen or narrow the scan.
-const RECENT_SCAN_LIMIT = 1000;
+const RECENT_SCAN_LIMIT = 300;
 
 function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
