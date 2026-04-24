@@ -837,6 +837,8 @@ function MonthlyBatchDiagnosticsPanel({
             <b data-testid="gantt-diag-month-scan-pages">{data.pagesLoaded}</b>
             {" · сделок просканировано: "}
             <b data-testid="gantt-diag-month-scan-count">{data.scannedDealCount}</b>
+            {" · источник: "}
+            <b data-testid="gantt-diag-month-scan-source">{data.scanSource}</b>
             {data.truncated ? (
               <>
                 {" · "}

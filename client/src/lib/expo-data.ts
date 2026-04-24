@@ -1160,6 +1160,12 @@ export type RecentScanResult = {
   truncated: boolean;
   warning: string;
   scanError?: string;
+  // Which code path loaded the deals. When set to
+  // "stageIdFinder-compatible" the scan delegated to
+  // fetchDealsForStageProbe — the exact same request shape that
+  // StageIdFinderPanel uses and that the live Bitrix24 account has
+  // proven can return 300 deals reliably.
+  scanSource: "stageIdFinder-compatible";
 };
 
 export async function fetchMonthlyDealsByRecentScan(
@@ -1208,34 +1214,25 @@ export async function fetchMonthlyDealsByRecentScan(
   };
 
   const start = Date.now();
-  const warning = `Bounded recent-deal scan: reads up to ${requestedLimit} most-recent deals via crm.deal.list (no filter), then client-side filters to pinned stages (8/9/WON) linked to visible expos. Scans the ${requestedLimit} most recent deals — older deals are not included; limit can be raised later.`;
+  const warning = `Bounded recent-deal scan (stageIdFinder-compatible path): reads up to ${requestedLimit} most-recent deals via fetchDealsForStageProbe — the exact same crm.deal.list request shape StageIdFinderPanel uses and has proven loads 300 deals reliably — then client-side filters to pinned stages (8/9/WON) linked to visible expos. Older deals are not included; limit can be raised later.`;
 
   let allScanned: CrmItem[] = [];
   let pagesLoaded = 0;
   let truncated = false;
   let scanError: string | undefined;
-  try {
-    const rows = await listAllBx<CrmItem>(
-      "crm.deal.list",
-      {
-        order: { ID: "DESC" },
-        filter: {},
-        select: DEAL_STAGE_DIAGNOSTIC_SELECT,
-      },
-      {
-        maxPages: Math.max(1, Math.ceil(requestedLimit / 50)) + 1,
-      },
-    );
-    if (rows.length >= requestedLimit) {
-      allScanned = rows.slice(0, requestedLimit);
-      truncated = rows.length > requestedLimit;
-    } else {
-      allScanned = rows;
-    }
-    pagesLoaded = Math.max(1, Math.ceil(allScanned.length / 50));
-  } catch (err) {
-    scanError = errorMessage(err);
+  // Delegate to fetchDealsForStageProbe so the Gantt uses the identical
+  // function/request shape that StageIdFinderPanel uses. Any divergence
+  // (paging, select, filter, timeout) between the two paths is eliminated
+  // by reusing the single function.
+  const probe = await fetchDealsForStageProbe({ limit: requestedLimit });
+  if (probe.error) {
+    scanError = probe.error;
   }
+  allScanned = probe.deals;
+  truncated = probe.truncated;
+  pagesLoaded = probe.pages > 0
+    ? probe.pages
+    : Math.max(1, Math.ceil(allScanned.length / 50));
 
   const linkedDeals: CrmItem[] = [];
   const unlinkedDeals: CrmItem[] = [];
@@ -1329,6 +1326,7 @@ export async function fetchMonthlyDealsByRecentScan(
     truncated,
     warning,
     scanError,
+    scanSource: "stageIdFinder-compatible",
   };
 }
 
