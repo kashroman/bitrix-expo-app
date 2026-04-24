@@ -1,5 +1,5 @@
-import { useMemo, useState, useCallback } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMemo, useState, useCallback, useEffect } from "react";
+import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -93,6 +93,13 @@ export default function CalendarPage() {
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
+    // Keep the previous month's result visible while the new month loads.
+    // This prevents GanttView from unmounting/remounting on every month
+    // switch — the old remount flow lost GanttTimeline's cursor state and
+    // the transient `isLoading=true` window masked the in-flight fetch so
+    // the month-load diagnostics appeared to stall at "loading" with 0
+    // expos when the new month wasn't immediately cached.
+    placeholderData: keepPreviousData,
   });
 
   const expos = useQuery({
@@ -101,18 +108,39 @@ export default function CalendarPage() {
     enabled: isBitrix && view !== "gantt",
   });
 
+  // With placeholderData: keepPreviousData the query returns last month's
+  // items while a new month loads. Only use those items when they match
+  // the active month — otherwise expose an empty list and flag fetching.
+  const monthDataIsForActiveMonth =
+    monthExpos.data?.diagnostics.monthKey === activeMonthKey;
   const activeExpos: ExpoItem[] =
-    view === "gantt" ? monthExpos.data?.items ?? [] : expos.data ?? [];
+    view === "gantt"
+      ? monthDataIsForActiveMonth
+        ? monthExpos.data?.items ?? []
+        : []
+      : expos.data ?? [];
+  // First-time load: no data yet, query is fetching. On subsequent month
+  // switches we keep GanttView mounted and surface fetching state inside.
+  const ganttFirstLoad =
+    view === "gantt" && monthExpos.isFetching && !monthExpos.data;
   const activeIsLoading =
-    view === "gantt" ? monthExpos.isLoading : expos.isLoading;
+    view === "gantt" ? ganttFirstLoad : expos.isLoading;
+  const ganttIsFetchingNewMonth =
+    view === "gantt" &&
+    monthExpos.isFetching &&
+    !monthDataIsForActiveMonth &&
+    Boolean(monthExpos.data);
   const activeIsError =
     view === "gantt"
       ? monthExpos.isError ||
-        Boolean(monthExpos.data?.diagnostics.error)
+        (monthDataIsForActiveMonth &&
+          Boolean(monthExpos.data?.diagnostics.error))
       : expos.isError;
   const activeError =
     view === "gantt"
-      ? monthExpos.data?.diagnostics.error ??
+      ? (monthDataIsForActiveMonth
+          ? monthExpos.data?.diagnostics.error
+          : undefined) ??
         (monthExpos.error as Error | undefined)?.message ??
         monthExpos.error
       : (expos.error as Error | undefined)?.message ?? expos.error;
@@ -228,9 +256,12 @@ export default function CalendarPage() {
               expos={filtered}
               activeMonth={activeMonth}
               onMonthChange={setActiveMonth}
+              isFetchingNewMonth={ganttIsFetchingNewMonth}
               emptyMessage={
                 filtered.length === 0
-                  ? "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
+                  ? ganttIsFetchingNewMonth
+                    ? "Загрузка выставок за выбранный месяц…"
+                    : "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
                   : undefined
               }
             />
@@ -334,11 +365,13 @@ function GanttView({
   activeMonth,
   onMonthChange,
   emptyMessage,
+  isFetchingNewMonth = false,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
   onMonthChange: (d: Date) => void;
   emptyMessage?: string;
+  isFetchingNewMonth?: boolean;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -460,6 +493,15 @@ function GanttView({
 
   return (
     <div className="space-y-2">
+      {isFetchingNewMonth ? (
+        <div
+          className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200"
+          data-testid="gantt-month-fetching-banner"
+        >
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          <span>Загрузка выставок за выбранный месяц…</span>
+        </div>
+      ) : null}
       <div
         className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2 text-xs"
         data-testid="gantt-scan-controls"
@@ -679,6 +721,7 @@ function GanttDiagnostics({
           monthLoad={monthLoad}
           isFetching={Boolean(monthLoadIsFetching)}
           error={monthLoadError}
+          activeMonthKey={monthKey}
         />
         <div className="grid gap-1">
           <div>
@@ -901,19 +944,53 @@ function MonthLoadDiagnosticsPanel({
   monthLoad,
   isFetching,
   error,
+  activeMonthKey,
 }: {
   monthLoad?: MonthExpoLoadResult;
   isFetching: boolean;
   error?: string;
+  activeMonthKey?: string;
 }) {
   const [open, setOpen] = useState(true);
   const d = monthLoad?.diagnostics;
-  const strategy = d?.strategy ?? (isFetching ? "loading" : "ожидание");
-  const fallback = d?.fallbackUsed ? "да" : "нет";
-  const headline = d
-    ? `Стратегия: ${d.strategy} · выставок загружено: ${d.itemCount} · страниц: ${d.pagesLoaded} · ${Math.round(d.durationMs)} мс`
+  // When the query keeps previous data, `monthLoad` can point to the
+  // previously-loaded month while the current activeMonth is still
+  // fetching. Only treat the diagnostics as "current" when its monthKey
+  // matches activeMonthKey.
+  const dIsCurrent =
+    activeMonthKey === undefined || d?.monthKey === activeMonthKey;
+  const effectiveD = dIsCurrent ? d : undefined;
+  // Elapsed-fetch ticker so the panel never looks frozen. Resets when a
+  // new fetch starts (monthKey changed) and stops once data arrives.
+  const [fetchStartedAt, setFetchStartedAt] = useState<number | null>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    if (isFetching && !dIsCurrent) {
+      if (fetchStartedAt === null) setFetchStartedAt(Date.now());
+    } else {
+      setFetchStartedAt(null);
+    }
+  }, [isFetching, dIsCurrent, fetchStartedAt]);
+  useEffect(() => {
+    if (fetchStartedAt === null) return;
+    const timer = setInterval(() => setNowMs(Date.now()), 500);
+    return () => clearInterval(timer);
+  }, [fetchStartedAt]);
+  const fetchingSeconds =
+    fetchStartedAt !== null ? Math.max(0, Math.round((nowMs - fetchStartedAt) / 1000)) : 0;
+  // fetchExposByMonth's deadline budget is MONTH_EXPO_REQUEST_TIMEOUT_MS * 2 = 40s
+  // plus a small buffer for the fallback attempt; flag a stall at ~45s so
+  // an unresponsive Bitrix call doesn't masquerade as "still loading".
+  const MONTH_LOAD_STALL_SEC = 45;
+  const stalled = fetchStartedAt !== null && fetchingSeconds >= MONTH_LOAD_STALL_SEC;
+  const strategy = effectiveD?.strategy ?? (isFetching ? "loading" : "ожидание");
+  const fallback = effectiveD?.fallbackUsed ? "да" : "нет";
+  const headline = effectiveD
+    ? `Стратегия: ${effectiveD.strategy} · выставок загружено: ${effectiveD.itemCount} · страниц: ${effectiveD.pagesLoaded} · ${Math.round(effectiveD.durationMs)} мс`
     : isFetching
-      ? "Загрузка выставок по месяцу…"
+      ? fetchStartedAt !== null
+        ? `Загрузка выставок по месяцу… ${fetchingSeconds} с${stalled ? " (превышен бюджет 45 с)" : ""}`
+        : "Загрузка выставок по месяцу…"
       : "Нет данных о загрузке выставок";
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -926,16 +1003,26 @@ function MonthLoadDiagnosticsPanel({
           <span>
             Загрузка выставок за месяц ·{" "}
             <code data-testid="gantt-diag-month-load-strategy">{strategy}</code>
-            {d ? (
+            {effectiveD ? (
               <>
-                {" "}· выставок: <b data-testid="gantt-diag-month-load-count">{d.itemCount}</b>
+                {" "}· выставок: <b data-testid="gantt-diag-month-load-count">{effectiveD.itemCount}</b>
                 {" · страниц: "}
-                <b data-testid="gantt-diag-month-load-pages">{d.pagesLoaded}</b>
+                <b data-testid="gantt-diag-month-load-pages">{effectiveD.pagesLoaded}</b>
                 {" · fallback: "}
                 <b data-testid="gantt-diag-month-load-fallback">{fallback}</b>
               </>
             ) : isFetching ? (
-              <> · загружается…</>
+              <>
+                {" · загружается…"}
+                {fetchStartedAt !== null ? (
+                  <>
+                    {" · "}
+                    <span data-testid="gantt-diag-month-load-elapsed">
+                      {fetchingSeconds} с
+                    </span>
+                  </>
+                ) : null}
+              </>
             ) : null}
           </span>
           <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -945,37 +1032,53 @@ function MonthLoadDiagnosticsPanel({
         <div className="text-muted-foreground">
           {headline}
         </div>
-        {d && (
+        {stalled && !effectiveD ? (
+          <div
+            className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-100"
+            data-testid="gantt-diag-month-load-stall"
+          >
+            Загрузка длится дольше {MONTH_LOAD_STALL_SEC} с. Bitrix не ответил в
+            рамках встроенного дедлайна (40 с). Попробуйте нажать «Обновить»
+            или проверить доступность API.
+          </div>
+        ) : null}
+        {activeMonthKey && d && !dIsCurrent ? (
+          <div className="rounded border bg-muted/20 p-2 text-muted-foreground text-[11px]">
+            Показаны предыдущие данные за <b>{d.monthKey}</b> — идёт загрузка{" "}
+            <b>{activeMonthKey}</b>.
+          </div>
+        ) : null}
+        {effectiveD && (
           <>
             <div>
-              Месяц: <b>{d.monthKey}</b> (<code>{d.monthStartIso}</code> …{" "}
-              <code>{d.monthEndIso}</code>)
+              Месяц: <b>{effectiveD.monthKey}</b> (<code>{effectiveD.monthStartIso}</code> …{" "}
+              <code>{effectiveD.monthEndIso}</code>)
             </div>
             <div>
-              Поля: eventStart <code>{d.eventStartField}</code> · eventEnd{" "}
-              <code>{d.eventEndField}</code>
+              Поля: eventStart <code>{effectiveD.eventStartField}</code> · eventEnd{" "}
+              <code>{effectiveD.eventEndField}</code>
             </div>
             <div>
               Фильтр crm.item.list:{" "}
               <code data-testid="gantt-diag-month-load-filter">
-                {JSON.stringify(d.filter)}
+                {JSON.stringify(effectiveD.filter)}
               </code>
             </div>
             <div>
-              Select: <code>{d.select.join(", ")}</code>
+              Select: <code>{effectiveD.select.join(", ")}</code>
             </div>
             <div>
               Полная выгрузка smart-process:{" "}
               <b data-testid="gantt-diag-month-load-fullload">
-                {d.usedFullLoad ? "да" : "нет"}
+                {effectiveD.usedFullLoad ? "да" : "нет"}
               </b>
-              {d.timedOut ? <> · <span className="text-red-600">таймаут</span></> : null}
+              {effectiveD.timedOut ? <> · <span className="text-red-600">таймаут</span></> : null}
             </div>
-            {d.attempts.length > 0 && (
+            {effectiveD.attempts.length > 0 && (
               <div>
                 <div className="font-medium">Попытки:</div>
                 <ul className="ml-4 list-disc text-muted-foreground">
-                  {d.attempts.map((a, idx) => (
+                  {effectiveD.attempts.map((a, idx) => (
                     <li key={idx} data-testid={`gantt-diag-month-load-attempt-${a.strategy}`}>
                       <code>{a.strategy}</code> · {a.ok ? "ok" : "failed"} · найдено{" "}
                       <b>{a.itemCount}</b> · страниц <b>{a.pagesLoaded}</b> ·{" "}
@@ -997,14 +1100,14 @@ function MonthLoadDiagnosticsPanel({
                 </ul>
               </div>
             )}
-            {d.error && (
+            {effectiveD.error && (
               <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
-                Ошибка: {d.error}
+                Ошибка: {effectiveD.error}
               </div>
             )}
           </>
         )}
-        {!d && error && (
+        {!effectiveD && error && (
           <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
             Ошибка: {error}
           </div>

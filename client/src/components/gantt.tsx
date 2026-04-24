@@ -124,6 +124,23 @@ export function GanttTimeline({
     return monthStartOf(now.getFullYear(), now.getMonth());
   });
 
+  // Keep cursor in sync when the parent drives the month externally (e.g.
+  // deep-link, refresh, or a sibling control). Using the year/month pair
+  // as the dependency avoids re-syncing on every new Date reference that
+  // represents the same month — which would otherwise fight with user
+  // clicks on the prev/next buttons.
+  const initialYear = initialMonth?.getFullYear();
+  const initialMonthIdx = initialMonth?.getMonth();
+  useEffect(() => {
+    if (initialYear === undefined || initialMonthIdx === undefined) return;
+    setCursor((prev) => {
+      if (prev.getFullYear() === initialYear && prev.getMonth() === initialMonthIdx) {
+        return prev;
+      }
+      return monthStartOf(initialYear, initialMonthIdx);
+    });
+  }, [initialYear, initialMonthIdx]);
+
   useEffect(() => {
     onMonthChange?.(cursor);
   }, [cursor, onMonthChange]);
