@@ -1118,11 +1118,13 @@ export async function fetchMonthlyDealsByStageScan(
 // matches, some bars may be missing. Bump the limit in code to widen the
 // scan.
 
-// Configurable page cap. Default 1000 (20 pages of 50). Hard cap 2000
-// (40 pages) to keep the request bounded. StageIdFinderPanel proved 300
-// loads in a few seconds; 1000 still completes in well under the SDK's
-// 45s ceiling on a warm channel.
-const RECENT_DEAL_SCAN_DEFAULT_LIMIT = 1000;
+// Configurable page cap. Default 300 (6 pages of 50) — the known-working
+// bounded scan size proved out by StageIdFinderPanel, which loaded 300
+// deals in a few seconds and surfaced the target examples #2810
+// (STAGE_ID 8), #3028 (STAGE_ID 9), and #3096 (WON). Hard cap 2000
+// (40 pages) to keep the request bounded; raise the default in code if a
+// wider scan is needed.
+const RECENT_DEAL_SCAN_DEFAULT_LIMIT = 300;
 const RECENT_DEAL_SCAN_HARD_CAP = 2000;
 
 export type RecentScanOutcome = {
@@ -1206,7 +1208,7 @@ export async function fetchMonthlyDealsByRecentScan(
   };
 
   const start = Date.now();
-  const warning = `Bounded recent-deal scan: reads up to ${requestedLimit} most-recent deals via crm.deal.list (no filter), then client-side filters to pinned stages (8/9/WON) linked to visible expos. Older deals are not included.`;
+  const warning = `Bounded recent-deal scan: reads up to ${requestedLimit} most-recent deals via crm.deal.list (no filter), then client-side filters to pinned stages (8/9/WON) linked to visible expos. Scans the ${requestedLimit} most recent deals — older deals are not included; limit can be raised later.`;
 
   let allScanned: CrmItem[] = [];
   let pagesLoaded = 0;
