@@ -158,6 +158,312 @@ export async function fetchExpoList(): Promise<ExpoItem[]> {
   return items.map(normalizeExpo);
 }
 
+// --- Month-scoped exhibition loader ----------------------------------------
+//
+// The live Bitrix24 account holds 420+ exhibitions in smart-process 1050 and
+// crm.item.list paging reliably times out at ~45 s before the Gantt can
+// render anything. The Gantt only shows exhibitions whose event interval
+// [eventStart, eventEnd] overlaps the selected month, so there is no reason
+// to load the entire list when only a handful of items are needed per month.
+//
+// Server-side filter rule:
+//   start <= monthEnd  AND  end >= monthStart
+// Bitrix filter syntax uses "<=fieldCode" / ">=fieldCode" keys. We also set
+// a higher soft page cap so we can detect accidental full-loads in
+// diagnostics, but typical months are a handful of rows on one page.
+//
+// A guarded fallback path is provided: if the optimized filter fails (e.g.
+// the Bitrix account refuses the <=/>= syntax on a UF date field), the
+// caller receives a structured error with the attempted filter so the UI
+// can show a clear diagnostic instead of silently paging the whole set.
+
+export type MonthExpoLoadStrategy =
+  | "month-filter-event-dates"
+  | "month-filter-event-start-only"
+  | "full-list-fallback";
+
+export type MonthExpoLoadDiagnostics = {
+  strategy: MonthExpoLoadStrategy;
+  strategyLabel: string;
+  monthKey: string;
+  monthStartIso: string;
+  monthEndIso: string;
+  filter: Record<string, unknown>;
+  select: string[];
+  pagesLoaded: number;
+  itemCount: number;
+  durationMs: number;
+  fallbackUsed: boolean;
+  usedFullLoad: boolean;
+  error?: string;
+  timedOut?: boolean;
+  attempts: Array<{
+    strategy: MonthExpoLoadStrategy;
+    ok: boolean;
+    itemCount: number;
+    pagesLoaded: number;
+    durationMs: number;
+    error?: string;
+    timedOut?: boolean;
+  }>;
+  eventStartField: string;
+  eventEndField: string;
+};
+
+export type MonthExpoLoadResult = {
+  items: ExpoItem[];
+  diagnostics: MonthExpoLoadDiagnostics;
+};
+
+// Build a [monthStart, monthEnd] bounds pair in the local timezone.
+// monthEnd is the last millisecond of the last day so "<=" naturally
+// includes exhibitions starting on the last day of the month.
+export function monthBoundsIso(activeMonth: Date): {
+  monthStart: Date;
+  monthEnd: Date;
+  monthStartIso: string;
+  monthEndIso: string;
+  monthKey: string;
+} {
+  const y = activeMonth.getFullYear();
+  const m = activeMonth.getMonth();
+  const monthStart = new Date(y, m, 1, 0, 0, 0, 0);
+  const monthEnd = new Date(y, m + 1, 0, 23, 59, 59, 999);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const monthKey = `${y}-${pad(m + 1)}`;
+  // Bitrix accepts ISO-like "YYYY-MM-DD HH:mm:ss" or full ISO; ISO is safe.
+  return {
+    monthStart,
+    monthEnd,
+    monthStartIso: monthStart.toISOString(),
+    monthEndIso: monthEnd.toISOString(),
+    monthKey,
+  };
+}
+
+// Tight select list — we only need the id/title/date fields and responsible
+// assignee for filtering / display. Still includes ufCrm* so any filter UF
+// date fields arrive.
+const MONTH_EXPO_SELECT = [
+  "id",
+  "title",
+  "assignedById",
+  "createdTime",
+  "updatedTime",
+  EXPO_DATE_FIELDS.eventStart,
+  EXPO_DATE_FIELDS.eventEnd,
+  ...(EXPO_DATE_FIELDS.mountStart ? [EXPO_DATE_FIELDS.mountStart] : []),
+  ...(EXPO_DATE_FIELDS.mountEnd ? [EXPO_DATE_FIELDS.mountEnd] : []),
+  ...(EXPO_DATE_FIELDS.dismantleStart ? [EXPO_DATE_FIELDS.dismantleStart] : []),
+  ...(EXPO_DATE_FIELDS.dismantleEnd ? [EXPO_DATE_FIELDS.dismantleEnd] : []),
+];
+
+// Per-attempt timeout. Kept below LIST_BX_TIMEOUT_MS (45s) so a bad first
+// page frees the slot while the fallback still has time to run.
+const MONTH_EXPO_REQUEST_TIMEOUT_MS = 20_000;
+// Soft page cap. A month is normally <= 1 page (50 items); the cap catches
+// accidental full-loads. Hard enough to surface in diagnostics.
+const MONTH_EXPO_MAX_PAGES = 6;
+
+async function tryMonthFilter(
+  filter: Record<string, unknown>,
+  strategy: MonthExpoLoadStrategy,
+): Promise<{
+  ok: boolean;
+  items: CrmItem[];
+  pagesLoaded: number;
+  durationMs: number;
+  error?: string;
+  timedOut?: boolean;
+}> {
+  const start = Date.now();
+  try {
+    const items = await listAllBx<CrmItem>(
+      "crm.item.list",
+      {
+        entityTypeId: EXPO_ENTITY_TYPE_ID,
+        filter,
+        select: MONTH_EXPO_SELECT,
+        order: { id: "DESC" },
+      },
+      {
+        timeoutMs: MONTH_EXPO_REQUEST_TIMEOUT_MS,
+        maxPages: MONTH_EXPO_MAX_PAGES,
+      },
+    );
+    // Approximate pages from item count (server returns up to 50 per page).
+    const pagesLoaded = Math.max(1, Math.ceil(items.length / 50));
+    void strategy;
+    return { ok: true, items, pagesLoaded, durationMs: Date.now() - start };
+  } catch (err) {
+    const message = errorMessage(err);
+    return {
+      ok: false,
+      items: [],
+      pagesLoaded: 0,
+      durationMs: Date.now() - start,
+      error: message,
+      timedOut: /timeout|таймаут/i.test(message),
+    };
+  }
+}
+
+// Load only exhibitions whose event interval overlaps the selected month.
+// Returns a structured result with diagnostics so the UI can surface which
+// strategy was used, how many pages were loaded, and whether a fallback ran.
+//
+// Strategy order:
+//   1) Optimized two-sided filter on event start/end UF date fields.
+//   2) Narrower one-sided filter on eventStart only (eventStart <= monthEnd
+//      AND eventStart >= monthStart) — catches the common case where only
+//      the start date is set, and also works if the Bitrix account rejects
+//      >= on the end-date UF. Client-side still enforces the overlap rule.
+//   3) Full-list fallback — last resort, matches the previous behavior.
+//      Only reached when both filtered strategies error out.
+export async function fetchExposByMonth(
+  activeMonth: Date,
+): Promise<MonthExpoLoadResult> {
+  const { monthStart, monthEnd, monthStartIso, monthEndIso, monthKey } =
+    monthBoundsIso(activeMonth);
+  const eventStart = EXPO_DATE_FIELDS.eventStart;
+  const eventEnd = EXPO_DATE_FIELDS.eventEnd;
+
+  const attempts: MonthExpoLoadDiagnostics["attempts"] = [];
+
+  // Attempt 1 — two-sided overlap filter.
+  // Bitrix REST filter: key prefix "<=" / ">=" with the field code.
+  // For smart-process UF date fields we pass the raw field code as-is.
+  const twoSidedFilter: Record<string, unknown> = {
+    [`<=${eventStart}`]: monthEndIso,
+    [`>=${eventEnd}`]: monthStartIso,
+  };
+  const twoSided = await tryMonthFilter(twoSidedFilter, "month-filter-event-dates");
+  attempts.push({
+    strategy: "month-filter-event-dates",
+    ok: twoSided.ok,
+    itemCount: twoSided.items.length,
+    pagesLoaded: twoSided.pagesLoaded,
+    durationMs: twoSided.durationMs,
+    error: twoSided.error,
+    timedOut: twoSided.timedOut,
+  });
+
+  if (twoSided.ok) {
+    return {
+      items: twoSided.items.map(normalizeExpo),
+      diagnostics: {
+        strategy: "month-filter-event-dates",
+        strategyLabel:
+          "Server-side filter: eventStart ≤ monthEnd AND eventEnd ≥ monthStart",
+        monthKey,
+        monthStartIso,
+        monthEndIso,
+        filter: twoSidedFilter,
+        select: MONTH_EXPO_SELECT,
+        pagesLoaded: twoSided.pagesLoaded,
+        itemCount: twoSided.items.length,
+        durationMs: twoSided.durationMs,
+        fallbackUsed: false,
+        usedFullLoad: false,
+        attempts,
+        eventStartField: eventStart,
+        eventEndField: eventEnd,
+      },
+    };
+  }
+
+  // Attempt 2 — single-field range on eventStart. Covers the common case
+  // where only the event start date is configured; the overlap rule will
+  // be re-checked client-side.
+  const startOnlyFilter: Record<string, unknown> = {
+    [`>=${eventStart}`]: monthStartIso,
+    [`<=${eventStart}`]: monthEndIso,
+  };
+  const startOnly = await tryMonthFilter(
+    startOnlyFilter,
+    "month-filter-event-start-only",
+  );
+  attempts.push({
+    strategy: "month-filter-event-start-only",
+    ok: startOnly.ok,
+    itemCount: startOnly.items.length,
+    pagesLoaded: startOnly.pagesLoaded,
+    durationMs: startOnly.durationMs,
+    error: startOnly.error,
+    timedOut: startOnly.timedOut,
+  });
+
+  if (startOnly.ok) {
+    const normalized = startOnly.items.map(normalizeExpo);
+    // Client-side overlap guard — matches Gantt's own filter.
+    const mS = monthStart.getTime();
+    const mE = monthEnd.getTime();
+    const visible = normalized.filter((expo) => {
+      const s = expo.expoStart ? new Date(expo.expoStart).getTime() : undefined;
+      const e = expo.expoEnd ? new Date(expo.expoEnd).getTime() : undefined;
+      if (s === undefined && e === undefined) return false;
+      const sv = s ?? e!;
+      const ev = e ?? s!;
+      return sv <= mE && ev >= mS;
+    });
+    return {
+      items: visible,
+      diagnostics: {
+        strategy: "month-filter-event-start-only",
+        strategyLabel:
+          "Fallback filter: eventStart within [monthStart, monthEnd] (two-sided filter rejected)",
+        monthKey,
+        monthStartIso,
+        monthEndIso,
+        filter: startOnlyFilter,
+        select: MONTH_EXPO_SELECT,
+        pagesLoaded: startOnly.pagesLoaded,
+        itemCount: visible.length,
+        durationMs: startOnly.durationMs,
+        fallbackUsed: true,
+        usedFullLoad: false,
+        attempts,
+        eventStartField: eventStart,
+        eventEndField: eventEnd,
+      },
+    };
+  }
+
+  // Both filtered strategies failed — surface a clear error instead of
+  // silently paging the entire smart-process.
+  const combinedError = [
+    twoSided.error ? `two-sided: ${twoSided.error}` : undefined,
+    startOnly.error ? `start-only: ${startOnly.error}` : undefined,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    items: [],
+    diagnostics: {
+      strategy: "full-list-fallback",
+      strategyLabel:
+        "All filtered strategies failed — no fallback full-load was attempted to avoid timeout.",
+      monthKey,
+      monthStartIso,
+      monthEndIso,
+      filter: twoSidedFilter,
+      select: MONTH_EXPO_SELECT,
+      pagesLoaded: 0,
+      itemCount: 0,
+      durationMs: 0,
+      fallbackUsed: true,
+      usedFullLoad: false,
+      attempts,
+      eventStartField: eventStart,
+      eventEndField: eventEnd,
+      error:
+        combinedError ||
+        "crm.item.list filtered by month returned no data and no error — check the UF date field codes.",
+      timedOut: Boolean(twoSided.timedOut || startOnly.timedOut),
+    },
+  };
+}
+
 export type FetchExpoOutcome =
   | { status: "found"; expo: ExpoItem }
   | { status: "not-found" }

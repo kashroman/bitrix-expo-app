@@ -16,6 +16,7 @@ import {
   ExpoItem,
   fetchDealsForStageProbe,
   fetchExpoList,
+  fetchExposByMonth,
   fetchDealStages,
   fetchDealStagesDetailed,
   fetchMonthlyDealsByRecentScan,
@@ -27,6 +28,7 @@ import type {
   DealProbeLookup,
   DealStageProbeResult,
   DealStagesResult,
+  MonthExpoLoadResult,
   RecentScanResult,
   StatusRef,
 } from "@/lib/expo-data";
@@ -73,22 +75,53 @@ export default function CalendarPage() {
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
 
+  // Gantt-only month-scoped loader. Uses crm.item.list with a server-side
+  // date filter so only exhibitions whose event interval overlaps the
+  // selected month are requested. Calendar/List modes still use the full
+  // list — they need every exhibition for their own layouts.
+  const isBitrix = isInsideBitrix();
+  const activeMonthKey = monthKeyOf(activeMonth);
+  const monthExpos = useQuery<MonthExpoLoadResult>({
+    queryKey: ["expo-list-month", activeMonthKey],
+    queryFn: () => fetchExposByMonth(activeMonth),
+    enabled: isBitrix && view === "gantt",
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+
   const expos = useQuery({
     queryKey: ["expo-list"],
     queryFn: fetchExpoList,
-    enabled: isInsideBitrix(),
+    enabled: isBitrix && view !== "gantt",
   });
+
+  const activeExpos: ExpoItem[] =
+    view === "gantt" ? monthExpos.data?.items ?? [] : expos.data ?? [];
+  const activeIsLoading =
+    view === "gantt" ? monthExpos.isLoading : expos.isLoading;
+  const activeIsError =
+    view === "gantt"
+      ? monthExpos.isError ||
+        Boolean(monthExpos.data?.diagnostics.error)
+      : expos.isError;
+  const activeError =
+    view === "gantt"
+      ? monthExpos.data?.diagnostics.error ??
+        (monthExpos.error as Error | undefined)?.message ??
+        monthExpos.error
+      : (expos.error as Error | undefined)?.message ?? expos.error;
 
   const responsibles = useMemo(() => {
     const ids = new Set<string>();
-    (expos.data ?? []).forEach((expo) => {
+    activeExpos.forEach((expo) => {
       if (expo.responsibleId) ids.add(String(expo.responsibleId));
     });
     return Array.from(ids);
-  }, [expos.data]);
+  }, [activeExpos]);
 
   const filtered = useMemo(() => {
-    const list = expos.data ?? [];
+    const list = activeExpos;
     const now = Date.now();
     const lower = search.trim().toLocaleLowerCase("ru-RU");
     return list.filter((expo) => {
@@ -107,7 +140,7 @@ export default function CalendarPage() {
       }
       return true;
     });
-  }, [expos.data, responsible, search, period]);
+  }, [activeExpos, responsible, search, period]);
 
   return (
     <Shell>
@@ -166,7 +199,10 @@ export default function CalendarPage() {
           <Button
             variant="outline"
             size="sm"
-            onClick={() => queryClient.invalidateQueries({ queryKey: ["expo-list"] })}
+            onClick={() => {
+              queryClient.invalidateQueries({ queryKey: ["expo-list"] });
+              queryClient.invalidateQueries({ queryKey: ["expo-list-month"] });
+            }}
             data-testid="button-refresh"
           >
             <RefreshCw className="mr-2 h-4 w-4" />
@@ -178,10 +214,10 @@ export default function CalendarPage() {
       <Card>
         <CardHeader><CardTitle className="text-lg">Выставки ({filtered.length})</CardTitle></CardHeader>
         <CardContent>
-          {expos.isLoading ? (
+          {activeIsLoading ? (
             <LoadingRows />
-          ) : expos.isError ? (
-            <Empty text={`Ошибка Bitrix24 API: ${String((expos.error as Error)?.message ?? expos.error)}`} />
+          ) : activeIsError ? (
+            <Empty text={`Ошибка Bitrix24 API: ${String((activeError as Error | string | undefined) ?? "")}`} />
           ) : view === "gantt" ? (
             <GanttView
               expos={filtered}
@@ -203,8 +239,17 @@ export default function CalendarPage() {
         </CardContent>
       </Card>
 
-      {view === "gantt" && isInsideBitrix() && filtered.length > 0 ? (
-        <GanttDiagnostics activeMonth={activeMonth} expos={filtered} />
+      {view === "gantt" && isInsideBitrix() ? (
+        <GanttDiagnostics
+          activeMonth={activeMonth}
+          expos={filtered}
+          monthLoad={monthExpos.data}
+          monthLoadIsFetching={monthExpos.isFetching}
+          monthLoadError={
+            (monthExpos.error as Error | undefined)?.message ??
+            monthExpos.data?.diagnostics.error
+          }
+        />
       ) : null}
     </Shell>
   );
@@ -413,9 +458,15 @@ function extractBudget(deal: Record<string, unknown>): string | undefined {
 function GanttDiagnostics({
   activeMonth,
   expos,
+  monthLoad,
+  monthLoadIsFetching,
+  monthLoadError,
 }: {
   activeMonth: Date;
   expos: ExpoItem[];
+  monthLoad?: MonthExpoLoadResult;
+  monthLoadIsFetching?: boolean;
+  monthLoadError?: string;
 }) {
   const enabled = isInsideBitrix();
   const stagesQuery = useQuery<DealStagesResult>({
@@ -484,6 +535,11 @@ function GanttDiagnostics({
         <CardTitle className="text-base">Диагностика Gantt</CardTitle>
       </CardHeader>
       <CardContent className="space-y-3 text-xs">
+        <MonthLoadDiagnosticsPanel
+          monthLoad={monthLoad}
+          isFetching={Boolean(monthLoadIsFetching)}
+          error={monthLoadError}
+        />
         <div className="grid gap-1">
           <div>
             Активный месяц: <b>{monthLabel}</b> · показано в Gantt:{" "}
@@ -699,6 +755,123 @@ function collectLoadedDealRowsFromBatch(
     });
   });
   return out;
+}
+
+function MonthLoadDiagnosticsPanel({
+  monthLoad,
+  isFetching,
+  error,
+}: {
+  monthLoad?: MonthExpoLoadResult;
+  isFetching: boolean;
+  error?: string;
+}) {
+  const [open, setOpen] = useState(true);
+  const d = monthLoad?.diagnostics;
+  const strategy = d?.strategy ?? (isFetching ? "loading" : "ожидание");
+  const fallback = d?.fallbackUsed ? "да" : "нет";
+  const headline = d
+    ? `Стратегия: ${d.strategy} · выставок загружено: ${d.itemCount} · страниц: ${d.pagesLoaded} · ${Math.round(d.durationMs)} мс`
+    : isFetching
+      ? "Загрузка выставок по месяцу…"
+      : "Нет данных о загрузке выставок";
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between rounded-md border bg-muted/30 p-2 text-left"
+          data-testid="gantt-diag-month-load-toggle"
+        >
+          <span>
+            Загрузка выставок за месяц ·{" "}
+            <code data-testid="gantt-diag-month-load-strategy">{strategy}</code>
+            {d ? (
+              <>
+                {" "}· выставок: <b data-testid="gantt-diag-month-load-count">{d.itemCount}</b>
+                {" · страниц: "}
+                <b data-testid="gantt-diag-month-load-pages">{d.pagesLoaded}</b>
+                {" · fallback: "}
+                <b data-testid="gantt-diag-month-load-fallback">{fallback}</b>
+              </>
+            ) : isFetching ? (
+              <> · загружается…</>
+            ) : null}
+          </span>
+          <ChevronDown className={`h-4 w-4 transition-transform ${open ? "rotate-180" : ""}`} />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
+        <div className="text-muted-foreground">
+          {headline}
+        </div>
+        {d && (
+          <>
+            <div>
+              Месяц: <b>{d.monthKey}</b> (<code>{d.monthStartIso}</code> …{" "}
+              <code>{d.monthEndIso}</code>)
+            </div>
+            <div>
+              Поля: eventStart <code>{d.eventStartField}</code> · eventEnd{" "}
+              <code>{d.eventEndField}</code>
+            </div>
+            <div>
+              Фильтр crm.item.list:{" "}
+              <code data-testid="gantt-diag-month-load-filter">
+                {JSON.stringify(d.filter)}
+              </code>
+            </div>
+            <div>
+              Select: <code>{d.select.join(", ")}</code>
+            </div>
+            <div>
+              Полная выгрузка smart-process:{" "}
+              <b data-testid="gantt-diag-month-load-fullload">
+                {d.usedFullLoad ? "да" : "нет"}
+              </b>
+              {d.timedOut ? <> · <span className="text-red-600">таймаут</span></> : null}
+            </div>
+            {d.attempts.length > 0 && (
+              <div>
+                <div className="font-medium">Попытки:</div>
+                <ul className="ml-4 list-disc text-muted-foreground">
+                  {d.attempts.map((a, idx) => (
+                    <li key={idx} data-testid={`gantt-diag-month-load-attempt-${a.strategy}`}>
+                      <code>{a.strategy}</code> · {a.ok ? "ok" : "failed"} · найдено{" "}
+                      <b>{a.itemCount}</b> · страниц <b>{a.pagesLoaded}</b> ·{" "}
+                      {Math.round(a.durationMs)} мс
+                      {a.error ? (
+                        <>
+                          {" · "}
+                          <span className="text-red-600">{a.error}</span>
+                        </>
+                      ) : null}
+                      {a.timedOut ? (
+                        <>
+                          {" · "}
+                          <span className="text-red-600">timeout</span>
+                        </>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+            {d.error && (
+              <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
+                Ошибка: {d.error}
+              </div>
+            )}
+          </>
+        )}
+        {!d && error && (
+          <div className="rounded border border-red-300 bg-red-50 p-2 text-red-900 dark:border-red-900 dark:bg-red-950/40 dark:text-red-100">
+            Ошибка: {error}
+          </div>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 function MonthlyBatchDiagnosticsPanel({
