@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown } from "lucide-react";
+import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown, Loader2 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -2280,35 +2280,93 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
 
   if (!enabled) return null;
 
-  if (counts.isFetching && !counts.data) {
-    return (
-      <div
-        className="mt-1 text-[11px] text-muted-foreground"
-        data-testid={`expo-counts-${expoId}`}
-      >
-        CRM: загрузка…
-      </div>
-    );
-  }
-  if (counts.isError && !counts.data) {
-    return (
-      <div
-        className="mt-1 text-[11px] text-muted-foreground"
-        title={(counts.error as Error | undefined)?.message ?? "Ошибка"}
-        data-testid={`expo-counts-${expoId}`}
-      >
-        CRM: недоступно
-      </div>
-    );
-  }
+  const isLoading = counts.isFetching && !counts.data;
   const data = counts.data;
-  if (!data) return null;
-  const partialMark = data.partial ? "*" : "";
+  const errorMessage =
+    counts.isError && !data
+      ? (counts.error as Error | undefined)?.message ?? "Ошибка"
+      : undefined;
+
+  const partialMark = data?.partial ? "*" : "";
+  const leadDeadline = Boolean(data?.leads.deadlineReached);
+  const dealDeadline = Boolean(data?.deals.deadlineReached);
+
   const tooltipParts: string[] = [];
-  if (data.partial) tooltipParts.push("Частичные данные (таймаут или лимит страниц)");
-  if (data.errors.lead) tooltipParts.push(`Лиды: ${data.errors.lead}`);
-  if (data.errors.deal) tooltipParts.push(`Сделки: ${data.errors.deal}`);
+  if (data?.partial) tooltipParts.push("Частичные данные (таймаут или лимит страниц)");
+  if (leadDeadline) tooltipParts.push("Лиды: достигнут таймаут");
+  if (dealDeadline) tooltipParts.push("Сделки: достигнут таймаут");
+  if (data?.errors.lead) tooltipParts.push(`Лиды: ${data.errors.lead}`);
+  if (data?.errors.deal) tooltipParts.push(`Сделки: ${data.errors.deal}`);
+  if (errorMessage) tooltipParts.push(errorMessage);
   const tooltip = tooltipParts.join(" · ");
+
+  const renderLeadValue = () => {
+    if (isLoading) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-muted-foreground"
+          data-testid={`expo-counts-${expoId}-leads-loading`}
+          aria-label="Загрузка лидов"
+        >
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>загрузка…</span>
+        </span>
+      );
+    }
+    if (errorMessage) {
+      return <span className="text-red-700 dark:text-red-300">недоступно</span>;
+    }
+    if (!data) return null;
+    return (
+      <>
+        <b className="text-foreground">{data.leads.total}{partialMark}</b>{" "}
+        <span className="text-amber-700 dark:text-amber-300">в раб. {data.leads.inWork}</span>
+        {" · "}
+        <span className="text-red-700 dark:text-red-300">неуд. {data.leads.declined}</span>
+        {" · "}
+        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.leads.success}</span>
+        {leadDeadline ? (
+          <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+            таймаут
+          </span>
+        ) : null}
+      </>
+    );
+  };
+
+  const renderDealValue = () => {
+    if (isLoading) {
+      return (
+        <span
+          className="inline-flex items-center gap-1 text-muted-foreground"
+          data-testid={`expo-counts-${expoId}-deals-loading`}
+          aria-label="Загрузка сделок"
+        >
+          <Loader2 className="h-3 w-3 animate-spin" />
+          <span>загрузка…</span>
+        </span>
+      );
+    }
+    if (errorMessage) {
+      return <span className="text-red-700 dark:text-red-300">недоступно</span>;
+    }
+    if (!data) return null;
+    return (
+      <>
+        <b className="text-foreground">{data.deals.total}{partialMark}</b>{" "}
+        <span className="text-amber-700 dark:text-amber-300">в раб. {data.deals.inWork}</span>
+        {" · "}
+        <span className="text-red-700 dark:text-red-300">неуд. {data.deals.unsuccessful}</span>
+        {" · "}
+        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.deals.successful}</span>
+        {dealDeadline ? (
+          <span className="ml-1 rounded bg-amber-100 px-1 text-[10px] text-amber-800 dark:bg-amber-900/40 dark:text-amber-200">
+            таймаут
+          </span>
+        ) : null}
+      </>
+    );
+  };
 
   return (
     <div
@@ -2316,25 +2374,13 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
       title={tooltip || undefined}
       data-testid={`expo-counts-${expoId}`}
     >
-      <span>
-        Лиды: <b className="text-foreground">{data.leads.total}{partialMark}</b>{" "}
-        <span className="text-amber-700 dark:text-amber-300">в раб. {data.leads.inWork}</span>
-        {" · "}
-        <span className="text-red-700 dark:text-red-300">неуд. {data.leads.declined}</span>
-        {" · "}
-        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.leads.success}</span>
-      </span>
-      <span>
-        Сделки: <b className="text-foreground">{data.deals.total}{partialMark}</b>{" "}
-        <span className="text-amber-700 dark:text-amber-300">в раб. {data.deals.inWork}</span>
-        {" · "}
-        <span className="text-red-700 dark:text-red-300">неуд. {data.deals.unsuccessful}</span>
-        {" · "}
-        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.deals.successful}</span>
-      </span>
-      <span>
-        Стадии: 8={data.deals.stage8} · 9={data.deals.stage9} · WON={data.deals.stageWon}
-      </span>
+      <span>Лиды: {renderLeadValue()}</span>
+      <span>Сделки: {renderDealValue()}</span>
+      {data ? (
+        <span>
+          Стадии: 8={data.deals.stage8} · 9={data.deals.stage9} · WON={data.deals.stageWon}
+        </span>
+      ) : null}
     </div>
   );
 }

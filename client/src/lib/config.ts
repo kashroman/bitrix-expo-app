@@ -110,12 +110,13 @@ export const PHASE_COLORS = {
 };
 
 // Monthly Gantt phase fills (background layers behind deal bars).
-// Montage/dismantle are very light transparent gray; exhibition working days
-// are a stronger semi-transparent gray so the event span stands out.
+// Phase semantics use almost-transparent traffic-light colors so the spans
+// stay subtle but distinguishable: yellow = montage, green = event,
+// red = dismantle.
 export const PHASE_FILLS = {
-  mount: "rgba(100, 116, 139, 0.12)",
-  expo: "rgba(71, 85, 105, 0.32)",
-  dismantle: "rgba(100, 116, 139, 0.12)",
+  mount: "rgba(250, 204, 21, 0.18)",
+  expo: "rgba(34, 197, 94, 0.18)",
+  dismantle: "rgba(239, 68, 68, 0.18)",
 };
 
 // --- Deal status bars inside Gantt exhibition rows ---

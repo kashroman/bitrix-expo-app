@@ -1862,8 +1862,8 @@ export type ExpoCounts = {
   durationMs: number;
 };
 
-const COUNTS_PER_PAGE_TIMEOUT_MS = 8_000;
-const COUNTS_DEADLINE_MS = 12_000;
+const COUNTS_PER_PAGE_TIMEOUT_MS = 20_000;
+const COUNTS_DEADLINE_MS = 30_000;
 const COUNTS_MAX_PAGES = 4;
 
 function rawStageId(item: Record<string, unknown>): string {
