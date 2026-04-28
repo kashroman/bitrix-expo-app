@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback, useEffect } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
 import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown } from "lucide-react";
@@ -8,13 +8,15 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
-import { GanttTimeline, GanttDealBar } from "@/components/gantt";
+import { GanttTimeline } from "@/components/gantt";
 import { CalendarView } from "@/components/calendar-view";
 import {
   buildExpoAggregate,
   ExpoAggregate,
+  ExpoCounts,
   ExpoItem,
   fetchDealsForStageProbe,
+  fetchExpoCounts,
   fetchExpoList,
   fetchExposByMonth,
   fetchDealStages,
@@ -348,18 +350,6 @@ function exposOverlappingMonth(expos: ExpoItem[], monthStart: Date): ExpoItem[] 
   );
 }
 
-type ScanWidth = "fast" | "wide";
-
-function scanLimitFor(width: ScanWidth): number {
-  return width === "wide" ? RECENT_SCAN_WIDE_LIMIT : RECENT_SCAN_FAST_LIMIT;
-}
-
-function scanDeadlineFor(width: ScanWidth): number {
-  return width === "wide"
-    ? RECENT_SCAN_WIDE_DEADLINE_MS
-    : RECENT_SCAN_FAST_DEADLINE_MS;
-}
-
 function GanttView({
   expos,
   activeMonth,
@@ -377,119 +367,12 @@ function GanttView({
     () => exposOverlappingMonth(expos, activeMonth),
     [expos, activeMonth],
   );
-  const enabled = isInsideBitrix();
-
-  // Recent-deal-scan: single bounded crm.deal.list (order ID DESC, start=0,
-  // minimal select, per-page timeout + overall deadline). Exhibitions
-  // render first via the separate month-scoped crm.item.list query; the
-  // scan below only adds colored deal bars on top and never blocks the
-  // Gantt from showing rows. The scan is user-controllable — default FAST
-  // (200 deals / ~15 s deadline), widen to 500 with the button.
-  const monthKey = monthKeyOf(activeMonth);
-  const overlappingIds = useMemo(
-    () => overlapping.map((e) => Number(e.id)).filter((n) => Number.isFinite(n) && n > 0).sort((a, b) => a - b),
-    [overlapping],
-  );
-
-  const [scanWidth, setScanWidth] = useState<ScanWidth>("fast");
-  // Cancel switch: flipped false when the user clicks "Отменить". The
-  // React Query stays disabled until the user requests another scan.
-  const [scanEnabled, setScanEnabled] = useState<boolean>(true);
-
-  const scanLimit = scanLimitFor(scanWidth);
-  const scanDeadline = scanDeadlineFor(scanWidth);
-
-  const monthBatch = useQuery<RecentScanResult>({
-    queryKey: [
-      "gantt-monthly-deals-recent-scan",
-      monthKey,
-      scanWidth,
-      scanLimit,
-      overlappingIds,
-    ],
-    queryFn: () =>
-      fetchMonthlyDealsByRecentScan(overlappingIds, {
-        limit: scanLimit,
-        perPageTimeoutMs: RECENT_SCAN_PER_PAGE_TIMEOUT_MS,
-        deadlineMs: scanDeadline,
-      }),
-    enabled: enabled && scanEnabled && overlappingIds.length > 0,
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
-
-  // Stage titles from CRM — cached for 5 minutes, single query shared with
-  // the diagnostics panel.
-  const stagesQuery = useQuery({
-    queryKey: ["deal-stages"],
-    queryFn: fetchDealStages,
-    enabled,
-    staleTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
-  const stageTitlesFromCrm = useMemo(
-    () => statusTitleMap(stagesQuery.data ?? []),
-    [stagesQuery.data],
-  );
-
-  const byExpoId = useMemo(() => {
-    const out = new Map<number | string, GanttDealBar[]>();
-    const batch = monthBatch.data;
-    if (!batch) return out;
-    batch.byExpoId.forEach((deals, expoId) => {
-      const bars: GanttDealBar[] = [];
-      deals.forEach((deal) => {
-        const r = deal as Record<string, unknown>;
-        const stageId = String(r.STAGE_ID ?? r.stageId ?? "");
-        const title = stageTitlesFromCrm.get(stageId);
-        const status = matchDealStatus(stageId, title);
-        if (!status) return;
-        bars.push({
-          id: String(r.ID ?? r.id ?? ""),
-          status,
-          clientName: extractClientName(r),
-          manager: extractManager(r),
-          budget: extractBudget(r),
-          title: String(r.TITLE ?? ""),
-        });
-      });
-      bars.sort(
-        (a, b) => DEAL_STATUS_ORDER.indexOf(a.status) - DEAL_STATUS_ORDER.indexOf(b.status),
-      );
-      out.set(expoId, bars);
-    });
-    return out;
-  }, [monthBatch.data, stageTitlesFromCrm]);
-
-  const dealsFor = useCallback(
-    (expo: ExpoItem): GanttDealBar[] => byExpoId.get(Number(expo.id)) ?? byExpoId.get(expo.id) ?? [],
-    [byExpoId],
-  );
 
   const effectiveEmpty =
     emptyMessage ??
     (expos.length === 0
       ? "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
       : "Ни одна выставка не попадает в выбранный месяц (по периодам монтажа / проведения / демонтажа).");
-
-  const batch = monthBatch.data;
-  const isScanning = monthBatch.isFetching;
-  const scanError = (monthBatch.error as Error | undefined)?.message;
-  const deadlineReached = Boolean(batch?.deadlineReached);
-  const pagesLoaded = batch?.pagesLoaded ?? 0;
-  const dealsScanned = batch?.scannedDealCount ?? 0;
-  const linkedToVisible = batch?.linkedToVisibleCount ?? 0;
-  const elapsedMs = batch?.durationMs;
-
-  const cancelScan = useCallback(() => setScanEnabled(false), []);
-  const reloadScan = useCallback(() => {
-    setScanEnabled(true);
-    queryClient.invalidateQueries({
-      queryKey: ["gantt-monthly-deals-recent-scan", monthKey],
-    });
-  }, [monthKey]);
 
   return (
     <div className="space-y-2">
@@ -502,92 +385,10 @@ function GanttView({
           <span>Загрузка выставок за выбранный месяц…</span>
         </div>
       ) : null}
-      <div
-        className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/20 p-2 text-xs"
-        data-testid="gantt-scan-controls"
-      >
-        <span className="font-medium">Загрузка сделок:</span>
-        <div className="flex rounded-md border overflow-hidden">
-          <button
-            type="button"
-            onClick={() => {
-              setScanWidth("fast");
-              setScanEnabled(true);
-            }}
-            className={`px-2 py-1 ${
-              scanWidth === "fast"
-                ? "bg-primary text-primary-foreground"
-                : "bg-background hover:bg-muted"
-            }`}
-            data-testid="button-scan-fast"
-          >
-            Быстрый ({RECENT_SCAN_FAST_LIMIT})
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              setScanWidth("wide");
-              setScanEnabled(true);
-            }}
-            className={`border-l px-2 py-1 ${
-              scanWidth === "wide"
-                ? "bg-primary text-primary-foreground"
-                : "bg-background hover:bg-muted"
-            }`}
-            data-testid="button-scan-wide"
-          >
-            Широкий ({RECENT_SCAN_WIDE_LIMIT})
-          </button>
-        </div>
-        {isScanning ? (
-          <button
-            type="button"
-            onClick={cancelScan}
-            className="rounded border border-red-300 bg-red-50 px-2 py-1 text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
-            data-testid="button-scan-cancel"
-          >
-            Отменить
-          </button>
-        ) : (
-          <button
-            type="button"
-            onClick={reloadScan}
-            className="rounded border px-2 py-1 hover:bg-muted"
-            data-testid="button-scan-reload"
-          >
-            Перезагрузить
-          </button>
-        )}
-        <span className="ml-auto text-muted-foreground" data-testid="gantt-scan-status">
-          {!scanEnabled ? (
-            <>Скан отменён</>
-          ) : overlappingIds.length === 0 ? (
-            <>Нет выставок в месяце</>
-          ) : isScanning ? (
-            <>Сканирование… (лимит {scanLimit}, дедлайн {Math.round(scanDeadline / 1000)} с)</>
-          ) : scanError ? (
-            <span className="text-red-600">Ошибка: {scanError}</span>
-          ) : batch ? (
-            <>
-              Страниц: <b>{pagesLoaded}</b>, сделок: <b>{dealsScanned}</b>, связано:{" "}
-              <b>{linkedToVisible}</b>
-              {typeof elapsedMs === "number" ? <> · {Math.round(elapsedMs)} мс</> : null}
-              {deadlineReached ? (
-                <span className="ml-1 text-amber-700 dark:text-amber-300">
-                  · таймаут ({Math.round(scanDeadline / 1000)} с) — показаны частичные данные
-                </span>
-              ) : null}
-            </>
-          ) : (
-            <>Ожидание запроса</>
-          )}
-        </span>
-      </div>
       <GanttTimeline
         expos={overlapping}
         onSelect={(expo) => navigateToEvent(expo.id)}
-        renderRight={(expo) => <StatsMini expoId={expo.id} />}
-        dealsFor={dealsFor}
+        renderRight={(expo) => <ExpoCountsMini expoId={Number(expo.id)} />}
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
@@ -2462,6 +2263,78 @@ function StatsMini({ expoId }: { expoId: number }) {
       <span>Лиды: <b className="text-foreground">{data.leadStats.total}</b></span>
       <span>Сделки: <b className="text-foreground">{data.dealStats.total}</b></span>
       <span className="text-emerald-600">Выигр.: {data.dealStats.won}</span>
+    </div>
+  );
+}
+
+function ExpoCountsMini({ expoId }: { expoId: number }) {
+  const enabled = isInsideBitrix() && Number.isFinite(expoId) && expoId > 0;
+  const counts = useQuery<ExpoCounts>({
+    queryKey: ["expo-counts", expoId],
+    queryFn: () => fetchExpoCounts(expoId),
+    enabled,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+
+  if (!enabled) return null;
+
+  if (counts.isFetching && !counts.data) {
+    return (
+      <div
+        className="mt-1 text-[11px] text-muted-foreground"
+        data-testid={`expo-counts-${expoId}`}
+      >
+        CRM: загрузка…
+      </div>
+    );
+  }
+  if (counts.isError && !counts.data) {
+    return (
+      <div
+        className="mt-1 text-[11px] text-muted-foreground"
+        title={(counts.error as Error | undefined)?.message ?? "Ошибка"}
+        data-testid={`expo-counts-${expoId}`}
+      >
+        CRM: недоступно
+      </div>
+    );
+  }
+  const data = counts.data;
+  if (!data) return null;
+  const partialMark = data.partial ? "*" : "";
+  const tooltipParts: string[] = [];
+  if (data.partial) tooltipParts.push("Частичные данные (таймаут или лимит страниц)");
+  if (data.errors.lead) tooltipParts.push(`Лиды: ${data.errors.lead}`);
+  if (data.errors.deal) tooltipParts.push(`Сделки: ${data.errors.deal}`);
+  const tooltip = tooltipParts.join(" · ");
+
+  return (
+    <div
+      className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground"
+      title={tooltip || undefined}
+      data-testid={`expo-counts-${expoId}`}
+    >
+      <span>
+        Лиды: <b className="text-foreground">{data.leads.total}{partialMark}</b>{" "}
+        <span className="text-amber-700 dark:text-amber-300">в раб. {data.leads.inWork}</span>
+        {" · "}
+        <span className="text-red-700 dark:text-red-300">неуд. {data.leads.declined}</span>
+        {" · "}
+        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.leads.success}</span>
+      </span>
+      <span>
+        Сделки: <b className="text-foreground">{data.deals.total}{partialMark}</b>{" "}
+        <span className="text-amber-700 dark:text-amber-300">в раб. {data.deals.inWork}</span>
+        {" · "}
+        <span className="text-red-700 dark:text-red-300">неуд. {data.deals.unsuccessful}</span>
+        {" · "}
+        <span className="text-emerald-700 dark:text-emerald-300">усп. {data.deals.successful}</span>
+      </span>
+      <span>
+        Стадии: 8={data.deals.stage8} · 9={data.deals.stage9} · WON={data.deals.stageWon}
+      </span>
     </div>
   );
 }

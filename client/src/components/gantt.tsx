@@ -1,13 +1,6 @@
 import { useMemo, useState, useEffect } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import {
-  DEAL_STATUS_COLORS,
-  DEAL_STATUS_LABELS,
-  DEAL_STATUS_ORDER,
-  DealStatusKey,
-  PHASE_FILLS,
-  matchDealStatus,
-} from "@/lib/config";
+import { PHASE_FILLS, matchDealStatus } from "@/lib/config";
 import { ExpoItem } from "@/lib/expo-data";
 import { parseDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -18,17 +11,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-
-export type GanttDealBar = {
-  id: string | number;
-  status: DealStatusKey;
-  clientName?: string;
-  manager?: string;
-  budget?: string;
-  title?: string;
-};
-
-export type GanttDealsProvider = (expo: ExpoItem) => GanttDealBar[];
 
 const LEFT_COL_PX = 240;
 const MONTH_NAMES_RU = [
@@ -45,10 +27,7 @@ const MONTH_NAMES_RU = [
   "Ноябрь",
   "Декабрь",
 ];
-const DAY_HEIGHT_BASE = 56; // base row height before adding deal bars
-const DEAL_BAR_HEIGHT = 18;
-const DEAL_BAR_GAP = 3;
-const DEAL_BAR_VERTICAL_PADDING = 6;
+const DAY_HEIGHT_BASE = 56;
 
 type Phase = { key: "mount" | "expo" | "dismantle"; start: Date; end: Date };
 
@@ -105,7 +84,6 @@ export function GanttTimeline({
   expos,
   onSelect,
   renderRight,
-  dealsFor,
   initialMonth,
   onMonthChange,
   emptyMessage,
@@ -113,7 +91,6 @@ export function GanttTimeline({
   expos: ExpoItem[];
   onSelect: (expo: ExpoItem) => void;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
-  dealsFor?: GanttDealsProvider;
   initialMonth?: Date;
   onMonthChange?: (monthStart: Date) => void;
   emptyMessage?: string;
@@ -240,16 +217,7 @@ export function GanttTimeline({
         ) : null}
 
         {sortedExpos.map((expo, rowIndex) => {
-          const deals = (dealsFor?.(expo) ?? []).filter((d) =>
-            DEAL_STATUS_ORDER.includes(d.status),
-          );
-          const rowHeight =
-            DAY_HEIGHT_BASE +
-            (deals.length > 0
-              ? deals.length * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP) - DEAL_BAR_GAP + DEAL_BAR_VERTICAL_PADDING * 2
-              : 0);
           const phases = phasesOf(expo);
-          const expoPhase = phases.find((p) => p.key === "expo");
           return (
             <ExpoRow
               key={expo.id}
@@ -259,9 +227,7 @@ export function GanttTimeline({
               month={month}
               totalDays={totalDays}
               phases={phases}
-              deals={deals}
-              expoPhase={expoPhase}
-              rowHeight={rowHeight}
+              rowHeight={DAY_HEIGHT_BASE}
               onSelect={onSelect}
               renderRight={renderRight}
             />
@@ -281,8 +247,6 @@ function ExpoRow({
   month,
   totalDays,
   phases,
-  deals,
-  expoPhase,
   rowHeight,
   onSelect,
   renderRight,
@@ -293,8 +257,6 @@ function ExpoRow({
   month: number;
   totalDays: number;
   phases: Phase[];
-  deals: GanttDealBar[];
-  expoPhase: Phase | undefined;
   rowHeight: number;
   onSelect: (expo: ExpoItem) => void;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
@@ -367,16 +329,6 @@ function ExpoRow({
           );
         })}
 
-        {deals.length > 0 && expoPhase ? (
-          <DealBars
-            expoPhase={expoPhase}
-            deals={deals}
-            year={year}
-            month={month}
-            totalDays={totalDays}
-          />
-        ) : null}
-
         <button
           type="button"
           onClick={() => onSelect(expo)}
@@ -384,59 +336,6 @@ function ExpoRow({
           aria-label={`Открыть ${expo.title}`}
         />
       </div>
-    </div>
-  );
-}
-
-function DealBars({
-  expoPhase,
-  deals,
-  year,
-  month,
-  totalDays,
-}: {
-  expoPhase: Phase;
-  deals: GanttDealBar[];
-  year: number;
-  month: number;
-  totalDays: number;
-}) {
-  const clip = clipToMonth(expoPhase, year, month);
-  if (!clip) return null;
-  const left = ((clip.startDay - 1) / totalDays) * 100;
-  const width = ((clip.endDay - clip.startDay + 1) / totalDays) * 100;
-  return (
-    <div
-      className="absolute"
-      style={{
-        left: `${left}%`,
-        width: `${width}%`,
-        top: `${DEAL_BAR_VERTICAL_PADDING + 10}px`,
-        bottom: `${DEAL_BAR_VERTICAL_PADDING}px`,
-      }}
-    >
-      {deals.map((deal, idx) => {
-        const top = idx * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP);
-        const parts: string[] = [];
-        if (deal.clientName) parts.push(deal.clientName);
-        if (deal.manager) parts.push(deal.manager);
-        if (deal.budget) parts.push(deal.budget);
-        const text = parts.join(" · ") || deal.title || DEAL_STATUS_LABELS[deal.status];
-        return (
-          <div
-            key={`${deal.id}-${idx}`}
-            className="absolute left-0 right-0 flex items-center overflow-hidden rounded px-1.5 text-[10px] font-medium text-white shadow-sm"
-            style={{
-              top: `${top}px`,
-              height: `${DEAL_BAR_HEIGHT}px`,
-              background: DEAL_STATUS_COLORS[deal.status],
-            }}
-            title={`${DEAL_STATUS_LABELS[deal.status]} · ${text}`}
-          >
-            <span className="truncate">{text}</span>
-          </div>
-        );
-      })}
     </div>
   );
 }
@@ -552,15 +451,6 @@ function GanttLegendBar() {
       <LegendSwatch color={PHASE_FILLS.mount} label="Монтаж" />
       <LegendSwatch color={PHASE_FILLS.expo} label="Проведение" />
       <LegendSwatch color={PHASE_FILLS.dismantle} label="Демонтаж" />
-      <span className="mx-2 h-3 w-px bg-border" aria-hidden />
-      {DEAL_STATUS_ORDER.map((key) => (
-        <LegendSwatch
-          key={key}
-          color={DEAL_STATUS_COLORS[key]}
-          label={DEAL_STATUS_LABELS[key]}
-          solid
-        />
-      ))}
     </div>
   );
 }

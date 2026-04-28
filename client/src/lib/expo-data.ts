@@ -9,11 +9,13 @@ import {
   EXPO_LINK_FIELD,
   LEAD_GROUP_LABELS,
   LeadGroupKey,
+  dealExpoFieldCode,
   dealStageIds,
   fallbackDealGroup,
   fallbackLeadGroup,
   groupForDeal,
   groupForLead,
+  leadExpoFieldCode,
 } from "./config";
 import { fetchLinkedEntities, LinkFieldChoice } from "./expo-link";
 
@@ -1822,4 +1824,199 @@ export async function buildExpoAggregate(expoId: string | number): Promise<ExpoA
       errors: errs,
     },
   };
+}
+
+// --- Lightweight per-expo lead/deal counts for the Gantt row ---
+// Direct, bounded crm.lead.list / crm.deal.list calls filtered by the
+// known custom UF (config.leadExpoFieldCode / dealExpoFieldCode). This
+// is intentionally smaller than buildExpoAggregate: no link-field probing,
+// short maxPages, short deadline, narrow select. The Gantt row renders
+// before counts are available; counts are advisory.
+
+export type ExpoCountsLeadGroup = "inWork" | "declined" | "success";
+export type ExpoCountsDealGroup = "inWork" | "unsuccessful" | "successful";
+
+export type ExpoCounts = {
+  expoId: number;
+  leads: {
+    total: number;
+    inWork: number;
+    declined: number;
+    success: number;
+    truncated: boolean;
+    deadlineReached: boolean;
+  };
+  deals: {
+    total: number;
+    inWork: number;
+    unsuccessful: number;
+    successful: number;
+    stage8: number;
+    stage9: number;
+    stageWon: number;
+    truncated: boolean;
+    deadlineReached: boolean;
+  };
+  partial: boolean;
+  errors: { lead?: string; deal?: string };
+  durationMs: number;
+};
+
+const COUNTS_PER_PAGE_TIMEOUT_MS = 8_000;
+const COUNTS_DEADLINE_MS = 12_000;
+const COUNTS_MAX_PAGES = 4;
+
+function rawStageId(item: Record<string, unknown>): string {
+  return String((item.STAGE_ID ?? item.stageId ?? "") as string).trim();
+}
+function rawLeadStatusId(item: Record<string, unknown>): string {
+  return String((item.STATUS_ID ?? item.statusId ?? "") as string).trim();
+}
+
+function classifyLead(statusId: string): ExpoCountsLeadGroup | undefined {
+  const g = groupForLead(statusId);
+  if (!g) return undefined;
+  if (g === "new" || g === "inWork") return "inWork";
+  if (g === "declined") return "declined";
+  if (g === "success") return "success";
+  return undefined;
+}
+
+function classifyDeal(stageId: string): ExpoCountsDealGroup | undefined {
+  const g = groupForDeal(stageId);
+  if (!g) return undefined;
+  if (g === "early" || g === "inWork") return "inWork";
+  if (g === "refusal" || g === "lostCompetition") return "unsuccessful";
+  if (g === "won") return "successful";
+  return undefined;
+}
+
+function normalizedStageTail(stageId: string): string {
+  // Bitrix often returns deal stages as "C1:8" / "C1:WON" — keep the tail.
+  const tail = stageId.split(":").pop() ?? stageId;
+  return tail.trim();
+}
+
+export async function fetchExpoCounts(
+  expoId: string | number,
+): Promise<ExpoCounts> {
+  const start = Date.now();
+  const numericId = Number(expoId);
+  const filterValue: number | string =
+    Number.isFinite(numericId) && numericId > 0 ? numericId : String(expoId);
+
+  const counts: ExpoCounts = {
+    expoId: Number.isFinite(numericId) ? numericId : 0,
+    leads: {
+      total: 0,
+      inWork: 0,
+      declined: 0,
+      success: 0,
+      truncated: false,
+      deadlineReached: false,
+    },
+    deals: {
+      total: 0,
+      inWork: 0,
+      unsuccessful: 0,
+      successful: 0,
+      stage8: 0,
+      stage9: 0,
+      stageWon: 0,
+      truncated: false,
+      deadlineReached: false,
+    },
+    partial: false,
+    errors: {},
+    durationMs: 0,
+  };
+
+  const leadField = leadExpoFieldCode;
+  const dealField = dealExpoFieldCode;
+
+  const leadPromise = leadField
+    ? listAllBxDetailed<Record<string, unknown>>(
+        "crm.lead.list",
+        {
+          filter: { [leadField]: filterValue },
+          select: ["ID", "STATUS_ID"],
+          order: { ID: "DESC" },
+        },
+        {
+          maxPages: COUNTS_MAX_PAGES,
+          timeoutMs: COUNTS_PER_PAGE_TIMEOUT_MS,
+          deadlineMs: COUNTS_DEADLINE_MS,
+        },
+      )
+    : Promise.reject(new Error("Lead UF не настроен"));
+
+  const dealPromise = dealField
+    ? listAllBxDetailed<Record<string, unknown>>(
+        "crm.deal.list",
+        {
+          filter: { [dealField]: filterValue },
+          select: ["ID", "STAGE_ID"],
+          order: { ID: "DESC" },
+        },
+        {
+          maxPages: COUNTS_MAX_PAGES,
+          timeoutMs: COUNTS_PER_PAGE_TIMEOUT_MS,
+          deadlineMs: COUNTS_DEADLINE_MS,
+        },
+      )
+    : Promise.reject(new Error("Deal UF не настроен"));
+
+  const [leadRes, dealRes] = await Promise.allSettled([leadPromise, dealPromise]);
+
+  if (leadRes.status === "fulfilled") {
+    const rows = leadRes.value.rows;
+    counts.leads.total = rows.length;
+    counts.leads.truncated = leadRes.value.truncated;
+    counts.leads.deadlineReached = leadRes.value.deadlineReached;
+    rows.forEach((row) => {
+      const cls = classifyLead(rawLeadStatusId(row));
+      if (cls === "inWork") counts.leads.inWork += 1;
+      else if (cls === "declined") counts.leads.declined += 1;
+      else if (cls === "success") counts.leads.success += 1;
+    });
+    if (leadRes.value.truncated || leadRes.value.deadlineReached) {
+      counts.partial = true;
+    }
+  } else {
+    counts.errors.lead =
+      leadRes.reason instanceof Error
+        ? leadRes.reason.message
+        : String(leadRes.reason);
+    counts.partial = true;
+  }
+
+  if (dealRes.status === "fulfilled") {
+    const rows = dealRes.value.rows;
+    counts.deals.total = rows.length;
+    counts.deals.truncated = dealRes.value.truncated;
+    counts.deals.deadlineReached = dealRes.value.deadlineReached;
+    rows.forEach((row) => {
+      const stageId = rawStageId(row);
+      const cls = classifyDeal(stageId);
+      if (cls === "inWork") counts.deals.inWork += 1;
+      else if (cls === "unsuccessful") counts.deals.unsuccessful += 1;
+      else if (cls === "successful") counts.deals.successful += 1;
+      const tail = normalizedStageTail(stageId);
+      if (tail === dealStageIds.signingContract) counts.deals.stage8 += 1;
+      else if (tail === dealStageIds.building) counts.deals.stage9 += 1;
+      else if (tail === dealStageIds.projectCompleted) counts.deals.stageWon += 1;
+    });
+    if (dealRes.value.truncated || dealRes.value.deadlineReached) {
+      counts.partial = true;
+    }
+  } else {
+    counts.errors.deal =
+      dealRes.reason instanceof Error
+        ? dealRes.reason.message
+        : String(dealRes.reason);
+    counts.partial = true;
+  }
+
+  counts.durationMs = Date.now() - start;
+  return counts;
 }
