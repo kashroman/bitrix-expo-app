@@ -13,10 +13,8 @@ import { CalendarView } from "@/components/calendar-view";
 import {
   buildExpoAggregate,
   ExpoAggregate,
-  ExpoCounts,
   ExpoItem,
   fetchDealsForStageProbe,
-  fetchExpoCounts,
   fetchExpoList,
   fetchExposByMonth,
   fetchDealStages,
@@ -26,6 +24,7 @@ import {
   probeDealById,
   statusTitleMap,
 } from "@/lib/expo-data";
+import { useBulkExpoCounts, BulkCountsState } from "@/lib/use-bulk-counts";
 import type {
   DealProbeLookup,
   DealStageProbeResult,
@@ -182,6 +181,22 @@ export default function CalendarPage() {
     });
   }, [activeExpos, responsible, search, period]);
 
+  // For Gantt mode the counters cover only the expos overlapping the
+  // selected month; for List/Calendar modes the counters cover the
+  // currently filtered set. This keeps the bulk request bounded:
+  // 30 IDs/chunk × concurrency 2 means a 60-row visible set finishes
+  // in 1–2 round-trips.
+  const counterExpoIds = useMemo(() => {
+    if (view === "gantt") {
+      return exposOverlappingMonth(filtered, activeMonth).map((e) => e.id);
+    }
+    return filtered.map((e) => e.id);
+  }, [view, filtered, activeMonth]);
+
+  const bulkCounts = useBulkExpoCounts(counterExpoIds, {
+    enabled: isBitrix && counterExpoIds.length > 0,
+  });
+
   return (
     <Shell>
       <PageTitle
@@ -251,6 +266,8 @@ export default function CalendarPage() {
         </CardContent>
       </Card>
 
+      <BulkCountsBanner state={bulkCounts} expoCount={counterExpoIds.length} />
+
       <Card>
         <CardHeader><CardTitle className="text-lg">Выставки ({filtered.length})</CardTitle></CardHeader>
         <CardContent>
@@ -264,6 +281,7 @@ export default function CalendarPage() {
               activeMonth={activeMonth}
               onMonthChange={setActiveMonth}
               isFetchingNewMonth={ganttIsFetchingNewMonth}
+              counts={bulkCounts}
               emptyMessage={
                 filtered.length === 0
                   ? ganttIsFetchingNewMonth
@@ -277,7 +295,7 @@ export default function CalendarPage() {
           ) : view === "calendar" ? (
             <CalendarView expos={filtered} onSelect={(expo) => navigateToEvent(expo.id)} />
           ) : (
-            <ListView expos={filtered} />
+            <ListView expos={filtered} counts={bulkCounts} />
           )}
         </CardContent>
       </Card>
@@ -361,12 +379,14 @@ function GanttView({
   onMonthChange,
   emptyMessage,
   isFetchingNewMonth = false,
+  counts,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
   onMonthChange: (d: Date) => void;
   emptyMessage?: string;
   isFetchingNewMonth?: boolean;
+  counts: BulkCountsState;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -393,7 +413,9 @@ function GanttView({
       <GanttTimeline
         expos={overlapping}
         onSelect={(expo) => navigateToEvent(expo.id)}
-        renderRight={(expo) => <ExpoCountsMini expoId={Number(expo.id)} />}
+        renderRight={(expo) => (
+          <ExpoCountsMini expoId={Number(expo.id)} state={counts} />
+        )}
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
@@ -2343,7 +2365,13 @@ function AllDealStagesTable({ stages }: { stages: StatusRef[] }) {
   );
 }
 
-function ListView({ expos }: { expos: ExpoItem[] }) {
+function ListView({
+  expos,
+  counts,
+}: {
+  expos: ExpoItem[];
+  counts: BulkCountsState;
+}) {
   return (
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
@@ -2365,8 +2393,8 @@ function ListView({ expos }: { expos: ExpoItem[] }) {
               <td className="py-2 pr-3 text-muted-foreground">{formatDateRange(expo.expoStart, expo.expoEnd)}</td>
               <td className="py-2 pr-3 text-muted-foreground">{formatDateRange(expo.installStart, expo.installEnd)}</td>
               <td className="py-2 pr-3 text-muted-foreground">{formatDateRange(expo.dismantleStart, expo.dismantleEnd)}</td>
-              <td className="py-2 pr-3"><StatsCount expoId={expo.id} kind="lead" /></td>
-              <td className="py-2 pr-3"><StatsCount expoId={expo.id} kind="deal" /></td>
+              <td className="py-2 pr-3"><StatsCount expoId={expo.id} kind="lead" state={counts} /></td>
+              <td className="py-2 pr-3"><StatsCount expoId={expo.id} kind="deal" state={counts} /></td>
               <td className="py-2 pr-3 text-right">
                 <Link href={`/event/${expo.id}`}>
                   <a className="text-sm font-medium text-primary hover:underline" data-testid={`link-open-${expo.id}`}>Открыть</a>
@@ -2380,42 +2408,23 @@ function ListView({ expos }: { expos: ExpoItem[] }) {
   );
 }
 
-function StatsMini({ expoId }: { expoId: number }) {
-  const agg = useQuery({
-    queryKey: ["expo-aggregate", expoId],
-    queryFn: () => buildExpoAggregate(expoId),
-    enabled: isInsideBitrix(),
-  });
-  const data = isFoundAggregate(agg.data) ? agg.data : undefined;
-  if (!data) return null;
-  return (
-    <div className="mt-1 flex gap-3 text-[11px] text-muted-foreground">
-      <span>Лиды: <b className="text-foreground">{data.leadStats.total}</b></span>
-      <span>Сделки: <b className="text-foreground">{data.dealStats.total}</b></span>
-      <span className="text-emerald-600">Выигр.: {data.dealStats.won}</span>
-    </div>
+function ExpoCountsMini({
+  expoId,
+  state,
+}: {
+  expoId: number;
+  state: BulkCountsState;
+}) {
+  if (!state.isEnabled) return null;
+
+  const data = state.byExpoId?.get(expoId);
+  const isLoading = state.isLoading && !data;
+  // Bulk fetch failed entirely → renders fallback for every row.
+  const fatalError = state.isError && !data ? state.error : undefined;
+  // Bulk fetch succeeded but this expo's lead+deal both failed → "ошибка".
+  const rowFailed = Boolean(
+    data && (data.errors.lead || data.errors.deal) && data.partial,
   );
-}
-
-function ExpoCountsMini({ expoId }: { expoId: number }) {
-  const enabled = isInsideBitrix() && Number.isFinite(expoId) && expoId > 0;
-  const counts = useQuery<ExpoCounts>({
-    queryKey: ["expo-counts", expoId],
-    queryFn: () => fetchExpoCounts(expoId),
-    enabled,
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
-
-  if (!enabled) return null;
-
-  const isLoading = counts.isFetching && !counts.data;
-  const data = counts.data;
-  const errorMessage =
-    counts.isError && !data
-      ? (counts.error as Error | undefined)?.message ?? "Ошибка"
-      : undefined;
 
   const partialMark = data?.partial ? "*" : "";
   const leadDeadline = Boolean(data?.leads.deadlineReached);
@@ -2427,7 +2436,7 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
   if (dealDeadline) tooltipParts.push("Сделки: достигнут таймаут");
   if (data?.errors.lead) tooltipParts.push(`Лиды: ${data.errors.lead}`);
   if (data?.errors.deal) tooltipParts.push(`Сделки: ${data.errors.deal}`);
-  if (errorMessage) tooltipParts.push(errorMessage);
+  if (fatalError) tooltipParts.push(fatalError);
   const tooltip = tooltipParts.join(" · ");
 
   const renderLeadValue = () => {
@@ -2443,10 +2452,13 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
         </span>
       );
     }
-    if (errorMessage) {
-      return <span className="text-red-700 dark:text-red-300">недоступно</span>;
+    if (fatalError) {
+      return <span className="text-red-700 dark:text-red-300">ошибка</span>;
     }
-    if (!data) return null;
+    if (!data) return <span className="text-muted-foreground">н/д</span>;
+    if (data.errors.lead) {
+      return <span className="text-red-700 dark:text-red-300">ошибка</span>;
+    }
     return (
       <>
         <b className="text-foreground">{data.leads.total}{partialMark}</b>{" "}
@@ -2477,10 +2489,13 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
         </span>
       );
     }
-    if (errorMessage) {
-      return <span className="text-red-700 dark:text-red-300">недоступно</span>;
+    if (fatalError) {
+      return <span className="text-red-700 dark:text-red-300">ошибка</span>;
     }
-    if (!data) return null;
+    if (!data) return <span className="text-muted-foreground">н/д</span>;
+    if (data.errors.deal) {
+      return <span className="text-red-700 dark:text-red-300">ошибка</span>;
+    }
     return (
       <>
         <b className="text-foreground">{data.deals.total}{partialMark}</b>{" "}
@@ -2497,6 +2512,8 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
       </>
     );
   };
+
+  void rowFailed;
 
   return (
     <div
@@ -2515,16 +2532,130 @@ function ExpoCountsMini({ expoId }: { expoId: number }) {
   );
 }
 
-function StatsCount({ expoId, kind }: { expoId: number; kind: "lead" | "deal" }) {
-  const agg = useQuery<ExpoAggregate>({
-    queryKey: ["expo-aggregate", expoId],
-    queryFn: () => buildExpoAggregate(expoId),
-    enabled: isInsideBitrix(),
-  });
-  const data = isFoundAggregate(agg.data) ? agg.data : undefined;
-  if (!data) return <span className="text-muted-foreground">…</span>;
-  const stats = kind === "lead" ? data.leadStats : data.dealStats;
-  return <span className="font-medium">{stats.total}</span>;
+function StatsCount({
+  expoId,
+  kind,
+  state,
+}: {
+  expoId: number;
+  kind: "lead" | "deal";
+  state: BulkCountsState;
+}) {
+  if (!state.isEnabled) return <span className="text-muted-foreground">—</span>;
+  const data = state.byExpoId?.get(expoId);
+  const isLoading = state.isLoading && !data;
+  const fatalError = state.isError && !data;
+  const rowError = Boolean(
+    data && (kind === "lead" ? data.errors.lead : data.errors.deal),
+  );
+  if (isLoading) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-muted-foreground"
+        title="Загрузка счётчиков…"
+      >
+        <Loader2 className="h-3 w-3 animate-spin" />
+      </span>
+    );
+  }
+  if (fatalError) {
+    return (
+      <span
+        className="text-red-700 dark:text-red-300"
+        title={state.error ?? "Ошибка"}
+      >
+        ошибка
+      </span>
+    );
+  }
+  if (rowError) {
+    return (
+      <span
+        className="text-red-700 dark:text-red-300"
+        title={
+          kind === "lead" ? data?.errors.lead : data?.errors.deal
+        }
+      >
+        ошибка
+      </span>
+    );
+  }
+  if (!data) return <span className="text-muted-foreground">н/д</span>;
+  const stats = kind === "lead" ? data.leads : data.deals;
+  return <span className="font-medium tabular-nums">{stats.total}</span>;
+}
+
+function BulkCountsBanner({
+  state,
+  expoCount,
+}: {
+  state: BulkCountsState;
+  expoCount: number;
+}) {
+  if (!state.isEnabled || expoCount === 0) return null;
+  const diag = state.diagnostics;
+  if (state.isLoading) {
+    return (
+      <div
+        className="mb-3 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200"
+        data-testid="bulk-counts-loading"
+      >
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        <span>
+          Загрузка счётчиков лидов и сделок для {expoCount} выставок (chunked
+          batch)…
+        </span>
+      </div>
+    );
+  }
+  if (state.isError && !diag) {
+    return (
+      <div
+        className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-red-300 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+        data-testid="bulk-counts-error"
+      >
+        <span>Не удалось загрузить счётчики: {state.error ?? "ошибка"}</span>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={() => state.refetch()}
+          data-testid="bulk-counts-retry"
+        >
+          Повторить
+        </Button>
+      </div>
+    );
+  }
+  if (!diag) return null;
+  const failures = diag.leadFailures.length + diag.dealFailures.length;
+  return (
+    <div
+      className="mb-3 flex flex-wrap items-center gap-2 rounded-md border border-muted bg-muted/40 p-2 text-[11px] text-muted-foreground"
+      data-testid="bulk-counts-diag"
+      title={[...diag.leadFailures, ...diag.dealFailures].join(" · ") || undefined}
+    >
+      <span>
+        Счётчики: {diag.expoIdsRequested} выставок,{" "}
+        {diag.leadRequests} запросов лидов · {diag.dealRequests} запросов сделок,{" "}
+        {diag.leadRowsLoaded + diag.dealRowsLoaded} записей за{" "}
+        {(diag.durationMs / 1000).toFixed(1)} с
+      </span>
+      {failures > 0 ? (
+        <span className="text-amber-700 dark:text-amber-300">
+          ошибок: {failures}
+        </span>
+      ) : null}
+      <Button
+        variant="outline"
+        size="sm"
+        onClick={() => state.refetch()}
+        data-testid="bulk-counts-refresh"
+      >
+        <RefreshCw className="mr-1 h-3 w-3" />
+        Обновить
+      </Button>
+    </div>
+  );
 }
 
 function navigateToEvent(id: number | string) {

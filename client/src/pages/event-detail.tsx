@@ -36,6 +36,9 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
   const foundData = agg.data && agg.data.status === "found" ? agg.data : undefined;
   const notFoundData = agg.data && agg.data.status === "not-found" ? agg.data : undefined;
   const title = foundData?.expo.title ?? `Выставка #${eventId}`;
+  const timeoutMessage = notFoundData?.diagnostics.errors.find((e) =>
+    /таймаут|превышен общий бюджет/i.test(e),
+  );
 
   return (
     <Shell>
@@ -61,6 +64,12 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
         <ErrorState
           eventId={eventId}
           message={String((agg.error as Error)?.message ?? agg.error)}
+          onRetry={() => agg.refetch()}
+        />
+      ) : timeoutMessage ? (
+        <ErrorState
+          eventId={eventId}
+          message={timeoutMessage}
           onRetry={() => agg.refetch()}
         />
       ) : notFoundData ? (
