@@ -1933,16 +1933,92 @@ export function dealGroupLabel(key: DealGroupKey) {
   return DEAL_GROUP_LABELS[key];
 }
 
-export async function buildExpoAggregate(expoId: string | number): Promise<ExpoAggregate> {
+// Overall deadline for buildExpoAggregate. Above this the per-branch
+// promises are still running but we resolve with whatever has settled —
+// the detail page renders an error banner with a retry button so the user
+// is never stuck on an indefinite skeleton.
+const BUILD_AGGREGATE_DEFAULT_DEADLINE_MS = 18_000;
+
+function withDeadline<T>(
+  promise: Promise<T>,
+  ms: number,
+  onTimeoutValue: T,
+): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(onTimeoutValue);
+    }, ms);
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      },
+      () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(onTimeoutValue);
+      },
+    );
+  });
+}
+
+export async function buildExpoAggregate(
+  expoId: string | number,
+  options: { deadlineMs?: number } = {},
+): Promise<ExpoAggregate> {
+  const deadlineMs = Math.max(
+    5_000,
+    Math.floor(options.deadlineMs ?? BUILD_AGGREGATE_DEFAULT_DEADLINE_MS),
+  );
   const idStr = String(expoId);
-  const [expoRes, leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
+  const aggregateStart = Date.now();
+  // Use a per-branch deadline so a slow link-discovery does not stall the
+  // whole detail page. Each branch resolves with a sentinel "timed out"
+  // value when it overruns; the detail page then renders error UI with a
+  // retry button instead of an infinite skeleton.
+  const expoP = withDeadline(
     fetchExpoOutcome(expoId),
+    deadlineMs,
+    {
+      status: "failed",
+      error: `Таймаут получения карточки выставки (${Math.round(
+        deadlineMs / 1000,
+      )} с)`,
+    } as FetchExpoOutcome,
+  );
+  const leadsP = withDeadline(
     fetchLinkedEntities("lead", expoId),
+    deadlineMs,
+    undefined,
+  );
+  const dealsP = withDeadline(
     fetchLinkedEntities("deal", expoId),
-    fetchLeadStatuses(),
-    fetchDealStages(),
+    deadlineMs,
+    undefined,
+  );
+  const leadStatusesP = withDeadline(fetchLeadStatuses(), deadlineMs, []);
+  const dealStagesP = withDeadline(fetchDealStages(), deadlineMs, []);
+
+  const [expoRes, leadsRes, dealsRes, leadStatusesRes, dealStagesRes] = await Promise.allSettled([
+    expoP,
+    leadsP,
+    dealsP,
+    leadStatusesP,
+    dealStagesP,
   ]);
   const errs: string[] = [];
+  const elapsed = Date.now() - aggregateStart;
+  if (elapsed >= deadlineMs) {
+    errs.push(
+      `Превышен общий бюджет агрегата (${Math.round(deadlineMs / 1000)} с) — некоторые блоки могут быть пустыми`,
+    );
+  }
 
   const leadOutcome = leadsRes.status === "fulfilled" ? leadsRes.value : undefined;
   const dealOutcome = dealsRes.status === "fulfilled" ? dealsRes.value : undefined;
@@ -2199,4 +2275,435 @@ export async function fetchExpoCounts(
 
   counts.durationMs = Date.now() - start;
   return counts;
+}
+
+// --- Bulk counters across many expos ---------------------------------------
+//
+// fetchExpoCounts() is correct but expensive: each call issues two REST
+// requests, so the list view (420 rows) and the Gantt fired 800+ requests
+// and the per-row spinner stayed at "…" forever. The bulk loader below
+// fetches leads/deals for many expos in a small number of chunks using
+// Bitrix's "@" filter prefix (logical IN on a single field), then buckets
+// the results client-side via the link UF value on each row.
+//
+// Filter shape used on each chunk:
+//   filter: { "@<linkFieldCode>": [id1, id2, ...] }
+//   select: minimal — only id + status/stage + the link field
+//
+// Concurrency is intentionally low (default 2) so the BX24 SDK channel is
+// not overwhelmed by many parallel paginations. Chunk size defaults to 30
+// IDs; smaller chunks limit per-page payload and let the per-page paginator
+// finish inside the 12s deadline.
+//
+// Returns a Map<expoId, ExpoCounts> with one entry per requested ID. Expos
+// for which both lead+deal calls failed get a counts entry whose `errors`
+// is populated and `partial=true` so the UI can render "н/д" without
+// keeping a spinner forever.
+
+export type BulkCountsDiagnostics = {
+  expoIdsRequested: number;
+  chunkSize: number;
+  concurrency: number;
+  leadField: string | null;
+  dealField: string | null;
+  leadChunks: number;
+  dealChunks: number;
+  leadRequests: number;
+  dealRequests: number;
+  leadRowsLoaded: number;
+  dealRowsLoaded: number;
+  leadFailures: string[];
+  dealFailures: string[];
+  durationMs: number;
+};
+
+export type BulkCountsResult = {
+  byExpoId: Map<number, ExpoCounts>;
+  diagnostics: BulkCountsDiagnostics;
+};
+
+const BULK_COUNTS_CHUNK_SIZE_DEFAULT = 30;
+const BULK_COUNTS_CONCURRENCY_DEFAULT = 2;
+const BULK_COUNTS_PER_PAGE_TIMEOUT_MS = 12_000;
+const BULK_COUNTS_DEADLINE_MS = 18_000;
+const BULK_COUNTS_MAX_PAGES_PER_CHUNK = 12;
+
+function emptyExpoCounts(expoId: number): ExpoCounts {
+  return {
+    expoId,
+    leads: {
+      total: 0,
+      inWork: 0,
+      declined: 0,
+      success: 0,
+      truncated: false,
+      deadlineReached: false,
+    },
+    deals: {
+      total: 0,
+      inWork: 0,
+      unsuccessful: 0,
+      successful: 0,
+      stage8: 0,
+      stage9: 0,
+      stageWon: 0,
+      truncated: false,
+      deadlineReached: false,
+    },
+    partial: false,
+    errors: {},
+    durationMs: 0,
+  };
+}
+
+function chunkArray<T>(input: T[], size: number): T[][] {
+  if (size <= 0) return [input.slice()];
+  const out: T[][] = [];
+  for (let i = 0; i < input.length; i += size) out.push(input.slice(i, i + size));
+  return out;
+}
+
+function readLinkFieldValue(
+  row: Record<string, unknown>,
+  fieldCode: string,
+): unknown {
+  return (
+    row[fieldCode] ??
+    row[fieldCode.toUpperCase()] ??
+    row[fieldCode.toLowerCase()] ??
+    row[fieldCode.replace(/_([a-z])/g, (_, c) => (c as string).toUpperCase())]
+  );
+}
+
+function expoIdsFromLinkValue(raw: unknown): number[] {
+  if (raw === undefined || raw === null || raw === "") return [];
+  const values = Array.isArray(raw) ? raw : [raw];
+  const out: number[] = [];
+  for (const v of values) {
+    if (v === undefined || v === null || v === "") continue;
+    const text = typeof v === "string" ? v : String(v);
+    const numeric = text.match(/\d+/);
+    if (!numeric) continue;
+    const num = Number(numeric[0]);
+    if (Number.isFinite(num) && num > 0) out.push(num);
+  }
+  return out;
+}
+
+async function fetchChunkRows(
+  method: "crm.lead.list" | "crm.deal.list",
+  fieldCode: string,
+  ids: number[],
+  selectFields: string[],
+): Promise<{
+  ok: boolean;
+  rows: Record<string, unknown>[];
+  error?: string;
+  truncated: boolean;
+  deadlineReached: boolean;
+}> {
+  try {
+    const res = await listAllBxDetailed<Record<string, unknown>>(
+      method,
+      {
+        filter: { [`@${fieldCode}`]: ids },
+        select: selectFields,
+        order: { ID: "DESC" },
+      },
+      {
+        maxPages: BULK_COUNTS_MAX_PAGES_PER_CHUNK,
+        timeoutMs: BULK_COUNTS_PER_PAGE_TIMEOUT_MS,
+        deadlineMs: BULK_COUNTS_DEADLINE_MS,
+      },
+    );
+    return {
+      ok: true,
+      rows: res.rows,
+      truncated: res.truncated,
+      deadlineReached: res.deadlineReached,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      rows: [],
+      error: err instanceof Error ? err.message : String(err),
+      truncated: false,
+      deadlineReached: false,
+    };
+  }
+}
+
+async function runChunkedRequests<T>(
+  chunks: T[][],
+  concurrency: number,
+  worker: (chunk: T[], index: number) => Promise<void>,
+): Promise<void> {
+  if (chunks.length === 0) return;
+  let next = 0;
+  const runners: Promise<void>[] = [];
+  const run = async () => {
+    while (true) {
+      const idx = next++;
+      if (idx >= chunks.length) return;
+      await worker(chunks[idx], idx);
+    }
+  };
+  const lanes = Math.max(1, Math.min(concurrency, chunks.length));
+  for (let i = 0; i < lanes; i += 1) runners.push(run());
+  await Promise.all(runners);
+}
+
+export async function fetchExpoCountsBulk(
+  expoIds: Array<number | string>,
+  options: {
+    chunkSize?: number;
+    concurrency?: number;
+    leadField?: string | null;
+    dealField?: string | null;
+  } = {},
+): Promise<BulkCountsResult> {
+  const start = Date.now();
+  const ids = Array.from(
+    new Set(
+      expoIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  ).sort((a, b) => a - b);
+
+  const byExpoId = new Map<number, ExpoCounts>();
+  ids.forEach((id) => byExpoId.set(id, emptyExpoCounts(id)));
+
+  const leadField =
+    options.leadField === undefined ? leadExpoFieldCode : options.leadField;
+  const dealField =
+    options.dealField === undefined ? dealExpoFieldCode : options.dealField;
+  const chunkSize = Math.max(
+    1,
+    Math.min(100, Math.floor(options.chunkSize ?? BULK_COUNTS_CHUNK_SIZE_DEFAULT)),
+  );
+  const concurrency = Math.max(
+    1,
+    Math.min(4, Math.floor(options.concurrency ?? BULK_COUNTS_CONCURRENCY_DEFAULT)),
+  );
+
+  const diagnostics: BulkCountsDiagnostics = {
+    expoIdsRequested: ids.length,
+    chunkSize,
+    concurrency,
+    leadField,
+    dealField,
+    leadChunks: 0,
+    dealChunks: 0,
+    leadRequests: 0,
+    dealRequests: 0,
+    leadRowsLoaded: 0,
+    dealRowsLoaded: 0,
+    leadFailures: [],
+    dealFailures: [],
+    durationMs: 0,
+  };
+
+  if (ids.length === 0) {
+    diagnostics.durationMs = Date.now() - start;
+    return { byExpoId, diagnostics };
+  }
+
+  const chunks = chunkArray(ids, chunkSize);
+  diagnostics.leadChunks = leadField ? chunks.length : 0;
+  diagnostics.dealChunks = dealField ? chunks.length : 0;
+
+  const leadSelect = leadField
+    ? Array.from(new Set(["ID", "STATUS_ID", leadField]))
+    : null;
+  const dealSelect = dealField
+    ? Array.from(new Set(["ID", "STAGE_ID", dealField]))
+    : null;
+
+  const recordLeadRow = (
+    row: Record<string, unknown>,
+    chunkIds: number[],
+  ) => {
+    if (!leadField) return;
+    const linked = expoIdsFromLinkValue(readLinkFieldValue(row, leadField));
+    const targets = linked.length > 0 ? linked : [];
+    const matched = targets.filter((tid) => byExpoId.has(tid));
+    if (matched.length === 0) {
+      // Fall back to chunk membership when no link-id can be parsed:
+      // the row was returned by the IN filter so it must belong to one of
+      // the chunk IDs. Distribute count to the first chunk id present in
+      // the byExpoId map. This is a rare edge case (manual override
+      // numeric IDs); we keep it for defensive rendering.
+      const fallback = chunkIds.find((id) => byExpoId.has(id));
+      if (fallback === undefined) return;
+      const counts = byExpoId.get(fallback)!;
+      counts.leads.total += 1;
+      const cls = classifyLead(rawLeadStatusId(row));
+      if (cls === "inWork") counts.leads.inWork += 1;
+      else if (cls === "declined") counts.leads.declined += 1;
+      else if (cls === "success") counts.leads.success += 1;
+      return;
+    }
+    for (const tid of matched) {
+      const counts = byExpoId.get(tid)!;
+      counts.leads.total += 1;
+      const cls = classifyLead(rawLeadStatusId(row));
+      if (cls === "inWork") counts.leads.inWork += 1;
+      else if (cls === "declined") counts.leads.declined += 1;
+      else if (cls === "success") counts.leads.success += 1;
+    }
+  };
+
+  const recordDealRow = (
+    row: Record<string, unknown>,
+    chunkIds: number[],
+  ) => {
+    if (!dealField) return;
+    const linked = expoIdsFromLinkValue(readLinkFieldValue(row, dealField));
+    const targets = linked.length > 0 ? linked : [];
+    const matched = targets.filter((tid) => byExpoId.has(tid));
+    const stageId = rawStageId(row);
+    const tail = normalizedStageTail(stageId);
+    if (matched.length === 0) {
+      const fallback = chunkIds.find((id) => byExpoId.has(id));
+      if (fallback === undefined) return;
+      const counts = byExpoId.get(fallback)!;
+      counts.deals.total += 1;
+      const cls = classifyDeal(stageId);
+      if (cls === "inWork") counts.deals.inWork += 1;
+      else if (cls === "unsuccessful") counts.deals.unsuccessful += 1;
+      else if (cls === "successful") counts.deals.successful += 1;
+      if (tail === dealStageIds.signingContract) counts.deals.stage8 += 1;
+      else if (tail === dealStageIds.building) counts.deals.stage9 += 1;
+      else if (tail === dealStageIds.projectCompleted) counts.deals.stageWon += 1;
+      return;
+    }
+    for (const tid of matched) {
+      const counts = byExpoId.get(tid)!;
+      counts.deals.total += 1;
+      const cls = classifyDeal(stageId);
+      if (cls === "inWork") counts.deals.inWork += 1;
+      else if (cls === "unsuccessful") counts.deals.unsuccessful += 1;
+      else if (cls === "successful") counts.deals.successful += 1;
+      if (tail === dealStageIds.signingContract) counts.deals.stage8 += 1;
+      else if (tail === dealStageIds.building) counts.deals.stage9 += 1;
+      else if (tail === dealStageIds.projectCompleted) counts.deals.stageWon += 1;
+    }
+  };
+
+  const markLeadFailureForChunk = (chunkIds: number[], message: string) => {
+    diagnostics.leadFailures.push(message);
+    for (const id of chunkIds) {
+      const counts = byExpoId.get(id);
+      if (!counts) continue;
+      counts.partial = true;
+      counts.errors.lead = counts.errors.lead
+        ? `${counts.errors.lead} · ${message}`
+        : message;
+    }
+  };
+
+  const markDealFailureForChunk = (chunkIds: number[], message: string) => {
+    diagnostics.dealFailures.push(message);
+    for (const id of chunkIds) {
+      const counts = byExpoId.get(id);
+      if (!counts) continue;
+      counts.partial = true;
+      counts.errors.deal = counts.errors.deal
+        ? `${counts.errors.deal} · ${message}`
+        : message;
+    }
+  };
+
+  const leadJob = async () => {
+    if (!leadField || !leadSelect) return;
+    await runChunkedRequests(chunks, concurrency, async (chunkIds) => {
+      diagnostics.leadRequests += 1;
+      const res = await fetchChunkRows(
+        "crm.lead.list",
+        leadField,
+        chunkIds,
+        leadSelect,
+      );
+      if (!res.ok) {
+        markLeadFailureForChunk(
+          chunkIds,
+          res.error ?? "crm.lead.list failed",
+        );
+        return;
+      }
+      diagnostics.leadRowsLoaded += res.rows.length;
+      for (const row of res.rows) recordLeadRow(row, chunkIds);
+      if (res.truncated || res.deadlineReached) {
+        for (const id of chunkIds) {
+          const c = byExpoId.get(id);
+          if (!c) continue;
+          c.leads.truncated = c.leads.truncated || res.truncated;
+          c.leads.deadlineReached =
+            c.leads.deadlineReached || res.deadlineReached;
+          c.partial = true;
+        }
+      }
+    });
+  };
+
+  const dealJob = async () => {
+    if (!dealField || !dealSelect) return;
+    await runChunkedRequests(chunks, concurrency, async (chunkIds) => {
+      diagnostics.dealRequests += 1;
+      const res = await fetchChunkRows(
+        "crm.deal.list",
+        dealField,
+        chunkIds,
+        dealSelect,
+      );
+      if (!res.ok) {
+        markDealFailureForChunk(
+          chunkIds,
+          res.error ?? "crm.deal.list failed",
+        );
+        return;
+      }
+      diagnostics.dealRowsLoaded += res.rows.length;
+      for (const row of res.rows) recordDealRow(row, chunkIds);
+      if (res.truncated || res.deadlineReached) {
+        for (const id of chunkIds) {
+          const c = byExpoId.get(id);
+          if (!c) continue;
+          c.deals.truncated = c.deals.truncated || res.truncated;
+          c.deals.deadlineReached =
+            c.deals.deadlineReached || res.deadlineReached;
+          c.partial = true;
+        }
+      }
+    });
+  };
+
+  if (!leadField) {
+    diagnostics.leadFailures.push("Lead UF не настроен");
+    for (const id of ids) {
+      const c = byExpoId.get(id);
+      if (c) {
+        c.errors.lead = "Lead UF не настроен";
+        c.partial = true;
+      }
+    }
+  }
+  if (!dealField) {
+    diagnostics.dealFailures.push("Deal UF не настроен");
+    for (const id of ids) {
+      const c = byExpoId.get(id);
+      if (c) {
+        c.errors.deal = "Deal UF не настроен";
+        c.partial = true;
+      }
+    }
+  }
+
+  await Promise.all([leadJob(), dealJob()]);
+  diagnostics.durationMs = Date.now() - start;
+  byExpoId.forEach((c) => {
+    c.durationMs = diagnostics.durationMs;
+  });
+  return { byExpoId, diagnostics };
 }
