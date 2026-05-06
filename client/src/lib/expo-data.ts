@@ -5,6 +5,7 @@ import {
   DealGroupKey,
   DealStatusKey,
   EXPO_DATE_FIELDS,
+  EXPO_DATE_FIELDS_ORIGINAL,
   EXPO_ENTITY_TYPE_ID,
   EXPO_LINK_FIELD,
   LEAD_GROUP_LABELS,
@@ -127,42 +128,106 @@ const pick = (item: CrmItem, ...keys: (string | undefined)[]) => {
   return undefined;
 };
 
+// Defensive date-value normalizer. Some Bitrix24 user-fields are configured
+// as multiple=yes (mountStart/ufCrm8_1778070067219 was confirmed multiple in
+// the live account on 2026-05-06). REST returns these as arrays; single-value
+// fields return a string. Either form may also be null/undefined/"" or an
+// unexpected object. We pick a single string here so the rest of the app can
+// keep working with plain "YYYY-MM-DD" / ISO strings.
+//
+//   pickEarliest=true  → choose the earliest valid date (start fields)
+//   pickEarliest=false → choose the latest valid date (end fields)
+//
+// Returns undefined when nothing parses — never throws.
+function normalizeDateValue(
+  value: unknown,
+  pickEarliest: boolean,
+): string | undefined {
+  if (value === undefined || value === null || value === "") return undefined;
+  const candidates: string[] = [];
+  const push = (raw: unknown) => {
+    if (raw === undefined || raw === null || raw === "") return;
+    if (Array.isArray(raw)) {
+      for (const r of raw) push(r);
+      return;
+    }
+    if (typeof raw === "object") {
+      // Handle shapes like { value: "..." } defensively without crashing.
+      const v = (raw as Record<string, unknown>).value;
+      if (v !== undefined) push(v);
+      return;
+    }
+    candidates.push(String(raw));
+  };
+  push(value);
+  if (candidates.length === 0) return undefined;
+  if (candidates.length === 1) return candidates[0];
+
+  let bestStr: string | undefined;
+  let bestMs: number | undefined;
+  for (const text of candidates) {
+    const ms = new Date(text).getTime();
+    if (!Number.isFinite(ms)) continue;
+    if (bestMs === undefined) {
+      bestStr = text;
+      bestMs = ms;
+      continue;
+    }
+    const better = pickEarliest ? ms < bestMs : ms > bestMs;
+    if (better) {
+      bestStr = text;
+      bestMs = ms;
+    }
+  }
+  // If no candidate parsed, fall back to the first non-empty string so the
+  // value still flows through (formatDate handles unparseable input).
+  return bestStr ?? candidates[0];
+}
+
 export function normalizeExpo(item: CrmItem): ExpoItem {
   const id = Number(item.id ?? item.ID ?? 0);
   const title = String(item.title ?? item.TITLE ?? `Выставка #${id}`);
   // Read codes through the runtime registry first (discovered codes from
-  // crm.item.fields), then fall back to the static EXPO_DATE_FIELDS pins.
-  // Both paths are read in pick() so that whichever code resolves first
-  // wins, without losing the legacy pinned event start/end.
-  const expoStart = pick(
+  // crm.item.fields), then fall back to the static EXPO_DATE_FIELDS pins
+  // (camelCase) and finally the original UF_CRM_8_* names. pick() returns
+  // the first non-empty value across all of them, so the app works whether
+  // the REST response uses camelCase or original UF naming, and whether or
+  // not field discovery has completed.
+  const expoStartRaw = pick(
     item,
     getExpoFieldCode("eventStart"),
     EXPO_DATE_FIELDS.eventStart,
+    EXPO_DATE_FIELDS_ORIGINAL.eventStart,
   );
-  const expoEnd = pick(
+  const expoEndRaw = pick(
     item,
     getExpoFieldCode("eventEnd"),
     EXPO_DATE_FIELDS.eventEnd,
+    EXPO_DATE_FIELDS_ORIGINAL.eventEnd,
   );
-  const installStart = pick(
+  const installStartRaw = pick(
     item,
     getExpoFieldCode("mountStart"),
     EXPO_DATE_FIELDS.mountStart,
+    EXPO_DATE_FIELDS_ORIGINAL.mountStart,
   );
-  const installEnd = pick(
+  const installEndRaw = pick(
     item,
     getExpoFieldCode("mountEnd"),
     EXPO_DATE_FIELDS.mountEnd,
+    EXPO_DATE_FIELDS_ORIGINAL.mountEnd,
   );
-  const dismantleStart = pick(
+  const dismantleStartRaw = pick(
     item,
     getExpoFieldCode("dismantleStart"),
     EXPO_DATE_FIELDS.dismantleStart,
+    EXPO_DATE_FIELDS_ORIGINAL.dismantleStart,
   );
-  const dismantleEnd = pick(
+  const dismantleEndRaw = pick(
     item,
     getExpoFieldCode("dismantleEnd"),
     EXPO_DATE_FIELDS.dismantleEnd,
+    EXPO_DATE_FIELDS_ORIGINAL.dismantleEnd,
   );
   const responsible = pick(item, "assignedById", "ASSIGNED_BY_ID");
 
@@ -175,12 +240,12 @@ export function normalizeExpo(item: CrmItem): ExpoItem {
     updatedTime: pick(item, "updatedTime", "UPDATED_TIME") as string | undefined,
     venue: undefined,
     city: undefined,
-    installStart: installStart ? String(installStart) : undefined,
-    installEnd: installEnd ? String(installEnd) : undefined,
-    expoStart: expoStart ? String(expoStart) : undefined,
-    expoEnd: expoEnd ? String(expoEnd) : undefined,
-    dismantleStart: dismantleStart ? String(dismantleStart) : undefined,
-    dismantleEnd: dismantleEnd ? String(dismantleEnd) : undefined,
+    installStart: normalizeDateValue(installStartRaw, true),
+    installEnd: normalizeDateValue(installEndRaw, false),
+    expoStart: normalizeDateValue(expoStartRaw, true),
+    expoEnd: normalizeDateValue(expoEndRaw, false),
+    dismantleStart: normalizeDateValue(dismantleStartRaw, true),
+    dismantleEnd: normalizeDateValue(dismantleEndRaw, false),
     raw: item,
   };
 }
@@ -282,7 +347,11 @@ export function monthBoundsIso(activeMonth: Date): {
 // assignee for filtering / display. Built dynamically so any newly-discovered
 // montage/dismantle fields are included once detection completes.
 function buildMonthExpoSelect(): string[] {
-  const base = [
+  // Always include all six pinned date codes so server-side returns the
+  // mount/dismantle phases even before runtime field discovery completes.
+  // Dynamic codes from expoDateSelectCodes() may add discovered duplicates
+  // — Set deduplicates them.
+  const base: Array<string | undefined> = [
     "id",
     "title",
     "assignedById",
@@ -290,10 +359,16 @@ function buildMonthExpoSelect(): string[] {
     "updatedTime",
     EXPO_DATE_FIELDS.eventStart,
     EXPO_DATE_FIELDS.eventEnd,
+    EXPO_DATE_FIELDS.mountStart,
+    EXPO_DATE_FIELDS.mountEnd,
+    EXPO_DATE_FIELDS.dismantleStart,
+    EXPO_DATE_FIELDS.dismantleEnd,
   ];
   const dynamic = expoDateSelectCodes();
-  const merged = new Set<string>([...base, ...dynamic]);
-  return Array.from(merged).filter(Boolean) as string[];
+  const merged = new Set<string>(
+    [...base, ...dynamic].filter((s): s is string => Boolean(s)),
+  );
+  return Array.from(merged);
 }
 
 // Per-attempt timeout. Kept below LIST_BX_TIMEOUT_MS (45s) so a bad first
@@ -390,9 +465,13 @@ export async function fetchExposByMonth(
 
   const eventStart = EXPO_DATE_FIELDS.eventStart;
   const eventEnd = EXPO_DATE_FIELDS.eventEnd;
+  // Prefer the pinned codes from config so the full-period filter works
+  // immediately, even before discovery completes. Fall back to runtime
+  // discovery if a pin is somehow unset (kept defensive for future edits).
   const fields = getExpoFieldsSync();
-  const mountStartCode = fields.mountStart?.code;
-  const dismantleEndCode = fields.dismantleEnd?.code;
+  const mountStartCode = EXPO_DATE_FIELDS.mountStart ?? fields.mountStart?.code;
+  const dismantleEndCode =
+    EXPO_DATE_FIELDS.dismantleEnd ?? fields.dismantleEnd?.code;
 
   const attempts: MonthExpoLoadDiagnostics["attempts"] = [];
 

@@ -35,13 +35,36 @@ export function manualExpoFieldFormat(entity: "lead" | "deal"): ExpoLinkFormatOv
   return entity === "lead" ? leadExpoFieldFormat : dealExpoFieldFormat;
 }
 
+// Pinned smart-process "Выставки" (entityTypeId 1050, CRM_8) date-field codes.
+// Verified live in Bitrix24 admin → smart-process field settings on 2026-05-06.
+// Original UF names (UF_CRM_8_*) are kept as fallbacks below — both forms are
+// queried by the runtime registry/normalizer so the app works regardless of
+// which casing the REST response uses.
+//   eventStart      ufCrm8_1766066484758
+//   eventEnd        ufCrm8_1766066501630
+//   mountStart      ufCrm8_1778070067219  (multiple=yes in UI — see normalizer)
+//   mountEnd        ufCrm8_1778070672
+//   dismantleStart  ufCrm8_1778070708
+//   dismantleEnd    ufCrm8_1778070734
 export const EXPO_DATE_FIELDS = {
   eventStart: "ufCrm8_1766066484758",
   eventEnd: "ufCrm8_1766066501630",
-  mountStart: undefined as string | undefined,
-  mountEnd: undefined as string | undefined,
-  dismantleStart: undefined as string | undefined,
-  dismantleEnd: undefined as string | undefined,
+  mountStart: "ufCrm8_1778070067219" as string | undefined,
+  mountEnd: "ufCrm8_1778070672" as string | undefined,
+  dismantleStart: "ufCrm8_1778070708" as string | undefined,
+  dismantleEnd: "ufCrm8_1778070734" as string | undefined,
+};
+
+// Original UF_CRM_8_* names — Bitrix REST sometimes returns user fields under
+// the original (uppercased) form depending on useOriginalUfNames flag and the
+// item shape. Kept alongside the camelCase pins so pick() can read either.
+export const EXPO_DATE_FIELDS_ORIGINAL = {
+  eventStart: "UF_CRM_8_1766066484758" as string | undefined,
+  eventEnd: "UF_CRM_8_1766066501630" as string | undefined,
+  mountStart: "UF_CRM_8_1778070067219" as string | undefined,
+  mountEnd: "UF_CRM_8_1778070672" as string | undefined,
+  dismantleStart: "UF_CRM_8_1778070708" as string | undefined,
+  dismantleEnd: "UF_CRM_8_1778070734" as string | undefined,
 };
 
 export const EXPO_INFO_FIELDS = {
