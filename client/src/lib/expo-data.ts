@@ -17,6 +17,12 @@ import {
   groupForLead,
   leadExpoFieldCode,
 } from "./config";
+import {
+  expoDateSelectCodes,
+  getExpoFieldCode,
+  getExpoFieldDiscovery,
+  getExpoFieldsSync,
+} from "./expo-fields";
 import { fetchLinkedEntities, LinkFieldChoice } from "./expo-link";
 
 export type ExpoItem = {
@@ -124,12 +130,40 @@ const pick = (item: CrmItem, ...keys: (string | undefined)[]) => {
 export function normalizeExpo(item: CrmItem): ExpoItem {
   const id = Number(item.id ?? item.ID ?? 0);
   const title = String(item.title ?? item.TITLE ?? `Выставка #${id}`);
-  const expoStart = pick(item, EXPO_DATE_FIELDS.eventStart);
-  const expoEnd = pick(item, EXPO_DATE_FIELDS.eventEnd);
-  const installStart = pick(item, EXPO_DATE_FIELDS.mountStart);
-  const installEnd = pick(item, EXPO_DATE_FIELDS.mountEnd);
-  const dismantleStart = pick(item, EXPO_DATE_FIELDS.dismantleStart);
-  const dismantleEnd = pick(item, EXPO_DATE_FIELDS.dismantleEnd);
+  // Read codes through the runtime registry first (discovered codes from
+  // crm.item.fields), then fall back to the static EXPO_DATE_FIELDS pins.
+  // Both paths are read in pick() so that whichever code resolves first
+  // wins, without losing the legacy pinned event start/end.
+  const expoStart = pick(
+    item,
+    getExpoFieldCode("eventStart"),
+    EXPO_DATE_FIELDS.eventStart,
+  );
+  const expoEnd = pick(
+    item,
+    getExpoFieldCode("eventEnd"),
+    EXPO_DATE_FIELDS.eventEnd,
+  );
+  const installStart = pick(
+    item,
+    getExpoFieldCode("mountStart"),
+    EXPO_DATE_FIELDS.mountStart,
+  );
+  const installEnd = pick(
+    item,
+    getExpoFieldCode("mountEnd"),
+    EXPO_DATE_FIELDS.mountEnd,
+  );
+  const dismantleStart = pick(
+    item,
+    getExpoFieldCode("dismantleStart"),
+    EXPO_DATE_FIELDS.dismantleStart,
+  );
+  const dismantleEnd = pick(
+    item,
+    getExpoFieldCode("dismantleEnd"),
+    EXPO_DATE_FIELDS.dismantleEnd,
+  );
   const responsible = pick(item, "assignedById", "ASSIGNED_BY_ID");
 
   return {
@@ -180,6 +214,7 @@ export async function fetchExpoList(): Promise<ExpoItem[]> {
 // can show a clear diagnostic instead of silently paging the whole set.
 
 export type MonthExpoLoadStrategy =
+  | "month-filter-full-period"
   | "month-filter-event-dates"
   | "month-filter-event-start-only"
   | "full-list-fallback";
@@ -244,21 +279,22 @@ export function monthBoundsIso(activeMonth: Date): {
 }
 
 // Tight select list — we only need the id/title/date fields and responsible
-// assignee for filtering / display. Still includes ufCrm* so any filter UF
-// date fields arrive.
-const MONTH_EXPO_SELECT = [
-  "id",
-  "title",
-  "assignedById",
-  "createdTime",
-  "updatedTime",
-  EXPO_DATE_FIELDS.eventStart,
-  EXPO_DATE_FIELDS.eventEnd,
-  ...(EXPO_DATE_FIELDS.mountStart ? [EXPO_DATE_FIELDS.mountStart] : []),
-  ...(EXPO_DATE_FIELDS.mountEnd ? [EXPO_DATE_FIELDS.mountEnd] : []),
-  ...(EXPO_DATE_FIELDS.dismantleStart ? [EXPO_DATE_FIELDS.dismantleStart] : []),
-  ...(EXPO_DATE_FIELDS.dismantleEnd ? [EXPO_DATE_FIELDS.dismantleEnd] : []),
-];
+// assignee for filtering / display. Built dynamically so any newly-discovered
+// montage/dismantle fields are included once detection completes.
+function buildMonthExpoSelect(): string[] {
+  const base = [
+    "id",
+    "title",
+    "assignedById",
+    "createdTime",
+    "updatedTime",
+    EXPO_DATE_FIELDS.eventStart,
+    EXPO_DATE_FIELDS.eventEnd,
+  ];
+  const dynamic = expoDateSelectCodes();
+  const merged = new Set<string>([...base, ...dynamic]);
+  return Array.from(merged).filter(Boolean) as string[];
+}
 
 // Per-attempt timeout. Kept below LIST_BX_TIMEOUT_MS (45s) so a bad first
 // page frees the slot while the fallback still has time to run.
@@ -278,6 +314,7 @@ async function tryMonthFilter(
   error?: string;
   timedOut?: boolean;
 }> {
+  const select = buildMonthExpoSelect();
   const start = Date.now();
   try {
     const detailed = await listAllBxDetailed<CrmItem>(
@@ -286,7 +323,7 @@ async function tryMonthFilter(
         entityTypeId: EXPO_ENTITY_TYPE_ID,
         filter,
         // Explicit minimal select — never rely on Bitrix' default "*" + "UF_*".
-        select: MONTH_EXPO_SELECT,
+        select,
         // Explicit order so paging is deterministic.
         order: { id: "DESC" },
         // Explicit start so the first page is always the newest.
@@ -326,24 +363,88 @@ async function tryMonthFilter(
 // strategy was used, how many pages were loaded, and whether a fallback ran.
 //
 // Strategy order:
-//   1) Optimized two-sided filter on event start/end UF date fields.
-//   2) Narrower one-sided filter on eventStart only (eventStart <= monthEnd
+//   1) Full-period overlap filter using montage start + dismantle end (when
+//      both fields are discovered). Catches exhibitions whose montage or
+//      dismantle bleeds into the month even if the event proper falls in
+//      another month.
+//   2) Two-sided overlap filter on event start/end UF date fields (legacy).
+//   3) Narrower one-sided filter on eventStart only (eventStart <= monthEnd
 //      AND eventStart >= monthStart) — catches the common case where only
 //      the start date is set, and also works if the Bitrix account rejects
 //      >= on the end-date UF. Client-side still enforces the overlap rule.
-//   3) Full-list fallback — last resort, matches the previous behavior.
-//      Only reached when both filtered strategies error out.
+//   4) No further fallback — surfaces a clear error in diagnostics.
 export async function fetchExposByMonth(
   activeMonth: Date,
 ): Promise<MonthExpoLoadResult> {
   const { monthStart, monthEnd, monthStartIso, monthEndIso, monthKey } =
     monthBoundsIso(activeMonth);
+
+  // Kick off field discovery before issuing any list query so the dynamic
+  // select picks up the new montage/dismantle codes. Fall through silently
+  // on failure — the static EXPO_DATE_FIELDS pins still work.
+  try {
+    await getExpoFieldDiscovery();
+  } catch {
+    // discovery already records the error in its own notes
+  }
+
   const eventStart = EXPO_DATE_FIELDS.eventStart;
   const eventEnd = EXPO_DATE_FIELDS.eventEnd;
+  const fields = getExpoFieldsSync();
+  const mountStartCode = fields.mountStart?.code;
+  const dismantleEndCode = fields.dismantleEnd?.code;
 
   const attempts: MonthExpoLoadDiagnostics["attempts"] = [];
 
-  // Attempt 1 — two-sided overlap filter.
+  // Attempt 0 — full-period overlap filter using montage start ≤ monthEnd
+  // AND dismantle end ≥ monthStart. Only viable when both new fields are
+  // detected. This is the most accurate filter — it returns every expo
+  // touching the month including those whose montage starts in the month
+  // but whose event is in the next month.
+  if (mountStartCode && dismantleEndCode) {
+    const fullPeriodFilter: Record<string, unknown> = {
+      [`<=${mountStartCode}`]: monthEndIso,
+      [`>=${dismantleEndCode}`]: monthStartIso,
+    };
+    const fullPeriod = await tryMonthFilter(
+      fullPeriodFilter,
+      "month-filter-full-period",
+    );
+    attempts.push({
+      strategy: "month-filter-full-period",
+      ok: fullPeriod.ok,
+      itemCount: fullPeriod.items.length,
+      pagesLoaded: fullPeriod.pagesLoaded,
+      durationMs: fullPeriod.durationMs,
+      error: fullPeriod.error,
+      timedOut: fullPeriod.timedOut,
+    });
+    if (fullPeriod.ok) {
+      return {
+        items: fullPeriod.items.map(normalizeExpo),
+        diagnostics: {
+          strategy: "month-filter-full-period",
+          strategyLabel:
+            "Server-side filter: mountStart ≤ monthEnd AND dismantleEnd ≥ monthStart (full exhibition period)",
+          monthKey,
+          monthStartIso,
+          monthEndIso,
+          filter: fullPeriodFilter,
+          select: buildMonthExpoSelect(),
+          pagesLoaded: fullPeriod.pagesLoaded,
+          itemCount: fullPeriod.items.length,
+          durationMs: fullPeriod.durationMs,
+          fallbackUsed: false,
+          usedFullLoad: false,
+          attempts,
+          eventStartField: eventStart,
+          eventEndField: eventEnd,
+        },
+      };
+    }
+  }
+
+  // Attempt 1 — two-sided overlap filter on event start/end.
   // Bitrix REST filter: key prefix "<=" / ">=" with the field code.
   // For smart-process UF date fields we pass the raw field code as-is.
   const twoSidedFilter: Record<string, unknown> = {
@@ -372,11 +473,11 @@ export async function fetchExposByMonth(
         monthStartIso,
         monthEndIso,
         filter: twoSidedFilter,
-        select: MONTH_EXPO_SELECT,
+        select: buildMonthExpoSelect(),
         pagesLoaded: twoSided.pagesLoaded,
         itemCount: twoSided.items.length,
         durationMs: twoSided.durationMs,
-        fallbackUsed: false,
+        fallbackUsed: Boolean(mountStartCode && dismantleEndCode),
         usedFullLoad: false,
         attempts,
         eventStartField: eventStart,
@@ -429,7 +530,7 @@ export async function fetchExposByMonth(
         monthStartIso,
         monthEndIso,
         filter: startOnlyFilter,
-        select: MONTH_EXPO_SELECT,
+        select: buildMonthExpoSelect(),
         pagesLoaded: startOnly.pagesLoaded,
         itemCount: visible.length,
         durationMs: startOnly.durationMs,
@@ -442,7 +543,7 @@ export async function fetchExposByMonth(
     };
   }
 
-  // Both filtered strategies failed — surface a clear error instead of
+  // All filtered strategies failed — surface a clear error instead of
   // silently paging the entire smart-process.
   const combinedError = [
     twoSided.error ? `two-sided: ${twoSided.error}` : undefined,
@@ -460,7 +561,7 @@ export async function fetchExposByMonth(
       monthStartIso,
       monthEndIso,
       filter: twoSidedFilter,
-      select: MONTH_EXPO_SELECT,
+      select: buildMonthExpoSelect(),
       pagesLoaded: 0,
       itemCount: 0,
       durationMs: 0,

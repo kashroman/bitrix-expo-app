@@ -28,7 +28,8 @@ import {
   openAppInNewTab,
   openBitrixPath,
 } from "@/lib/bitrix";
-import { formatDateRange } from "@/lib/format";
+import { formatDate, formatDateRange } from "@/lib/format";
+import { ExpoFieldDiscovery, getExpoFieldDiscovery } from "@/lib/expo-fields";
 
 export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
   const placement = isInsideBitrix() ? getPlacementInfo() : {};
@@ -47,6 +48,16 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
     queryFn: () => discoverLinkFields(entity),
     enabled: isInsideBitrix(),
   });
+
+  const fieldsDiscovery = useQuery<ExpoFieldDiscovery>({
+    queryKey: ["expo-fields-discovery"],
+    queryFn: getExpoFieldDiscovery,
+    enabled: isInsideBitrix(),
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const detectedFields = fieldsDiscovery.data?.fields;
 
   const { expoId, expoIdField } = useMemo(() => {
     const choice = linkDiscovery.data
@@ -165,8 +176,22 @@ export function CrmTab({ entity }: { entity: "deal" | "lead" }) {
               <FieldLine label="Название" value={foundAgg.expo.title} />
               <FieldLine label="ID" value={String(foundAgg.expo.id)} />
               <FieldLine label="Проведение" value={formatDateRange(foundAgg.expo.expoStart, foundAgg.expo.expoEnd)} />
-              <FieldLine label="Монтаж" value={formatDateRange(foundAgg.expo.installStart, foundAgg.expo.installEnd)} />
-              <FieldLine label="Демонтаж" value={formatDateRange(foundAgg.expo.dismantleStart, foundAgg.expo.dismantleEnd)} />
+              {detectedFields?.mountStart || detectedFields?.mountEnd ? (
+                <>
+                  <FieldLine label="Начало монтажа" value={formatDate(foundAgg.expo.installStart) || "—"} />
+                  <FieldLine label="Окончание монтажа" value={formatDate(foundAgg.expo.installEnd) || "—"} />
+                </>
+              ) : (
+                <FieldLine label="Монтаж" value={formatDateRange(foundAgg.expo.installStart, foundAgg.expo.installEnd)} />
+              )}
+              {detectedFields?.dismantleStart || detectedFields?.dismantleEnd ? (
+                <>
+                  <FieldLine label="Начало демонтажа" value={formatDate(foundAgg.expo.dismantleStart) || "—"} />
+                  <FieldLine label="Окончание демонтажа" value={formatDate(foundAgg.expo.dismantleEnd) || "—"} />
+                </>
+              ) : (
+                <FieldLine label="Демонтаж" value={formatDateRange(foundAgg.expo.dismantleStart, foundAgg.expo.dismantleEnd)} />
+              )}
               <div className="pt-2 flex flex-wrap gap-2">
                 <Button
                   variant="outline"

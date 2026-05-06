@@ -51,6 +51,11 @@ import {
   matchDealStatusByName,
   normalizeStageText,
 } from "@/lib/config";
+import {
+  ExpoDateFieldKey,
+  ExpoFieldDiscovery,
+  getExpoFieldDiscovery,
+} from "@/lib/expo-fields";
 
 type ViewMode = "gantt" | "calendar" | "list";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
@@ -509,8 +514,19 @@ function GanttDiagnostics({
   const visibleCount = exposOverlappingMonth(expos, activeMonth).length;
   const totalCount = expos.length;
   const excludedNoOverlap = Math.max(0, totalCount - visibleCount);
-  const mountMissing = !EXPO_DATE_FIELDS.mountStart && !EXPO_DATE_FIELDS.mountEnd;
-  const dismantleMissing = !EXPO_DATE_FIELDS.dismantleStart && !EXPO_DATE_FIELDS.dismantleEnd;
+  const fieldsDiscovery = useQuery<ExpoFieldDiscovery>({
+    queryKey: ["expo-fields-discovery"],
+    queryFn: getExpoFieldDiscovery,
+    enabled,
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const detectedFields = fieldsDiscovery.data?.fields ?? {};
+  const mountMissing =
+    !detectedFields.mountStart?.code && !detectedFields.mountEnd?.code;
+  const dismantleMissing =
+    !detectedFields.dismantleStart?.code && !detectedFields.dismantleEnd?.code;
 
   return (
     <Card className="mt-4" data-testid="gantt-diagnostics">
@@ -548,18 +564,20 @@ function GanttDiagnostics({
             Event start UF: <code>{EXPO_DATE_FIELDS.eventStart}</code> · end:{" "}
             <code>{EXPO_DATE_FIELDS.eventEnd}</code>
           </div>
-          <div>
-            Montage: <code>{EXPO_DATE_FIELDS.mountStart ?? "—"}</code> →{" "}
-            <code>{EXPO_DATE_FIELDS.mountEnd ?? "—"}</code> · Dismantle:{" "}
-            <code>{EXPO_DATE_FIELDS.dismantleStart ?? "—"}</code> →{" "}
-            <code>{EXPO_DATE_FIELDS.dismantleEnd ?? "—"}</code>
+          <div data-testid="gantt-diag-detected-fields">
+            Montage: <code>{detectedFields.mountStart?.code ?? "—"}</code> →{" "}
+            <code>{detectedFields.mountEnd?.code ?? "—"}</code> · Dismantle:{" "}
+            <code>{detectedFields.dismantleStart?.code ?? "—"}</code> →{" "}
+            <code>{detectedFields.dismantleEnd?.code ?? "—"}</code>
           </div>
         </div>
 
+        <ExpoFieldsDiscoveryPanel discovery={fieldsDiscovery.data} loading={fieldsDiscovery.isLoading} />
+
         {(mountMissing || dismantleMissing) && (
           <div className="rounded border border-amber-300 bg-amber-50 p-2 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
-            {mountMissing ? "Поля монтажа не настроены в EXPO_DATE_FIELDS. " : null}
-            {dismantleMissing ? "Поля демонтажа не настроены в EXPO_DATE_FIELDS. " : null}
+            {mountMissing ? "Поля монтажа не определены автоматически и не настроены в EXPO_DATE_FIELDS. " : null}
+            {dismantleMissing ? "Поля демонтажа не определены автоматически и не настроены в EXPO_DATE_FIELDS. " : null}
             Фазы монтажа/демонтажа будут пустыми — видно только фон проведения.
           </div>
         )}
@@ -739,6 +757,118 @@ function collectLoadedDealRowsFromBatch(
     });
   });
   return out;
+}
+
+function ExpoFieldsDiscoveryPanel({
+  discovery,
+  loading,
+}: {
+  discovery?: ExpoFieldDiscovery;
+  loading?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const fields = discovery?.fields ?? {};
+  const orderedKeys: ExpoDateFieldKey[] = [
+    "mountStart",
+    "mountEnd",
+    "eventStart",
+    "eventEnd",
+    "dismantleStart",
+    "dismantleEnd",
+  ];
+  const detectedCount = Object.values(fields).filter(
+    (info) => info?.source === "discovered",
+  ).length;
+  const fallbackCount = Object.values(fields).filter(
+    (info) => info?.source === "fallback",
+  ).length;
+  const status = loading
+    ? "Загрузка crm.item.fields…"
+    : discovery?.error
+      ? `Ошибка: ${discovery.error}`
+      : `Найдено: ${detectedCount} · fallback: ${fallbackCount}`;
+
+  return (
+    <Collapsible open={open} onOpenChange={setOpen}>
+      <CollapsibleTrigger asChild>
+        <button
+          type="button"
+          className="flex w-full items-center justify-between gap-2 rounded-md border bg-muted/40 px-3 py-2 text-left text-xs hover:bg-muted/60"
+          data-testid="gantt-diag-fields-toggle"
+        >
+          <div>
+            <b>Авто-обнаружение полей дат выставки</b> · {status}
+          </div>
+          <ChevronDown
+            className={`h-3.5 w-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+          />
+        </button>
+      </CollapsibleTrigger>
+      <CollapsibleContent className="mt-2 space-y-2">
+        <div className="text-muted-foreground">
+          Используется <code>crm.item.fields</code> с{" "}
+          <code>useOriginalUfNames: "N"</code> и эвристикой по русским
+          заголовкам (<i>монтаж</i>, <i>демонтаж</i>, <i>начало</i>,{" "}
+          <i>окончание</i>). Найденные коды кэшируются на сессию приложения и
+          используются в фильтрах <code>crm.item.list</code>, в Gantt-фазах и
+          в карточках вкладок. При сбое автодискавера задействуются статичные
+          коды из <code>EXPO_DATE_FIELDS</code>.
+        </div>
+        <table className="w-full border-separate border-spacing-0 text-xs">
+          <thead>
+            <tr className="text-muted-foreground">
+              <th className="border-b px-2 py-1 text-left">Назначение</th>
+              <th className="border-b px-2 py-1 text-left">Код</th>
+              <th className="border-b px-2 py-1 text-left">Заголовок</th>
+              <th className="border-b px-2 py-1 text-left">Источник</th>
+              <th className="border-b px-2 py-1 text-left">Тип</th>
+              <th className="border-b px-2 py-1 text-left">Read-only</th>
+            </tr>
+          </thead>
+          <tbody>
+            {orderedKeys.map((key) => {
+              const info = fields[key];
+              return (
+                <tr key={key} data-testid={`gantt-diag-field-${key}`}>
+                  <td className="border-b px-2 py-1">{key}</td>
+                  <td className="border-b px-2 py-1">
+                    <code>{info?.code ?? "—"}</code>
+                  </td>
+                  <td className="border-b px-2 py-1">{info?.title ?? "—"}</td>
+                  <td className="border-b px-2 py-1">
+                    {info?.source === "discovered" ? (
+                      <span className="text-emerald-700 dark:text-emerald-300">
+                        авто ({info.confidence})
+                      </span>
+                    ) : info?.source === "fallback" ? (
+                      <span className="text-amber-700 dark:text-amber-300">
+                        fallback config
+                      </span>
+                    ) : (
+                      <span className="text-muted-foreground">не найдено</span>
+                    )}
+                  </td>
+                  <td className="border-b px-2 py-1">
+                    <code>{info?.type ?? "—"}</code>
+                  </td>
+                  <td className="border-b px-2 py-1">
+                    {info ? (info.isReadOnly || info.isImmutable ? "да" : "нет") : "—"}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        {discovery?.notes && discovery.notes.length > 0 && (
+          <ul className="list-disc space-y-0.5 pl-5 text-amber-700 dark:text-amber-300">
+            {discovery.notes.map((note, i) => (
+              <li key={i}>{note}</li>
+            ))}
+          </ul>
+        )}
+      </CollapsibleContent>
+    </Collapsible>
+  );
 }
 
 function MonthLoadDiagnosticsPanel({
