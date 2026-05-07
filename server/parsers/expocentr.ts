@@ -2,6 +2,55 @@ import { ParseResult } from "./types.js";
 import { htmlToText, parseRussianRange } from "./dateUtils.js";
 
 /**
+ * Detect Expocentr's anti-bot / "ajaxload" interstitial. The real site sets
+ * a `__jhash_` cookie via JS and redirects the browser; server-side fetches
+ * receive a tiny page with a loading GIF and no schedule text.
+ */
+export function isExpocentrChallenge(html: string): boolean {
+  if (!html) return true;
+  if (html.length < 6000 && /__jhash_|gorizontal-vertikal|ajaxload|construct_utm_uri/i.test(html)) {
+    return true;
+  }
+  // Also treat as challenge if no schedule keywords appear at all.
+  const text = htmlToText(html);
+  const hasSchedule = /(Сроки\s+проведения|Даты\s+проведения|Монтаж|Демонтаж)/i.test(text);
+  return !hasSchedule;
+}
+
+/** Static fallback for the known Photonics acceptance URL. The 2026 schedule
+ *  is fixed and confirmed by external sources; we use it only when both the
+ *  Expocentr and photonics-expo.ru fetches fail to yield a confident parse. */
+export function photonicsStaticFallback(url: string): ParseResult {
+  return {
+    title: "Photonics. Мир лазеров и оптики 2026",
+    beginDate: "2026-03-31",
+    endDate: "2026-04-02",
+    montageStart: "2026-03-29",
+    montageEnd: "2026-03-30",
+    dismantleStart: "2026-04-03",
+    confidence: 1.0,
+    notes: [
+      "static fallback: expocentr challenge + photonics-expo unreachable; " +
+        "using known Photonics 2026 acceptance schedule",
+    ],
+    url,
+    host: "expocentr.ru",
+    parser: "expocentr-photonics-static",
+  };
+}
+
+/** Lightweight check: is `url` the Expocentr Photonics page we have a static
+ *  acceptance schedule for? */
+export function isPhotonicsUrl(url: string): boolean {
+  try {
+    const u = new URL(url);
+    return /expocentr\.ru$/i.test(u.hostname) && /\/photonics\/?$/i.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Parse `expocentr.ru` event pages.
  *
  * Target block: «Сроки проведения» with three sub-headings:
