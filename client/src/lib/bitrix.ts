@@ -273,7 +273,7 @@ export function openBitrixPath(path: string) {
 
 export function currentHandlerUrl(route: string): string {
   const cleanRoute = route.startsWith("/") ? route : `/${route}`;
-  const basePath = window.location.pathname.replace(/\/(deal-tab|lead-tab|expo-tab|calendar|install)\/?$/, "/");
+  const basePath = window.location.pathname.replace(/\/(deal-tab|lead-tab|expo-tab|calendar|install|placement-list|placement-detail|placement-menu)\/?$/, "/");
   return `${window.location.origin}${basePath.replace(/\/$/, "")}${cleanRoute}`;
 }
 
@@ -293,11 +293,27 @@ const STALE_HOST_MARKERS = [
   "repl.co",
 ];
 
-const MANAGED_ROUTES = ["/deal-tab", "/lead-tab", "/expo-tab", "/calendar"];
+const MANAGED_ROUTES = [
+  "/deal-tab",
+  "/lead-tab",
+  "/expo-tab",
+  "/calendar",
+  "/placement-list",
+  "/placement-detail",
+  "/placement-menu",
+];
 
 export function getManagedPlacements(entityTypeId?: number): string[] {
-  const placements = ["CRM_DEAL_DETAIL_TAB", "CRM_LEAD_DETAIL_TAB", "CRM_ANALYTICS_MENU"];
-  if (entityTypeId) placements.push(`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`);
+  const placements = [
+    "CRM_DEAL_DETAIL_TAB",
+    "CRM_LEAD_DETAIL_TAB",
+    "CRM_ANALYTICS_MENU",
+    "LEFT_MENU",
+  ];
+  if (entityTypeId) {
+    placements.push(`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`);
+    placements.push(`CRM_DYNAMIC_${entityTypeId}_LIST_MENU`);
+  }
   return placements;
 }
 

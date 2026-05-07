@@ -12,6 +12,9 @@ import EventDetailPage from "@/pages/event-detail";
 import EntityListPage from "@/pages/entity-list";
 import { DealTabPage, LeadTabPage } from "@/pages/crm-tab";
 import ExpoTabPage from "@/pages/expo-tab";
+import PlacementListPage from "@/pages/placement-list";
+import PlacementDetailPage from "@/pages/placement-detail";
+import PlacementMenuPage from "@/pages/placement-menu";
 import { Shell, PageTitle } from "@/pages/shell";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -69,7 +72,7 @@ class RouteErrorBoundary extends Component<{ children: ReactNode }, { error: Err
 
 function bitrixLocationHook(): [string, (to: string) => void] {
   const matchPath = () => {
-    const match = window.location.pathname.match(/\/(install|deal-tab|lead-tab|expo-tab|calendar|event)(\/[^?#]*)?/);
+    const match = window.location.pathname.match(/\/(install|deal-tab|lead-tab|expo-tab|calendar|event|placement-list|placement-detail|placement-menu)(\/[^?#]*)?/);
     if (!match) return undefined;
     return `/${match[1]}${match[2] ?? ""}`;
   };
@@ -144,6 +147,9 @@ function AppRouter() {
       <Route path="/deal-tab" component={DealTabPage} />
       <Route path="/lead-tab" component={LeadTabPage} />
       <Route path="/expo-tab" component={ExpoTabPage} />
+      <Route path="/placement-list" component={PlacementListPage} />
+      <Route path="/placement-detail" component={PlacementDetailPage} />
+      <Route path="/placement-menu" component={PlacementMenuPage} />
       <Route component={NotFound} />
     </Switch>
   );
