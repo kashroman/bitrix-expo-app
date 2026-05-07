@@ -60,10 +60,16 @@ const FIELDS: FieldSpec[] = [
   },
 ];
 
+// NOTE: The modern `userfieldconfig.*` REST API expects camelCase keys
+// (`moduleId`, `entityId`, `fieldName`, ...). Passing the UPPER_SNAKE_CASE
+// names (ENTITY_ID, FIELD_NAME, ...) makes Bitrix run camel2snake on them,
+// which mangles `ENTITY_ID` → `E_NT_IT_Y__ID` and fails with
+// `Unknown field definition` from \Bitrix\Main\UserField. Keep this file in
+// camelCase for userfieldconfig payloads — do NOT switch back to UPPER_SNAKE.
 async function listExisting(entityId: string): Promise<Set<string>> {
   const list: any = await bx("userfieldconfig.list", {
     moduleId: "crm",
-    filter: { ENTITY_ID: entityId },
+    filter: { entityId },
   });
   const arr = Array.isArray(list) ? list : Array.isArray(list?.items) ? list.items : [];
   const out = new Set<string>();
@@ -75,32 +81,32 @@ async function listExisting(entityId: string): Promise<Set<string>> {
 }
 
 function buildAddPayload(entityId: string, spec: FieldSpec) {
-  const edit = {
-    EDIT_FORM_LABEL: { ru: spec.label, en: spec.label },
-    LIST_COLUMN_LABEL: { ru: spec.label, en: spec.label },
-    LIST_FILTER_LABEL: { ru: spec.label, en: spec.label },
-    ERROR_MESSAGE: { ru: "", en: "" },
-    HELP_MESSAGE: { ru: "", en: "" },
+  const labels = {
+    editFormLabel: { ru: spec.label, en: spec.label },
+    listColumnLabel: { ru: spec.label, en: spec.label },
+    listFilterLabel: { ru: spec.label, en: spec.label },
+    errorMessage: { ru: "", en: "" },
+    helpMessage: { ru: "", en: "" },
   };
-  const settings: any = {};
+  const settings: Record<string, unknown> = {};
   if (spec.rowCount) settings.ROWS = spec.rowCount;
   return {
     moduleId: "crm",
     field: {
-      ENTITY_ID: entityId,
-      FIELD_NAME: spec.fieldName,
-      USER_TYPE_ID: spec.userTypeId,
-      XML_ID: spec.fieldName,
-      SORT: 500,
-      MULTIPLE: "N",
-      MANDATORY: "N",
-      SHOW_FILTER: "N",
-      SHOW_IN_LIST: spec.showInList ?? "N",
-      EDIT_IN_LIST: "Y",
-      IS_SEARCHABLE: "N",
-      SETTINGS: settings,
-      ...(spec.defaultValue !== undefined ? { DEFAULT_VALUE: spec.defaultValue } : {}),
-      ...edit,
+      entityId,
+      fieldName: spec.fieldName,
+      userTypeId: spec.userTypeId,
+      xmlId: spec.fieldName,
+      sort: 500,
+      multiple: "N",
+      mandatory: "N",
+      showFilter: "N",
+      showInList: spec.showInList ?? "N",
+      editInList: "Y",
+      isSearchable: "N",
+      settings,
+      ...(spec.defaultValue !== undefined ? { defaultValue: spec.defaultValue } : {}),
+      ...labels,
     },
   };
 }
@@ -134,7 +140,7 @@ async function main() {
     }
     try {
       const result: any = await bx("userfieldconfig.add", payload);
-      console.log(`[migrate] +${spec.fieldName} → id=${result?.ID ?? result}`);
+      console.log(`[migrate] +${spec.fieldName} → id=${result?.id ?? result?.ID ?? result}`);
     } catch (err) {
       console.error(`[migrate] FAILED ${spec.fieldName}:`, err);
     }
