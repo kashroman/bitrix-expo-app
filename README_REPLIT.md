@@ -78,6 +78,13 @@ npm run cron:weekly             # вручную запустить сценар
 
 `render.yaml` определяет сервис `weekly-check` со schedule `0 6 * * 1`. На Render Dashboard задайте секреты: `BITRIX_WEBHOOK_URL`, опционально `CRON_REPORT_CHAT_ID`. Cron будет запускаться каждый понедельник.
 
+> ⚠️ **Внимание оператору.** Текущий веб-сервис на Render был создан вручную через Dashboard. После мерджа этого PR в репозитории появляется `render.yaml` (Blueprint). Если включить «Sync from Blueprint», Render может попытаться создать **новый** сервис `calendar-interpro-app` рядом со старым (или переписать настройки), что нарушит текущий деплой. Безопасный путь:
+> 1. Не подключать репозиторий как Blueprint, пока не сверены имена и переменные окружения существующего сервиса.
+> 2. Если хочется использовать Blueprint — сначала переименуйте/удалите старый сервис, либо отредактируйте `name:` в `render.yaml`, чтобы он совпадал с уже существующим.
+> 3. Cron-сервис `weekly-check` — новый, и его можно создать вручную через Dashboard (Schedule `0 6 * * 1`, `npm install && npx tsx server/cron/weekly-check.ts`), если Blueprint не используется.
+
+Команды `npm run migrate`, `npm run cron:weekly` и сборка зависят от `tsx`. В этом PR `tsx` перенесён из `devDependencies` в `dependencies`, чтобы Render-cron гарантированно мог запускаться даже если когда-нибудь установка пойдёт с `NODE_ENV=production`.
+
 ### Переменные окружения
 
 См. `.env.example`. Главные:
