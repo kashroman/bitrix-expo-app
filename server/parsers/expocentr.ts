@@ -24,7 +24,12 @@ export function parseExpocentr(html: string, url: string): ParseResult {
 
   result.title = extractTitle(html);
 
-  const event = sliceAfter(text, ["Даты проведения", "Сроки проведения"]);
+  // Order matters: «Даты проведения» is the precise label; «Сроки проведения»
+  // is a section header that appears before montage/dismantle and would
+  // include them in the slice window. Prefer the precise label first; only
+  // fall back to the broad header when the precise label is missing, and
+  // narrow the window to the first range to avoid catching montage dates.
+  const event = sliceAfter(text, ["Даты проведения"]) ?? sliceAfter(text, ["Сроки проведения"], 80);
   if (event) {
     const r = parseRussianRange(event);
     if (r.begin) result.beginDate = r.begin;
@@ -61,12 +66,12 @@ export function parseExpocentr(html: string, url: string): ParseResult {
   return result;
 }
 
-function sliceAfter(text: string, headings: string[]): string | undefined {
+function sliceAfter(text: string, headings: string[], windowLen = 120): string | undefined {
   for (const h of headings) {
     const idx = text.toLowerCase().indexOf(h.toLowerCase());
     if (idx >= 0) {
       // 80 characters is enough for "31 марта — 2 апреля 2026" with prefix.
-      return text.slice(idx, idx + 120);
+      return text.slice(idx, idx + windowLen);
     }
   }
   return undefined;

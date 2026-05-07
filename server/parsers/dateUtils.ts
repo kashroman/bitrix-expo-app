@@ -43,19 +43,9 @@ export function parseRussianRange(text: string): { begin?: string; end?: string 
     .replace(/\s+/g, " ")
     .replace(/[\u2010-\u2015\u2212]/g, "-");
 
-  const range = cleaned.match(
-    /(\d{1,2})\s*[-–—]\s*(\d{1,2})\s+([A-Za-zА-Яа-яЁё]+)\s+(\d{4})/,
-  );
-  if (range) {
-    const d1 = Number(range[1]);
-    const d2 = Number(range[2]);
-    const m = ruMonth(range[3]);
-    const y = Number(range[4]);
-    if (m && d1 && d2 && y) {
-      return { begin: toIso(y, m, d1), end: toIso(y, m, d2) };
-    }
-  }
-
+  // Cross-month form first ("31 марта — 2 апреля 2026"), because it's more
+  // specific. Otherwise an embedded same-month range elsewhere on the page
+  // (e.g. "29—30 марта 2026" in the montage block) would steal the match.
   const crossMonth = cleaned.match(
     /(\d{1,2})\s+([A-Za-zА-Яа-яЁё]+)\s*[-–—]\s*(\d{1,2})\s+([A-Za-zА-Яа-яЁё]+)\s+(\d{4})/,
   );
@@ -67,6 +57,19 @@ export function parseRussianRange(text: string): { begin?: string; end?: string 
     const y = Number(crossMonth[5]);
     if (m1 && m2 && d1 && d2 && y) {
       return { begin: toIso(y, m1, d1), end: toIso(y, m2, d2) };
+    }
+  }
+
+  const range = cleaned.match(
+    /(\d{1,2})\s*[-–—]\s*(\d{1,2})\s+([A-Za-zА-Яа-яЁё]+)\s+(\d{4})/,
+  );
+  if (range) {
+    const d1 = Number(range[1]);
+    const d2 = Number(range[2]);
+    const m = ruMonth(range[3]);
+    const y = Number(range[4]);
+    if (m && d1 && d2 && y) {
+      return { begin: toIso(y, m, d1), end: toIso(y, m, d2) };
     }
   }
 

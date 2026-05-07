@@ -93,6 +93,18 @@ export default function InstallPage() {
           title: "Календарь выставок",
           description: "Календарь выставок interpro.pro",
         },
+        {
+          placement: `CRM_DYNAMIC_${entityTypeId}_LIST_MENU`,
+          handler: currentHandlerUrl("/placement-list"),
+          title: "Добавить по ссылке",
+          description: "Smart enrichment: создание выставки по URL организатора",
+        },
+        {
+          placement: "LEFT_MENU",
+          handler: currentHandlerUrl("/placement-menu"),
+          title: "Календарь выставок",
+          description: "Календарь выставок interpro.pro: добавить, проверить",
+        },
       ];
 
       const diag: InstallDiagnostics = {
