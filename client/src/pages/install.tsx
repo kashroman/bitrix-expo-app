@@ -88,6 +88,12 @@ export default function InstallPage() {
           description: "Карточка выставки, связанные лиды/сделки",
         },
         {
+          placement: dynamicPlacement,
+          handler: currentHandlerUrl("/placement-detail"),
+          title: "Источник данных",
+          description: "URL организатора, проверить сейчас",
+        },
+        {
           placement: "CRM_ANALYTICS_MENU",
           handler: currentHandlerUrl("/calendar"),
           title: "Календарь выставок",
@@ -241,7 +247,10 @@ export default function InstallPage() {
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_DEAL_DETAIL_TAB → /deal-tab</code>
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_LEAD_DETAIL_TAB → /lead-tab</code>
               <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB → /expo-tab`}</code>
+              <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB → /placement-detail`}</code>
+              <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_LIST_MENU → /placement-list`}</code>
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_ANALYTICS_MENU → /calendar</code>
+              <code className="rounded bg-background px-2 py-1 text-xs">LEFT_MENU → /placement-menu</code>
             </div>
             {installStatus && <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} />}
             <Button onClick={() => install.mutate()} disabled={install.isPending || !ready.data?.inside} data-testid="button-install">
