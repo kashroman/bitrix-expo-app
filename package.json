@@ -11,6 +11,7 @@
     "db:push": "drizzle-kit push",
     "test": "node --import tsx --test tests/parsers/*.test.ts tests/utils/*.test.ts",
     "migrate": "tsx migrations/001_add_source_fields.ts",
+    "bind-placements": "tsx migrations/002_bind_placements.ts",
     "cron:weekly": "tsx server/cron/weekly-check.ts"
   },
   "dependencies": {

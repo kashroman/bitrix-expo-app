@@ -63,6 +63,9 @@
 ```sh
 npm run migrate                 # добавить UF-поля (нужен BITRIX_WEBHOOK_URL)
 npm run migrate -- --dry-run    # вывести план без изменений
+npm run bind-placements -- --dry-run        # план placement.bind, без вызовов
+npm run bind-placements                     # unbind+bind всех управляемых placement'ов
+npm run bind-placements -- --check-fields   # дополнительно проверить наличие UF полей
 npm test                        # node:test, парсер expocentr и calculateDates
 npm run cron:weekly             # вручную запустить сценарий cron
 ```
