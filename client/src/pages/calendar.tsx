@@ -938,8 +938,12 @@ function MonthLoadDiagnosticsPanel({
   const stalled = fetchStartedAt !== null && fetchingSeconds >= MONTH_LOAD_STALL_SEC;
   const strategy = effectiveD?.strategy ?? (isFetching ? "loading" : "ожидание");
   const fallback = effectiveD?.fallbackUsed ? "да" : "нет";
+  const mergedSummary =
+    effectiveD && effectiveD.strategy === "month-filter-merged"
+      ? ` (event: ${effectiveD.eventStrategyCount ?? 0}, full-period: ${effectiveD.fullPeriodStrategyCount ?? 0}, дубликатов: ${effectiveD.duplicateCount ?? 0})`
+      : "";
   const headline = effectiveD
-    ? `Стратегия: ${effectiveD.strategy} · выставок загружено: ${effectiveD.itemCount} · страниц: ${effectiveD.pagesLoaded} · ${Math.round(effectiveD.durationMs)} мс`
+    ? `Стратегия: ${effectiveD.strategy} · выставок загружено: ${effectiveD.itemCount}${mergedSummary} · страниц: ${effectiveD.pagesLoaded} · ${Math.round(effectiveD.durationMs)} мс`
     : isFetching
       ? fetchStartedAt !== null
         ? `Загрузка выставок по месяцу… ${fetchingSeconds} с${stalled ? " (превышен бюджет 45 с)" : ""}`
@@ -1027,6 +1031,69 @@ function MonthLoadDiagnosticsPanel({
               </b>
               {effectiveD.timedOut ? <> · <span className="text-red-600">таймаут</span></> : null}
             </div>
+            {effectiveD.strategy === "month-filter-merged" && (
+              <div
+                className="rounded border bg-muted/20 p-2"
+                data-testid="gantt-diag-month-load-merged"
+              >
+                <div className="font-medium">Объединение стратегий:</div>
+                <ul className="ml-4 list-disc text-muted-foreground">
+                  <li>
+                    event-overlap (eventStart/eventEnd): найдено{" "}
+                    <b data-testid="gantt-diag-merged-event-count">
+                      {effectiveD.eventStrategyCount ?? 0}
+                    </b>
+                    {effectiveD.eventStrategyError ? (
+                      <>
+                        {" · "}
+                        <span className="text-red-600">
+                          ошибка: {effectiveD.eventStrategyError}
+                        </span>
+                      </>
+                    ) : null}
+                    {effectiveD.eventStrategyTimedOut ? (
+                      <>
+                        {" · "}
+                        <span className="text-red-600">timeout</span>
+                      </>
+                    ) : null}
+                  </li>
+                  <li>
+                    full-period (mountStart/dismantleEnd): найдено{" "}
+                    <b data-testid="gantt-diag-merged-full-count">
+                      {effectiveD.fullPeriodStrategyCount ?? 0}
+                    </b>
+                    {!effectiveD.fullPeriodStrategyAvailable ? (
+                      <> · <span className="text-muted-foreground">поля не настроены</span></>
+                    ) : null}
+                    {effectiveD.fullPeriodStrategyError ? (
+                      <>
+                        {" · "}
+                        <span className="text-red-600">
+                          ошибка: {effectiveD.fullPeriodStrategyError}
+                        </span>
+                      </>
+                    ) : null}
+                    {effectiveD.fullPeriodStrategyTimedOut ? (
+                      <>
+                        {" · "}
+                        <span className="text-red-600">timeout</span>
+                      </>
+                    ) : null}
+                  </li>
+                  <li>
+                    объединённый счёт:{" "}
+                    <b data-testid="gantt-diag-merged-total">
+                      {effectiveD.mergedCount ?? 0}
+                    </b>{" "}
+                    · дубликатов:{" "}
+                    <b data-testid="gantt-diag-merged-duplicates">
+                      {effectiveD.duplicateCount ?? 0}
+                    </b>
+                  </li>
+                </ul>
+              </div>
+            )}
             {effectiveD.attempts.length > 0 && (
               <div>
                 <div className="font-medium">Попытки:</div>

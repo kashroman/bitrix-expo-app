@@ -279,6 +279,7 @@ export async function fetchExpoList(): Promise<ExpoItem[]> {
 // can show a clear diagnostic instead of silently paging the whole set.
 
 export type MonthExpoLoadStrategy =
+  | "month-filter-merged"
   | "month-filter-full-period"
   | "month-filter-event-dates"
   | "month-filter-event-start-only"
@@ -310,6 +311,21 @@ export type MonthExpoLoadDiagnostics = {
   }>;
   eventStartField: string;
   eventEndField: string;
+  // Merge-specific diagnostics. Populated when the merged strategy ran (i.e.
+  // both the event-period and full-phase queries were attempted in parallel).
+  // Counts reflect rows returned by each individual query before deduplication;
+  // mergedCount is the size of the deduped union; duplicateCount is the number
+  // of items returned by both queries.
+  eventStrategyCount?: number;
+  fullPeriodStrategyCount?: number;
+  mergedCount?: number;
+  duplicateCount?: number;
+  eventStrategyError?: string;
+  fullPeriodStrategyError?: string;
+  eventStrategyTimedOut?: boolean;
+  fullPeriodStrategyTimedOut?: boolean;
+  eventStrategyAvailable?: boolean;
+  fullPeriodStrategyAvailable?: boolean;
 };
 
 export type MonthExpoLoadResult = {
@@ -433,21 +449,69 @@ async function tryMonthFilter(
   }
 }
 
-// Load only exhibitions whose event interval overlaps the selected month.
-// Returns a structured result with diagnostics so the UI can surface which
-// strategy was used, how many pages were loaded, and whether a fallback ran.
+// Compute the "overall" interval of an expo from whichever date fields are
+// populated: earliest of (mount start, event start) and latest of (event end,
+// dismantle end). Mirrors the Gantt row interval rule so the merged result
+// can be sorted consistently with what the UI will show.
+function expoOverallStartEnd(expo: ExpoItem): {
+  start: number | undefined;
+  end: number | undefined;
+} {
+  const candidates = (
+    [expo.installStart, expo.expoStart, expo.installEnd, expo.expoEnd, expo.dismantleStart, expo.dismantleEnd] as Array<string | undefined>
+  )
+    .map((v) => (v ? new Date(v).getTime() : NaN))
+    .filter((n) => Number.isFinite(n)) as number[];
+  if (candidates.length === 0) return { start: undefined, end: undefined };
+  // Earliest of montage/event starts (fallback to any earliest known date).
+  const startCandidates: number[] = [];
+  if (expo.installStart) startCandidates.push(new Date(expo.installStart).getTime());
+  if (expo.expoStart) startCandidates.push(new Date(expo.expoStart).getTime());
+  const start = startCandidates.filter(Number.isFinite).length
+    ? Math.min(...startCandidates.filter(Number.isFinite))
+    : Math.min(...candidates);
+  // Latest of event/dismantle ends (fallback to latest known date).
+  const endCandidates: number[] = [];
+  if (expo.expoEnd) endCandidates.push(new Date(expo.expoEnd).getTime());
+  if (expo.dismantleEnd) endCandidates.push(new Date(expo.dismantleEnd).getTime());
+  const end = endCandidates.filter(Number.isFinite).length
+    ? Math.max(...endCandidates.filter(Number.isFinite))
+    : Math.max(...candidates);
+  return { start, end };
+}
+
+function compareMergedExpos(a: ExpoItem, b: ExpoItem): number {
+  const oa = expoOverallStartEnd(a);
+  const ob = expoOverallStartEnd(b);
+  const sa = oa.start ?? (a.expoStart ? new Date(a.expoStart).getTime() : undefined);
+  const sb = ob.start ?? (b.expoStart ? new Date(b.expoStart).getTime() : undefined);
+  if (sa !== undefined && sb !== undefined && sa !== sb) return sa - sb;
+  if (sa !== undefined && sb === undefined) return -1;
+  if (sa === undefined && sb !== undefined) return 1;
+  // Tie-break on event start.
+  const ea = a.expoStart ? new Date(a.expoStart).getTime() : undefined;
+  const eb = b.expoStart ? new Date(b.expoStart).getTime() : undefined;
+  if (ea !== undefined && eb !== undefined && ea !== eb) return ea - eb;
+  if (ea !== undefined && eb === undefined) return -1;
+  if (ea === undefined && eb !== undefined) return 1;
+  // Final tie-break on title (locale-aware) then id for stability.
+  const tcmp = a.title.localeCompare(b.title, "ru-RU");
+  if (tcmp !== 0) return tcmp;
+  return a.id - b.id;
+}
+
+// Load every exhibition that touches the selected month. Two server-side
+// queries run in parallel and their rows are merged by item id:
+//   A) event-period overlap: eventStart <= monthEnd AND eventEnd >= monthStart
+//   B) full-phase overlap:   mountStart <= monthEnd AND dismantleEnd >= monthStart
+//      (only when both new fields are available)
 //
-// Strategy order:
-//   1) Full-period overlap filter using montage start + dismantle end (when
-//      both fields are discovered). Catches exhibitions whose montage or
-//      dismantle bleeds into the month even if the event proper falls in
-//      another month.
-//   2) Two-sided overlap filter on event start/end UF date fields (legacy).
-//   3) Narrower one-sided filter on eventStart only (eventStart <= monthEnd
-//      AND eventStart >= monthStart) — catches the common case where only
-//      the start date is set, and also works if the Bitrix account rejects
-//      >= on the end-date UF. Client-side still enforces the overlap rule.
-//   4) No further fallback — surfaces a clear error in diagnostics.
+// Bitrix excludes rows whose UF date is NULL from comparison filters. Older
+// exhibitions only have legacy event dates populated, while newer ones may
+// have only the new mount/dismantle fields. Running both queries and merging
+// guarantees neither set is dropped. If one query errors or times out the
+// other still wins; if both fail we fall through to the single-field
+// eventStart range as a last resort.
 export async function fetchExposByMonth(
   activeMonth: Date,
 ): Promise<MonthExpoLoadResult> {
@@ -465,109 +529,143 @@ export async function fetchExposByMonth(
 
   const eventStart = EXPO_DATE_FIELDS.eventStart;
   const eventEnd = EXPO_DATE_FIELDS.eventEnd;
-  // Prefer the pinned codes from config so the full-period filter works
-  // immediately, even before discovery completes. Fall back to runtime
-  // discovery if a pin is somehow unset (kept defensive for future edits).
   const fields = getExpoFieldsSync();
   const mountStartCode = EXPO_DATE_FIELDS.mountStart ?? fields.mountStart?.code;
   const dismantleEndCode =
     EXPO_DATE_FIELDS.dismantleEnd ?? fields.dismantleEnd?.code;
+  const fullPeriodAvailable = Boolean(mountStartCode && dismantleEndCode);
 
   const attempts: MonthExpoLoadDiagnostics["attempts"] = [];
+  const select = buildMonthExpoSelect();
+  const mergedStart = Date.now();
 
-  // Attempt 0 — full-period overlap filter using montage start ≤ monthEnd
-  // AND dismantle end ≥ monthStart. Only viable when both new fields are
-  // detected. This is the most accurate filter — it returns every expo
-  // touching the month including those whose montage starts in the month
-  // but whose event is in the next month.
-  if (mountStartCode && dismantleEndCode) {
-    const fullPeriodFilter: Record<string, unknown> = {
-      [`<=${mountStartCode}`]: monthEndIso,
-      [`>=${dismantleEndCode}`]: monthStartIso,
-    };
-    const fullPeriod = await tryMonthFilter(
-      fullPeriodFilter,
-      "month-filter-full-period",
-    );
-    attempts.push({
-      strategy: "month-filter-full-period",
-      ok: fullPeriod.ok,
-      itemCount: fullPeriod.items.length,
-      pagesLoaded: fullPeriod.pagesLoaded,
-      durationMs: fullPeriod.durationMs,
-      error: fullPeriod.error,
-      timedOut: fullPeriod.timedOut,
-    });
-    if (fullPeriod.ok) {
-      return {
-        items: fullPeriod.items.map(normalizeExpo),
-        diagnostics: {
-          strategy: "month-filter-full-period",
-          strategyLabel:
-            "Server-side filter: mountStart ≤ monthEnd AND dismantleEnd ≥ monthStart (full exhibition period)",
-          monthKey,
-          monthStartIso,
-          monthEndIso,
-          filter: fullPeriodFilter,
-          select: buildMonthExpoSelect(),
-          pagesLoaded: fullPeriod.pagesLoaded,
-          itemCount: fullPeriod.items.length,
-          durationMs: fullPeriod.durationMs,
-          fallbackUsed: false,
-          usedFullLoad: false,
-          attempts,
-          eventStartField: eventStart,
-          eventEndField: eventEnd,
-        },
-      };
-    }
-  }
-
-  // Attempt 1 — two-sided overlap filter on event start/end.
-  // Bitrix REST filter: key prefix "<=" / ">=" with the field code.
-  // For smart-process UF date fields we pass the raw field code as-is.
-  const twoSidedFilter: Record<string, unknown> = {
+  // Strategy A — event period overlap (legacy event start/end UF dates).
+  const eventFilter: Record<string, unknown> = {
     [`<=${eventStart}`]: monthEndIso,
     [`>=${eventEnd}`]: monthStartIso,
   };
-  const twoSided = await tryMonthFilter(twoSidedFilter, "month-filter-event-dates");
+  // Strategy B — full phase overlap (new montage/dismantle UF dates).
+  const fullPeriodFilter: Record<string, unknown> | undefined =
+    fullPeriodAvailable
+      ? {
+          [`<=${mountStartCode!}`]: monthEndIso,
+          [`>=${dismantleEndCode!}`]: monthStartIso,
+        }
+      : undefined;
+
+  const [eventRes, fullRes] = await Promise.all([
+    tryMonthFilter(eventFilter, "month-filter-event-dates"),
+    fullPeriodFilter
+      ? tryMonthFilter(fullPeriodFilter, "month-filter-full-period")
+      : Promise.resolve(null),
+  ]);
+
   attempts.push({
     strategy: "month-filter-event-dates",
-    ok: twoSided.ok,
-    itemCount: twoSided.items.length,
-    pagesLoaded: twoSided.pagesLoaded,
-    durationMs: twoSided.durationMs,
-    error: twoSided.error,
-    timedOut: twoSided.timedOut,
+    ok: eventRes.ok,
+    itemCount: eventRes.items.length,
+    pagesLoaded: eventRes.pagesLoaded,
+    durationMs: eventRes.durationMs,
+    error: eventRes.error,
+    timedOut: eventRes.timedOut,
   });
+  if (fullRes) {
+    attempts.push({
+      strategy: "month-filter-full-period",
+      ok: fullRes.ok,
+      itemCount: fullRes.items.length,
+      pagesLoaded: fullRes.pagesLoaded,
+      durationMs: fullRes.durationMs,
+      error: fullRes.error,
+      timedOut: fullRes.timedOut,
+    });
+  }
 
-  if (twoSided.ok) {
+  // If at least one strategy returned rows, merge them. We keep going even
+  // if one strategy errored — its error is still surfaced in diagnostics.
+  if (eventRes.ok || (fullRes && fullRes.ok)) {
+    const seen = new Map<number, ExpoItem>();
+    let duplicateCount = 0;
+    const eventNormalized = eventRes.ok ? eventRes.items.map(normalizeExpo) : [];
+    const fullNormalized = fullRes && fullRes.ok ? fullRes.items.map(normalizeExpo) : [];
+    for (const expo of eventNormalized) {
+      if (!Number.isFinite(expo.id) || expo.id <= 0) continue;
+      seen.set(expo.id, expo);
+    }
+    for (const expo of fullNormalized) {
+      if (!Number.isFinite(expo.id) || expo.id <= 0) continue;
+      if (seen.has(expo.id)) {
+        duplicateCount += 1;
+        continue;
+      }
+      seen.set(expo.id, expo);
+    }
+    const merged = Array.from(seen.values()).sort(compareMergedExpos);
+
+    const mergedFilter: Record<string, unknown> = {
+      event: eventFilter,
+      ...(fullPeriodFilter ? { fullPeriod: fullPeriodFilter } : {}),
+    };
+    const pagesLoaded =
+      (eventRes.ok ? eventRes.pagesLoaded : 0) +
+      (fullRes && fullRes.ok ? fullRes.pagesLoaded : 0);
     return {
-      items: twoSided.items.map(normalizeExpo),
+      items: merged,
       diagnostics: {
-        strategy: "month-filter-event-dates",
+        strategy: "month-filter-merged",
         strategyLabel:
-          "Server-side filter: eventStart ≤ monthEnd AND eventEnd ≥ monthStart",
+          "Merged server-side filters: event-period overlap ∪ full-phase overlap (rows deduped by id)",
         monthKey,
         monthStartIso,
         monthEndIso,
-        filter: twoSidedFilter,
-        select: buildMonthExpoSelect(),
-        pagesLoaded: twoSided.pagesLoaded,
-        itemCount: twoSided.items.length,
-        durationMs: twoSided.durationMs,
-        fallbackUsed: Boolean(mountStartCode && dismantleEndCode),
+        filter: mergedFilter,
+        select,
+        pagesLoaded,
+        itemCount: merged.length,
+        durationMs: Date.now() - mergedStart,
+        fallbackUsed: !(eventRes.ok && fullRes?.ok) && fullPeriodAvailable,
         usedFullLoad: false,
         attempts,
         eventStartField: eventStart,
         eventEndField: eventEnd,
+        eventStrategyAvailable: true,
+        fullPeriodStrategyAvailable: fullPeriodAvailable,
+        eventStrategyCount: eventRes.ok ? eventNormalized.length : 0,
+        fullPeriodStrategyCount: fullRes && fullRes.ok ? fullNormalized.length : 0,
+        mergedCount: merged.length,
+        duplicateCount,
+        eventStrategyError: eventRes.ok ? undefined : eventRes.error,
+        fullPeriodStrategyError:
+          fullRes && !fullRes.ok ? fullRes.error : undefined,
+        eventStrategyTimedOut: eventRes.ok ? undefined : eventRes.timedOut,
+        fullPeriodStrategyTimedOut:
+          fullRes && !fullRes.ok ? fullRes.timedOut : undefined,
+        timedOut: Boolean(
+          (!eventRes.ok && eventRes.timedOut) ||
+            (fullRes && !fullRes.ok && fullRes.timedOut),
+        )
+          ? true
+          : undefined,
+        error:
+          !eventRes.ok || (fullRes && !fullRes.ok)
+            ? [
+                !eventRes.ok && eventRes.error
+                  ? `event: ${eventRes.error}`
+                  : undefined,
+                fullRes && !fullRes.ok && fullRes.error
+                  ? `full-period: ${fullRes.error}`
+                  : undefined,
+              ]
+                .filter(Boolean)
+                .join(" · ") || undefined
+            : undefined,
       },
     };
   }
 
-  // Attempt 2 — single-field range on eventStart. Covers the common case
-  // where only the event start date is configured; the overlap rule will
-  // be re-checked client-side.
+  // Both merged-strategy queries failed — fall back to the narrower
+  // single-field range on eventStart so the UI is not left empty when only
+  // one date is configured or one of the >= operators is rejected.
   const startOnlyFilter: Record<string, unknown> = {
     [`>=${eventStart}`]: monthStartIso,
     [`<=${eventStart}`]: monthEndIso,
@@ -588,28 +686,29 @@ export async function fetchExposByMonth(
 
   if (startOnly.ok) {
     const normalized = startOnly.items.map(normalizeExpo);
-    // Client-side overlap guard — matches Gantt's own filter.
     const mS = monthStart.getTime();
     const mE = monthEnd.getTime();
-    const visible = normalized.filter((expo) => {
-      const s = expo.expoStart ? new Date(expo.expoStart).getTime() : undefined;
-      const e = expo.expoEnd ? new Date(expo.expoEnd).getTime() : undefined;
-      if (s === undefined && e === undefined) return false;
-      const sv = s ?? e!;
-      const ev = e ?? s!;
-      return sv <= mE && ev >= mS;
-    });
+    const visible = normalized
+      .filter((expo) => {
+        const s = expo.expoStart ? new Date(expo.expoStart).getTime() : undefined;
+        const e = expo.expoEnd ? new Date(expo.expoEnd).getTime() : undefined;
+        if (s === undefined && e === undefined) return false;
+        const sv = s ?? e!;
+        const ev = e ?? s!;
+        return sv <= mE && ev >= mS;
+      })
+      .sort(compareMergedExpos);
     return {
       items: visible,
       diagnostics: {
         strategy: "month-filter-event-start-only",
         strategyLabel:
-          "Fallback filter: eventStart within [monthStart, monthEnd] (two-sided filter rejected)",
+          "Fallback filter: eventStart within [monthStart, monthEnd] (merged event+full-period queries failed)",
         monthKey,
         monthStartIso,
         monthEndIso,
         filter: startOnlyFilter,
-        select: buildMonthExpoSelect(),
+        select,
         pagesLoaded: startOnly.pagesLoaded,
         itemCount: visible.length,
         durationMs: startOnly.durationMs,
@@ -618,14 +717,24 @@ export async function fetchExposByMonth(
         attempts,
         eventStartField: eventStart,
         eventEndField: eventEnd,
+        eventStrategyAvailable: true,
+        fullPeriodStrategyAvailable: fullPeriodAvailable,
+        eventStrategyCount: 0,
+        fullPeriodStrategyCount: 0,
+        mergedCount: 0,
+        duplicateCount: 0,
+        eventStrategyError: eventRes.error,
+        fullPeriodStrategyError: fullRes?.error,
+        eventStrategyTimedOut: eventRes.timedOut,
+        fullPeriodStrategyTimedOut: fullRes?.timedOut,
       },
     };
   }
 
-  // All filtered strategies failed — surface a clear error instead of
-  // silently paging the entire smart-process.
+  // Everything failed — surface combined diagnostics.
   const combinedError = [
-    twoSided.error ? `two-sided: ${twoSided.error}` : undefined,
+    eventRes.error ? `event: ${eventRes.error}` : undefined,
+    fullRes?.error ? `full-period: ${fullRes.error}` : undefined,
     startOnly.error ? `start-only: ${startOnly.error}` : undefined,
   ]
     .filter(Boolean)
@@ -639,20 +748,30 @@ export async function fetchExposByMonth(
       monthKey,
       monthStartIso,
       monthEndIso,
-      filter: twoSidedFilter,
-      select: buildMonthExpoSelect(),
+      filter: { event: eventFilter, ...(fullPeriodFilter ? { fullPeriod: fullPeriodFilter } : {}) },
+      select,
       pagesLoaded: 0,
       itemCount: 0,
-      durationMs: 0,
+      durationMs: Date.now() - mergedStart,
       fallbackUsed: true,
       usedFullLoad: false,
       attempts,
       eventStartField: eventStart,
       eventEndField: eventEnd,
+      eventStrategyAvailable: true,
+      fullPeriodStrategyAvailable: fullPeriodAvailable,
+      eventStrategyCount: 0,
+      fullPeriodStrategyCount: 0,
+      mergedCount: 0,
+      duplicateCount: 0,
+      eventStrategyError: eventRes.error,
+      fullPeriodStrategyError: fullRes?.error,
+      eventStrategyTimedOut: eventRes.timedOut,
+      fullPeriodStrategyTimedOut: fullRes?.timedOut,
       error:
         combinedError ||
         "crm.item.list filtered by month returned no data and no error — check the UF date field codes.",
-      timedOut: Boolean(twoSided.timedOut || startOnly.timedOut),
+      timedOut: Boolean(eventRes.timedOut || fullRes?.timedOut || startOnly.timedOut),
     },
   };
 }
