@@ -147,7 +147,7 @@ function AppRouter() {
       <Route path="/deal-tab" component={DealTabPage} />
       <Route path="/lead-tab" component={LeadTabPage} />
       <Route path="/expo-tab" component={ExpoTabPage} />
-      <Route path="/placement-list" component={PlacementListPage} />
+      <Route path="/placement-list">{() => <PlacementListPage />}</Route>
       <Route path="/placement-detail" component={PlacementDetailPage} />
       <Route path="/placement-menu" component={PlacementMenuPage} />
       <Route component={NotFound} />

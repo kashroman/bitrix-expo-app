@@ -36,7 +36,7 @@ export default function PlacementMenuPage() {
         <TabsContent value="link">
           {/* Reuse the placement-list page body — it's already built around
            *  the smart-add API and Shell embedded. */}
-          <PlacementListPage />
+          <PlacementListPage embedded />
         </TabsContent>
         <TabsContent value="manual"><ManualForm /></TabsContent>
         <TabsContent value="recheck"><RecheckAllPanel /></TabsContent>
