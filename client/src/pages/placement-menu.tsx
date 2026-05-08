@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Loader2, Wand2, FileText, Globe } from "lucide-react";
+import { Loader2, Wand2, FileText, Globe, CalendarDays } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -9,21 +9,30 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Shell, PageTitle } from "./shell";
 import { apiRequest } from "@/lib/queryClient";
 import PlacementListPage from "./placement-list";
+import CalendarPage from "./calendar";
 
 export default function PlacementMenuPage() {
   return (
     <Shell embedded>
       <PageTitle
         eyebrow="Smart Enrichment"
-        title="Календарь выставок · добавление"
-        description="Создание карточек по ссылке или вручную, плюс единый запуск автопроверки всех активных выставок."
+        title="Календарь выставок"
+        description="Просмотр Gantt/Calendar/List и добавление карточек: по ссылке, вручную или единый запуск автопроверки."
       />
-      <Tabs defaultValue="link" className="space-y-4">
+      <Tabs defaultValue="calendar" className="space-y-4">
         <TabsList>
+          <TabsTrigger value="calendar" data-testid="tab-calendar"><CalendarDays className="mr-2 h-4 w-4" />Календарь</TabsTrigger>
           <TabsTrigger value="link" data-testid="tab-link"><Globe className="mr-2 h-4 w-4" />По ссылке</TabsTrigger>
           <TabsTrigger value="manual" data-testid="tab-manual"><FileText className="mr-2 h-4 w-4" />Вручную</TabsTrigger>
           <TabsTrigger value="recheck" data-testid="tab-recheck"><Wand2 className="mr-2 h-4 w-4" />Автопроверка</TabsTrigger>
         </TabsList>
+        <TabsContent value="calendar">
+          {/* Reuse the calendar page body — embedded mode skips the outer
+           *  navbar so it nests cleanly under placement-menu's Shell. The
+           *  same BX24 context flows through, so the calendar stays in
+           *  Bitrix mode (no demo banner) when opened from LEFT_MENU. */}
+          <CalendarPage embedded />
+        </TabsContent>
         <TabsContent value="link">
           {/* Reuse the placement-list page body — it's already built around
            *  the smart-add API and Shell embedded. */}

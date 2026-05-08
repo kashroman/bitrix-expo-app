@@ -76,7 +76,7 @@ function monthKeyOf(d: Date): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
 }
 
-export default function CalendarPage() {
+export default function CalendarPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [view, setView] = useState<ViewMode>("gantt");
   const [period, setPeriod] = useState<PeriodMode>("all");
   const [responsible, setResponsible] = useState<string>("all");
@@ -198,7 +198,7 @@ export default function CalendarPage() {
   });
 
   return (
-    <Shell>
+    <Shell embedded={embedded}>
       <PageTitle
         eyebrow="Календарь"
         title="Календарь выставок"

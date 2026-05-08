@@ -136,7 +136,7 @@ function AppRouter() {
     <Switch>
       <Route path="/" component={HomePage} />
       <Route path="/install" component={InstallPage} />
-      <Route path="/calendar" component={CalendarPage} />
+      <Route path="/calendar">{() => <CalendarPage />}</Route>
       <Route path="/event/:eventId" component={EventDetailPage} />
       <Route path="/event/:eventId/leads">
         {(params) => <EntityListPage params={params} entity="lead" />}
