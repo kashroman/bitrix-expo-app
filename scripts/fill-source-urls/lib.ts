@@ -18,7 +18,10 @@ export type Candidate = {
   snippetTitle: string;
 };
 
-export type ScoredCandidate = Candidate & { score: number };
+export type ScoredCandidate = Candidate & {
+  score: number;
+  aggregator: boolean;
+};
 
 const STOP_WORDS = new Set([
   "выставка",
@@ -73,17 +76,51 @@ export function buildSearchQueries(
 }
 
 /**
- * Aggregators / directories / social networks. Candidates whose domain
- * matches these are penalised heavily; they rarely point to the real
- * organiser site.
+ * Aggregators, exhibition directories, ticket marketplaces, social networks,
+ * mass-media and tag/news pages. Any candidate whose host (or registrable
+ * parent) matches this list is treated as an *aggregator*: heavily penalised
+ * in scoring and, in apply mode, hard-skipped via the `skippedAggregator`
+ * status. Listing here is deliberately broad — false positives just mean
+ * "wait for a better candidate", false negatives mean writing junk to CRM.
  */
-const BAD_DOMAINS = [
+export const AGGREGATOR_DOMAINS = [
+  // Russian exhibition aggregators / directories
   "expomap.ru",
   "expoclub.ru",
-  "10times.com",
+  "expo77.ru",
+  "ict2go.ru",
+  "totalexpo.ru",
+  "exponet.ru",
+  "expotime.ru",
+  "proexpo.ru",
+  "expocentr-online.ru",
   "all-events.ru",
   "allexpo.ru",
-  "exponet.ru",
+  "vystavki.ru",
+  "expo-russia.ru",
+  "expolife.ru",
+  "expopromoter.com",
+  "tradefairdates.com",
+  "neftegaz.ru",
+  // International aggregators
+  "10times.com",
+  "allevents.in",
+  "eventbrite.com",
+  "eventbrite.ru",
+  "biztradeshows.com",
+  "nuemd.com",
+  "conferenceindex.org",
+  "eventsofa.com",
+  // Maps / search engines / wiki
+  "yandex.ru",
+  "maps.yandex.ru",
+  "google.com",
+  "google.ru",
+  "maps.google.com",
+  "wikipedia.org",
+  "ru.wikipedia.org",
+  "tripadvisor.com",
+  // Social networks / messengers / video
   "vk.com",
   "vk.ru",
   "facebook.com",
@@ -91,23 +128,70 @@ const BAD_DOMAINS = [
   "ok.ru",
   "t.me",
   "telegram.me",
-  "yandex.ru",
-  "maps.yandex.ru",
-  "google.com",
-  "google.ru",
-  "wikipedia.org",
-  "wiki",
-  "tripadvisor.com",
+  "telegram.org",
+  "twitter.com",
+  "x.com",
+  "linkedin.com",
   "youtube.com",
+  "youtu.be",
   "rutube.ru",
   "zen.yandex.ru",
   "dzen.ru",
+  // Media / news / tag/topic pages
   "afisha.ru",
   "kudago.com",
   "tass.ru",
   "rbc.ru",
   "kommersant.ru",
+  "ria.ru",
+  "interfax.ru",
+  "vedomosti.ru",
+  "zr.ru",
+  "lenta.ru",
+  "gazeta.ru",
+  "izvestia.ru",
+  "kp.ru",
+  "rg.ru",
+  "forbes.ru",
 ];
+
+/**
+ * URL path fragments that strongly suggest a tag/news/article page rather
+ * than an organiser homepage, even when the host is otherwise neutral.
+ */
+const BAD_PATH_FRAGMENTS = [
+  "/tags/",
+  "/tag/",
+  "/topic/",
+  "/topics/",
+  "/news/",
+  "/article/",
+  "/articles/",
+  "/blog/",
+  "/press/",
+  "/press-release/",
+];
+
+export function isAggregatorDomain(domain: string): boolean {
+  if (!domain) return false;
+  const d = domain.toLowerCase();
+  for (const bad of AGGREGATOR_DOMAINS) {
+    if (d === bad || d.endsWith(`.${bad}`)) return true;
+  }
+  return false;
+}
+
+/**
+ * Some hosts (e.g. accreditation/registration/ticket subdomains) are *related*
+ * to an event but are not the official event homepage. Useful as a soft signal:
+ * such URLs are kept but penalised, so a true main-domain candidate wins.
+ */
+const ANCILLARY_SUBDOMAIN_RE =
+  /^(accreditation|register|registration|ticket|tickets|biletter|biglietteria|press|media|forms|api|admin|cabinet|lk|my)\./i;
+
+function isAncillarySubdomain(domain: string): boolean {
+  return ANCILLARY_SUBDOMAIN_RE.test(domain);
+}
 
 /**
  * Domains/keywords known to host official Russian exhibition sites. A small
@@ -115,27 +199,28 @@ const BAD_DOMAINS = [
  * match here adds a strong positive signal.
  */
 const KNOWN_OFFICIAL_DOMAINS: { match: RegExp; boost: number }[] = [
-  { match: /(^|\.)expocentr\.ru$/, boost: 0.35 },
-  { match: /(^|\.)crocus-expo\.ru$/, boost: 0.35 },
-  { match: /(^|\.)crocusexpo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)expocentr\.ru$/, boost: 0.3 },
+  { match: /(^|\.)crocus-expo\.ru$/, boost: 0.2 },
+  { match: /(^|\.)crocusexpo\.ru$/, boost: 0.2 },
   { match: /(^|\.)rosupack\.com$/, boost: 0.35 },
   { match: /(^|\.)mitt\.ru$/, boost: 0.35 },
   { match: /(^|\.)intercharm\.ru$/, boost: 0.35 },
   { match: /(^|\.)neftegaz-expo\.ru$/, boost: 0.35 },
   { match: /(^|\.)photonics-expo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)metobr-expo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)helirussia\.ru$/, boost: 0.35 },
+  { match: /(^|\.)vodexpo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)ddexpo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)gntexpo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)logistika-expo\.ru$/, boost: 0.35 },
+  { match: /(^|\.)wire-tradefair\.com$/, boost: 0.35 },
+  { match: /(^|\.)kazanforum\.ru$/, boost: 0.3 },
+  { match: /(^|\.)cipr\.ru$/, boost: 0.3 },
   { match: /(^|\.)ite-expo\.ru$/, boost: 0.3 },
   { match: /(^|\.)ite-russia\.ru$/, boost: 0.3 },
   { match: /(^|\.)hyve\.group$/, boost: 0.2 },
-  { match: /(^|\.)expoforum\.ru$/, boost: 0.3 },
+  { match: /(^|\.)expoforum\.ru$/, boost: 0.25 },
 ];
-
-function domainPenalty(domain: string): number {
-  if (!domain) return -0.4;
-  for (const bad of BAD_DOMAINS) {
-    if (domain === bad || domain.endsWith(`.${bad}`)) return -0.6;
-  }
-  return 0;
-}
 
 function knownBoost(domain: string): number {
   if (!domain) return 0;
@@ -149,11 +234,28 @@ const OFFICIAL_HINTS = [
   "официальный",
   "official",
   "expo",
-  "ru",
   "fair",
   "forum",
   "salon",
 ];
+
+function hasBadPath(url: string): boolean {
+  const lower = url.toLowerCase();
+  return BAD_PATH_FRAGMENTS.some((f) => lower.includes(f));
+}
+
+/**
+ * Returns the registrable "label" of a domain — i.e. the leftmost segment of
+ * the eTLD+1 (e.g. `metobr-expo.ru` → `metobr-expo`, `accreditation.cipr2026.accreditation.ru`
+ * → `accreditation`). Used to decide whether a title token appears in the
+ * domain *itself* rather than only as a subdomain prefix.
+ */
+function domainLabel(domain: string): string {
+  if (!domain) return "";
+  const parts = domain.split(".").filter(Boolean);
+  if (parts.length <= 2) return parts[0] ?? "";
+  return parts[parts.length - 2] ?? "";
+}
 
 export function scoreCandidate(
   cand: Candidate,
@@ -162,46 +264,106 @@ export function scoreCandidate(
 ): number {
   const { domain, url, snippet, snippetTitle } = cand;
   if (!url) return 0;
-  let score = 0.35; // base prior — we got *some* hit at all
 
-  // Strong penalties first.
-  score += domainPenalty(domain);
+  // Aggregators are hard-floored — they should never beat a real candidate
+  // and should never on their own clear the apply threshold.
+  if (isAggregatorDomain(domain)) {
+    // Allow a tiny non-zero score so ordering between aggregators is still
+    // deterministic for dry-run logging, but cap well below minConfidence.
+    let agg = 0.15;
+    const fullText =
+      `${domain} ${url} ${snippet} ${snippetTitle}`.toLowerCase();
+    if (titleTokens.length) {
+      let matched = 0;
+      for (const tok of titleTokens) if (fullText.includes(tok)) matched++;
+      agg += (matched / titleTokens.length) * 0.1;
+    }
+    if (hasBadPath(url)) agg -= 0.05;
+    return Number(Math.max(0, Math.min(0.35, agg)).toFixed(3));
+  }
+
+  let score = 0.3; // base prior — we got *some* hit at all
+
   score += knownBoost(domain);
 
   const fullText =
     `${domain} ${url} ${snippet} ${snippetTitle}`.toLowerCase();
+  const lowerTitle = snippetTitle.toLowerCase();
+  const lowerSnippet = snippet.toLowerCase();
+  const label = domainLabel(domain);
 
+  let domainTokenHit = false;
   if (titleTokens.length) {
     let matched = 0;
     for (const tok of titleTokens) {
       if (fullText.includes(tok)) matched++;
     }
     const ratio = matched / titleTokens.length;
-    score += ratio * 0.35;
-    // domain itself includes a primary token → extra boost
+    score += ratio * 0.3;
+
+    // Domain *label* itself includes a primary token → strong boost.
+    // We only count meaningful tokens (≥4 chars) and only the head of the
+    // title to avoid matching on filler words.
     const primaryTokens = titleTokens.slice(0, 3);
     for (const tok of primaryTokens) {
-      if (tok.length >= 4 && domain.includes(tok)) {
-        score += 0.1;
+      if (tok.length >= 4 && label.includes(tok)) {
+        score += 0.18;
+        domainTokenHit = true;
         break;
       }
     }
   }
 
-  if (year && fullText.includes(String(year))) score += 0.1;
+  // Year must appear somewhere — but a year on its own is weak; pair it with
+  // domain/path presence rather than only snippet.
+  if (year) {
+    const ys = String(year);
+    if (url.toLowerCase().includes(ys) || domain.includes(ys)) score += 0.1;
+    else if (fullText.includes(ys)) score += 0.04;
+  }
+
+  // Snippet *title* should reference the event title for true official sites.
+  if (titleTokens.length) {
+    let titleMatched = 0;
+    for (const tok of titleTokens) {
+      if (tok.length >= 3 && lowerTitle.includes(tok)) titleMatched++;
+    }
+    if (titleMatched >= 2) score += 0.08;
+    else if (titleMatched === 1) score += 0.03;
+
+    let snippetMatched = 0;
+    for (const tok of titleTokens) {
+      if (tok.length >= 3 && lowerSnippet.includes(tok)) snippetMatched++;
+    }
+    if (snippetMatched >= 2) score += 0.05;
+  }
 
   // .ru / official-looking hints
-  if (/\.ru(\/|$)/.test(url) || /\.ru$/.test(domain)) score += 0.05;
+  if (/\.ru(\/|$)/.test(url) || /\.ru$/.test(domain)) score += 0.03;
   for (const hint of OFFICIAL_HINTS) {
-    if (snippetTitle.toLowerCase().includes(hint)) {
+    if (lowerTitle.includes(hint)) {
       score += 0.03;
       break;
     }
   }
 
-  // Avoid PDFs / news article URLs heuristically
-  if (/\.pdf($|\?)/i.test(url)) score -= 0.2;
-  if (/\/news\/|\/article\/|\/blog\//i.test(url)) score -= 0.15;
+  // Ancillary subdomains (accreditation., tickets., etc.) — keep but penalise
+  // so the main event domain wins when both are present.
+  if (isAncillarySubdomain(domain)) score -= 0.15;
+
+  // Avoid PDFs / news article / tag URLs heuristically.
+  if (/\.pdf($|\?)/i.test(url)) score -= 0.25;
+  if (hasBadPath(url)) score -= 0.2;
+
+  // Safety net: if neither the domain nor the snippet title matches the
+  // event, this is almost certainly not the official site — cap the score.
+  if (!domainTokenHit && titleTokens.length) {
+    let titleHits = 0;
+    for (const tok of titleTokens) {
+      if (tok.length >= 3 && lowerTitle.includes(tok)) titleHits++;
+    }
+    if (titleHits === 0) score = Math.min(score, 0.55);
+  }
 
   // Clamp
   if (score < 0) score = 0;
@@ -218,6 +380,7 @@ export function pickBestCandidate(
   const scored: ScoredCandidate[] = candidates.map((c) => ({
     ...c,
     score: scoreCandidate(c, titleTokens, year),
+    aggregator: isAggregatorDomain(c.domain),
   }));
   // Prefer higher score, then shorter URL (closer to root).
   scored.sort((a, b) => {

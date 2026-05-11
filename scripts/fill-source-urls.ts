@@ -14,6 +14,7 @@ import {
   normalizeTitleTokens,
   extractDdgResults,
   isFutureExhibition,
+  isAggregatorDomain,
   pickBestCandidate,
   appendParseLogLine,
   ENTITY_TYPE_ID,
@@ -36,7 +37,11 @@ function parseFlags(argv: string[]): CliFlags {
     dryRun: true,
     apply: false,
     limit: 0,
-    minConfidence: 0.75,
+    // Higher default: we have learned that 0.75 still lets aggregators
+    // through occasionally. Apply runs should be conservative — better
+    // to skip more than to write a wrong URL into CRM. Dry-run callers
+    // can lower this with --min-confidence=0.6 to inspect borderline hits.
+    minConfidence: 0.85,
     sleepMs: 1000,
   };
   for (const raw of argv.slice(2)) {
@@ -197,6 +202,7 @@ type ScanResult = {
     | "found"
     | "updated"
     | "skippedLowConfidence"
+    | "skippedAggregator"
     | "skippedNoResults"
     | "skippedError"
     | "dryRun";
@@ -256,6 +262,20 @@ async function processItem(
       confidence: 0,
       query: lastQuery,
       status: "skippedNoResults",
+    };
+  }
+  // Aggregators / directories / social / media are *never* written to CRM,
+  // regardless of their numeric score. Surface them in dry-run output so a
+  // human reviewer can decide whether to add them by hand, but treat the
+  // item itself as un-fillable here.
+  if (best.aggregator || isAggregatorDomain(best.domain)) {
+    return {
+      itemId: Number(item.id),
+      title,
+      chosenUrl: best.url,
+      confidence: best.score,
+      query: lastQuery,
+      status: "skippedAggregator",
     };
   }
   if (best.score < flags.minConfidence) {
@@ -391,6 +411,8 @@ async function main(): Promise<void> {
     skippedLowConfidence: results.filter(
       (r) => r.status === "skippedLowConfidence",
     ).length,
+    skippedAggregator: results.filter((r) => r.status === "skippedAggregator")
+      .length,
     skippedNoResults: results.filter((r) => r.status === "skippedNoResults")
       .length,
     errors: results.filter((r) => r.status === "skippedError").length,
