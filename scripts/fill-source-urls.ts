@@ -15,9 +15,11 @@ import {
   extractDdgResults,
   isFutureExhibition,
   isAggregatorDomain,
+  isAllowlistedDomain,
   pickBestCandidate,
   appendParseLogLine,
   ENTITY_TYPE_ID,
+  OFFICIAL_ALLOWLIST_DOMAINS,
   SOURCE_FIELD_KEYS,
   type Candidate,
 } from "./fill-source-urls/lib.ts";
@@ -30,6 +32,8 @@ type CliFlags = {
   minConfidence: number;
   since?: string;
   sleepMs: number;
+  allowUnlisted: boolean;
+  printAllowlist: boolean;
 };
 
 function parseFlags(argv: string[]): CliFlags {
@@ -43,6 +47,8 @@ function parseFlags(argv: string[]): CliFlags {
     // can lower this with --min-confidence=0.6 to inspect borderline hits.
     minConfidence: 0.85,
     sleepMs: 1000,
+    allowUnlisted: false,
+    printAllowlist: false,
   };
   for (const raw of argv.slice(2)) {
     if (raw === "--apply") {
@@ -53,6 +59,14 @@ function parseFlags(argv: string[]): CliFlags {
     if (raw === "--dry-run") {
       flags.dryRun = true;
       flags.apply = false;
+      continue;
+    }
+    if (raw === "--allow-unlisted") {
+      flags.allowUnlisted = true;
+      continue;
+    }
+    if (raw === "--print-allowlist") {
+      flags.printAllowlist = true;
       continue;
     }
     const eq = raw.indexOf("=");
@@ -203,9 +217,12 @@ type ScanResult = {
     | "updated"
     | "skippedLowConfidence"
     | "skippedAggregator"
+    | "skippedNotAllowlisted"
     | "skippedNoResults"
     | "skippedError"
     | "dryRun";
+  applyEligible?: boolean;
+  allowlisted?: boolean;
   note?: string;
 };
 
@@ -278,7 +295,11 @@ async function processItem(
       status: "skippedAggregator",
     };
   }
-  if (best.score < flags.minConfidence) {
+  const allowlisted = isAllowlistedDomain(best.domain);
+  const meetsScore = best.score >= flags.minConfidence;
+  const applyEligible = meetsScore && (allowlisted || flags.allowUnlisted);
+
+  if (!meetsScore) {
     return {
       itemId: Number(item.id),
       title,
@@ -286,6 +307,8 @@ async function processItem(
       confidence: best.score,
       query: lastQuery,
       status: "skippedLowConfidence",
+      allowlisted,
+      applyEligible: false,
     };
   }
 
@@ -297,6 +320,25 @@ async function processItem(
       confidence: best.score,
       query: lastQuery,
       status: "dryRun",
+      allowlisted,
+      applyEligible,
+      note: applyEligible ? undefined : "would skip in apply: not allowlisted",
+    };
+  }
+
+  // Apply mode: domain must be in the curated allowlist unless --allow-unlisted
+  // was passed. This is the production safety net — even high-scoring matches
+  // against unfamiliar domains should be reviewed by a human first.
+  if (!allowlisted && !flags.allowUnlisted) {
+    return {
+      itemId: Number(item.id),
+      title,
+      chosenUrl: best.url,
+      confidence: best.score,
+      query: lastQuery,
+      status: "skippedNotAllowlisted",
+      allowlisted: false,
+      applyEligible: false,
     };
   }
 
@@ -321,6 +363,8 @@ async function processItem(
       confidence: best.score,
       query: lastQuery,
       status: "updated",
+      allowlisted,
+      applyEligible: true,
     };
   } catch (err) {
     return {
@@ -330,6 +374,8 @@ async function processItem(
       confidence: best.score,
       query: lastQuery,
       status: "skippedError",
+      allowlisted,
+      applyEligible,
       note: err instanceof Error ? err.message : String(err),
     };
   }
@@ -345,6 +391,13 @@ function safeHost(url: string): string {
 
 async function main(): Promise<void> {
   const flags = parseFlags(process.argv);
+  if (flags.printAllowlist) {
+    console.log(
+      `[fill-source-urls] official allowlist (${OFFICIAL_ALLOWLIST_DOMAINS.length} entries):`,
+    );
+    for (const d of OFFICIAL_ALLOWLIST_DOMAINS) console.log(`  ${d}`);
+    return;
+  }
   if (!hasWebhook()) {
     console.error(
       "BITRIX_WEBHOOK_URL is not set. Aborting. (No secrets are printed.)",
@@ -357,7 +410,9 @@ async function main(): Promise<void> {
   console.log(
     `[fill-source-urls] mode=${flags.apply ? "APPLY" : "DRY-RUN"} today=${todayIso}` +
       ` minConfidence=${flags.minConfidence} limit=${flags.limit || "∞"}` +
-      ` sleepMs=${flags.sleepMs}${flags.since ? ` since=${flags.since}` : ""}`,
+      ` sleepMs=${flags.sleepMs}${flags.since ? ` since=${flags.since}` : ""}` +
+      ` allowlistEntries=${OFFICIAL_ALLOWLIST_DOMAINS.length}` +
+      ` allowUnlisted=${flags.allowUnlisted}`,
   );
 
   let items: CrmItem[];
@@ -392,9 +447,15 @@ async function main(): Promise<void> {
     const item = queue[i];
     const r = await processItem(item, flags, todayIso);
     results.push(r);
+    const allowFlag =
+      r.allowlisted === undefined
+        ? ""
+        : r.allowlisted
+          ? " allow=Y"
+          : " allow=N";
     const line =
       `  [${i + 1}/${queue.length}] id=${r.itemId} ` +
-      `${r.status.padEnd(22)} conf=${r.confidence.toFixed(2)} ` +
+      `${r.status.padEnd(22)} conf=${r.confidence.toFixed(2)}${allowFlag} ` +
       `${r.chosenUrl || "-"}  «${r.title}»` +
       (r.note ? `  (${r.note})` : "");
     console.log(line);
@@ -413,9 +474,19 @@ async function main(): Promise<void> {
     ).length,
     skippedAggregator: results.filter((r) => r.status === "skippedAggregator")
       .length,
+    skippedNotAllowlisted: results.filter(
+      (r) => r.status === "skippedNotAllowlisted",
+    ).length,
     skippedNoResults: results.filter((r) => r.status === "skippedNoResults")
       .length,
     errors: results.filter((r) => r.status === "skippedError").length,
+    // In dry-run: how many dry-run finds would actually be written in apply.
+    dryRunApplyEligible: results.filter(
+      (r) => r.status === "dryRun" && r.applyEligible === true,
+    ).length,
+    dryRunNotAllowlisted: results.filter(
+      (r) => r.status === "dryRun" && r.applyEligible === false,
+    ).length,
   };
   console.log(`\n[fill-source-urls] summary ${JSON.stringify(counts)}`);
 

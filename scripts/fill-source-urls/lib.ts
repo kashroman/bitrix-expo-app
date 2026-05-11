@@ -182,6 +182,61 @@ export function isAggregatorDomain(domain: string): boolean {
 }
 
 /**
+ * Conservative allowlist of known official event/organiser domains. In
+ * `--apply` mode, a candidate is only written to CRM if its domain matches
+ * an entry here (unless `--allow-unlisted` is passed). This is a hard safety
+ * net on top of the numeric score: even a high-confidence match against an
+ * unfamiliar domain should be reviewed by a human before going into CRM.
+ *
+ * Entries are matched against the candidate host both as exact match and as
+ * `*.<entry>` suffix, so `www.metobr-expo.ru` and `foo.metobr-expo.ru` both
+ * resolve to `metobr-expo.ru`.
+ *
+ * Keep this list small and curated. Expand only after a successful manual
+ * apply run; do not pre-populate speculatively.
+ */
+export const OFFICIAL_ALLOWLIST_DOMAINS: string[] = [
+  // Curated official organiser / event domains.
+  "metobr-expo.ru",
+  "helirussia.ru",
+  "vodexpo.ru",
+  "ddexpo.ru",
+  "gntexpo.ru",
+  "logistika-expo.ru",
+  "wire-tradefair.com",
+  "mipif.com",
+  "expoworldfood.com",
+  "gastreet.com",
+  "rosupack.com",
+  "mitt.ru",
+  "intercharm.ru",
+  "neftegaz-expo.ru",
+  "photonics-expo.ru",
+  "expocentr.ru",
+  "crocus-expo.ru",
+  "crocusexpo.ru",
+  "kazanforum.ru",
+  "cipr.ru",
+  "expoforum.ru",
+  "ite-expo.ru",
+  "ite-russia.ru",
+];
+
+export function isAllowlistedDomain(
+  domain: string,
+  extra: readonly string[] = [],
+): boolean {
+  if (!domain) return false;
+  const d = domain.toLowerCase().replace(/^www\./, "");
+  const list = [...OFFICIAL_ALLOWLIST_DOMAINS, ...extra];
+  for (const ok of list) {
+    const t = ok.toLowerCase();
+    if (d === t || d.endsWith(`.${t}`)) return true;
+  }
+  return false;
+}
+
+/**
  * Some hosts (e.g. accreditation/registration/ticket subdomains) are *related*
  * to an event but are not the official event homepage. Useful as a soft signal:
  * such URLs are kept but penalised, so a true main-domain candidate wins.

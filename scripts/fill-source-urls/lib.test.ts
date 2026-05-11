@@ -12,8 +12,10 @@ import {
   buildSearchQueries,
   extractDdgResults,
   isAggregatorDomain,
+  isAllowlistedDomain,
   isFutureExhibition,
   normalizeTitleTokens,
+  OFFICIAL_ALLOWLIST_DOMAINS,
   pickBestCandidate,
   resolveDdgHref,
   scoreCandidate,
@@ -342,6 +344,118 @@ test("resolveDdgHref unwraps DuckDuckGo redirect URLs", () => {
     "https://example.org/page",
   );
   assert.equal(resolveDdgHref(""), "");
+});
+
+test("isAllowlistedDomain matches curated official entries and their subdomains", () => {
+  for (const d of [
+    "metobr-expo.ru",
+    "helirussia.ru",
+    "vodexpo.ru",
+    "ddexpo.ru",
+    "gntexpo.ru",
+    "logistika-expo.ru",
+    "wire-tradefair.com",
+    "mipif.com",
+    "expoworldfood.com",
+    "gastreet.com",
+    "rosupack.com",
+    "mitt.ru",
+    "intercharm.ru",
+    "neftegaz-expo.ru",
+    "photonics-expo.ru",
+    "expocentr.ru",
+    "crocus-expo.ru",
+    "kazanforum.ru",
+    "cipr.ru",
+  ]) {
+    assert.ok(isAllowlistedDomain(d), `should allowlist ${d}`);
+    assert.ok(isAllowlistedDomain(`www.${d}`), `should strip www. for ${d}`);
+    assert.ok(isAllowlistedDomain(`foo.${d}`), `should allow subdomain of ${d}`);
+  }
+});
+
+test("isAllowlistedDomain rejects the problematic dry-run domains", () => {
+  // These are the real-world domains the dry-run kept surfacing that we
+  // explicitly do NOT want to write to CRM automatically.
+  for (const d of [
+    "burservis.ru",
+    "fabricators.ru",
+    "roscongress.ru",
+    "holodindustry.ru",
+    "dt.calscenter.ru",
+    "igrader.ru",
+    "kgs-ural.ru",
+    "profiminer.ru",
+    "regruss.ru",
+    "confs.ru",
+    "fontanka.ru",
+    "plastinfo.ru",
+  ]) {
+    assert.equal(isAllowlistedDomain(d), false, `should NOT allowlist ${d}`);
+  }
+});
+
+test("isAllowlistedDomain accepts the optional extra list", () => {
+  assert.equal(isAllowlistedDomain("burservis.ru"), false);
+  assert.equal(isAllowlistedDomain("burservis.ru", ["burservis.ru"]), true);
+  assert.equal(isAllowlistedDomain("foo.burservis.ru", ["burservis.ru"]), true);
+});
+
+test("OFFICIAL_ALLOWLIST_DOMAINS and AGGREGATOR_DOMAINS do not overlap", () => {
+  for (const d of OFFICIAL_ALLOWLIST_DOMAINS) {
+    assert.equal(
+      isAggregatorDomain(d),
+      false,
+      `${d} is both allowlisted and aggregator`,
+    );
+  }
+});
+
+test("non-allowlisted high-score candidate is correctly identified as ineligible", () => {
+  // Simulate a candidate that scores high (would pass the numeric threshold)
+  // but lives on a non-allowlisted domain. The score gate alone would let it
+  // through; the allowlist gate must block it from apply.
+  const tokens = normalizeTitleTokens("Холод-Индустрия 2026");
+  const score = scoreCandidate(
+    {
+      url: "https://holodindustry.ru/",
+      domain: "holodindustry.ru",
+      snippet: "Официальный сайт Холод-Индустрия 2026",
+      snippetTitle: "Холод-Индустрия 2026 — официальный сайт",
+    },
+    tokens,
+    2026,
+  );
+  // Whether or not the numeric score clears 0.85 here is irrelevant — the
+  // allowlist must still block it.
+  assert.equal(
+    isAllowlistedDomain("holodindustry.ru"),
+    false,
+    "holodindustry.ru must not be on the allowlist",
+  );
+  // Sanity: domain is non-aggregator too, so it would otherwise reach the
+  // allowlist gate in processItem.
+  assert.equal(isAggregatorDomain("holodindustry.ru"), false);
+  // Document the score for future debugging — no assertion on its value.
+  assert.ok(typeof score === "number");
+});
+
+test("allowlisted official domain + high score is apply-eligible", () => {
+  // Sanity: the existing real-world official cases score above 0.85 AND are
+  // on the allowlist, so the allowlist gate does not regress them.
+  const tokens = normalizeTitleTokens("ВодЭкспо 2026");
+  const score = scoreCandidate(
+    {
+      url: "https://vodexpo.ru/",
+      domain: "vodexpo.ru",
+      snippet: "Официальный сайт ВодЭкспо 2026",
+      snippetTitle: "ВодЭкспо 2026 — официальный сайт",
+    },
+    tokens,
+    2026,
+  );
+  assert.ok(score >= 0.85, `expected >=0.85, got ${score}`);
+  assert.equal(isAllowlistedDomain("vodexpo.ru"), true);
 });
 
 test("extractDdgResults parses anchors and snippets", () => {

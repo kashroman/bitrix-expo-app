@@ -137,18 +137,45 @@ Bitrix24, хранящийся в переменной окружения `BITRI
   обновляет CRM только если `confidence >= --min-confidence` (по умолчанию `0.75`).
 - В режиме `--apply` пишет `ufCrm8SourceUrl`, `ufCrm8LastChecked`, дописывает строку в
   `ufCrm8ParseLog` (последние 10 строк). Флаг verified не выставляется.
+- **Allowlist-gate в apply-режиме.** В `--apply` кандидат записывается в CRM
+  только если его домен входит в курируемый список официальных доменов
+  (`OFFICIAL_ALLOWLIST_DOMAINS` в `scripts/fill-source-urls/lib.ts`) **и**
+  его confidence ≥ `--min-confidence`. Кандидаты с высоким score, но
+  неизвестным доменом помечаются статусом `skippedNotAllowlisted` и не
+  записываются — их нужно проверить вручную и при необходимости расширить
+  allowlist. В `--dry-run` такие кандидаты по-прежнему выводятся, но
+  отмечаются `allow=N` и в сводке учитываются как `dryRunNotAllowlisted`.
+- Для разового ручного override доступен флаг `--allow-unlisted` (по
+  умолчанию `false`): он отключает allowlist-gate и разрешает писать любой
+  кандидат, прошедший score-порог. Использовать только после ручного
+  ревью результата dry-run.
 
-CLI-флаги: `--dry-run` (по умолчанию), `--apply`, `--limit=N`, `--min-confidence=0.75`,
-`--since=YYYY-MM-DD`, `--sleep-ms=1000`.
+CLI-флаги: `--dry-run` (по умолчанию), `--apply`, `--limit=N`,
+`--min-confidence=0.85`, `--since=YYYY-MM-DD`, `--sleep-ms=1000`,
+`--allow-unlisted` (по умолчанию выключено), `--print-allowlist`
+(показать текущий allowlist и выйти).
 
 Команды для Render Shell:
 
 ```sh
 # Просмотр кандидатов без записи в CRM
-npm run fill-source-urls -- --dry-run --limit=20
+npm run fill-source-urls -- --dry-run --limit=50
 
-# Применить обновления к CRM
-npm run fill-source-urls -- --apply --min-confidence=0.75
+# Первый прод-прогон: только allowlist-домены, безопасный апдейт
+npm run fill-source-urls -- --apply --limit=50
+
+# Если нужно (после ручного ревью) — записать unlisted-домены тоже
+npm run fill-source-urls -- --apply --limit=50 --allow-unlisted
 ```
 
-Юнит-тесты пайплайна оценки кандидатов: `npm test`.
+Рекомендуемый порядок для первого продового запуска:
+
+1. Сначала `--dry-run` — посмотреть, какие домены попадают в `dryRun`
+   и какие — в `dryRunNotAllowlisted`.
+2. Запустить `--apply` без `--allow-unlisted`: будут записаны только
+   домены из allowlist. Остальные останутся со статусом
+   `skippedNotAllowlisted` для ручного ревью.
+3. По результатам ревью — добавить проверенные домены в
+   `OFFICIAL_ALLOWLIST_DOMAINS` и повторить.
+
+Юнит-тесты пайплайна оценки кандидатов и allowlist: `npm test`.
