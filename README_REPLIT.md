@@ -121,3 +121,34 @@ npm run cron:weekly             # вручную запустить сценар
 - Автоматическое сохранение работает только по полям, которые Bitrix24 отдаёт как доступные и не read-only.
 - Серверная OAuth-сессия и хранение токенов не реализованы — серверные эндпоинты требуют `BITRIX_WEBHOOK_URL`. Клиентский путь (BX24 SDK в iframe) не затронут.
 - `placement.list` LEFT_MENU поддерживается не на всех редакциях Bitrix24; если placement отсутствует, кнопка из меню не появится — используйте `/calendar` или `/placement-menu` напрямую.
+
+## Скрипт `fill-source-urls`
+
+Серверный CLI для массового заполнения поля **Source URL** на будущих выставках
+(смарт-процесс `entityTypeId=1050`). Запускается на Render через webhook-токен
+Bitrix24, хранящийся в переменной окружения `BITRIX_WEBHOOK_URL` (значение
+секретное, в логи не печатается).
+
+Поведение:
+
+- Берёт только будущие выставки (`ufCrm8_1766066501630 >= сегодня`).
+- Не перезаписывает уже заполненный `ufCrm8SourceUrl`.
+- Ищет официальный сайт через DuckDuckGo HTML, оценивает кандидатов по доменам/токенам,
+  обновляет CRM только если `confidence >= --min-confidence` (по умолчанию `0.75`).
+- В режиме `--apply` пишет `ufCrm8SourceUrl`, `ufCrm8LastChecked`, дописывает строку в
+  `ufCrm8ParseLog` (последние 10 строк). Флаг verified не выставляется.
+
+CLI-флаги: `--dry-run` (по умолчанию), `--apply`, `--limit=N`, `--min-confidence=0.75`,
+`--since=YYYY-MM-DD`, `--sleep-ms=1000`.
+
+Команды для Render Shell:
+
+```sh
+# Просмотр кандидатов без записи в CRM
+npm run fill-source-urls -- --dry-run --limit=20
+
+# Применить обновления к CRM
+npm run fill-source-urls -- --apply --min-confidence=0.75
+```
+
+Юнит-тесты пайплайна оценки кандидатов: `npm test`.
