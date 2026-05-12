@@ -1,0 +1,35 @@
+.git
+.github
+.vscode
+.idea
+node_modules
+dist
+.vite
+
+# local databases (never bake these into an image)
+data.db
+data.db-shm
+data.db-wal
+data.db-journal
+
+# secrets / local env
+.env
+.env.*
+!.env.example
+
+# logs and OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# tests output / coverage
+coverage
+
+# editor / replit / render scratch
+.replit
+attached_assets
+
+# docs that don't need to ship in the image
+README_REPLIT.md
+CHANGELOG.md
+docs
