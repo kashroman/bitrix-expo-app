@@ -274,6 +274,7 @@ Non-secret, plain config. Safe to view/edit.
 | name                  | example value                                |
 | --------------------- | -------------------------------------------- |
 | `YC_DEPLOY_ENABLED`   | `true` (must be the literal string)          |
+| `YC_FOLDER_ID`        | `b1gxxxxxxxxxxxxxxxxx` (Yandex Cloud folder id — required so `yc` can resolve container/registry by name) |
 | `YC_REGISTRY_ID`      | `crp1ii5pjvvu0ghb60oh`                       |
 | `YC_CONTAINER_NAME`   | `bitrix-expo-app`                            |
 | `YC_SA_ID`            | `ajev3fjbvssv56apd7bt`                       |
@@ -304,6 +305,11 @@ Secrets so every deploy is reproducible.
 
 ## Troubleshooting
 
+- **`ERROR: can't resolve object by name without folder id`** during
+  `yc serverless container revision deploy` (or `container get`) — the
+  service-account session has no active folder. Set the repo Variable
+  `YC_FOLDER_ID`; the workflow runs `yc config set folder-id "$YC_FOLDER_ID"`
+  after auth and also passes `--folder-id` to the name-resolving commands.
 - **502 / cold start timeouts** — bump revision memory to 1024MB; cold
   Node + Vite-built bundle takes ~1–2 s.
 - **`/health` returns 503** — `ADMIN_JOB_TOKEN` is set but the inbound

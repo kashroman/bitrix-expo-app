@@ -11,6 +11,10 @@
 #
 # Required repo *Variables* (non-secret, plain config):
 #   - YC_DEPLOY_ENABLED      : must be the literal string "true" to enable
+#   - YC_FOLDER_ID           : Yandex Cloud folder id (required to resolve
+#                              container / registry names — without this,
+#                              `yc ... --container-name` fails with
+#                              "can't resolve object by name without folder id")
 #   - YC_REGISTRY_ID         : Yandex Container Registry id
 #   - YC_CONTAINER_NAME      : Serverless Container name (e.g. bitrix-expo-app)
 #   - YC_SA_ID               : service-account id used to run the container
@@ -78,11 +82,20 @@ jobs:
       - name: Authenticate yc CLI
         env:
           YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
+          YC_FOLDER_ID:           ${{ vars.YC_FOLDER_ID }}
         run: |
           umask 077
           printf '%s' "$YC_SA_JSON_CREDENTIALS" > /tmp/sa-key.json
           yc config set service-account-key /tmp/sa-key.json
           yc config set format json
+          # Yandex Cloud resolves `--container-name` / registry names against
+          # the active folder. Without this, `revision deploy` fails with
+          # "can't resolve object by name without folder id".
+          if [ -z "${YC_FOLDER_ID:-}" ]; then
+            echo "::error::YC_FOLDER_ID repository variable is not set" >&2
+            exit 1
+          fi
+          yc config set folder-id "$YC_FOLDER_ID"
 
       - name: Configure Docker for Yandex CR
         run: yc container registry configure-docker
@@ -106,6 +119,7 @@ jobs:
         env:
           NAME:               ${{ vars.YC_CONTAINER_NAME }}
           SA_ID:              ${{ vars.YC_SA_ID }}
+          YC_FOLDER_ID:       ${{ vars.YC_FOLDER_ID }}
           BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
           BITRIX_UF_ENTITY_ID: ${{ vars.BITRIX_UF_ENTITY_ID }}
           APP_BASE_URL:       ${{ vars.APP_BASE_URL }}
@@ -123,6 +137,7 @@ jobs:
           # the workflow YAML or in echoed command lines.
           args=(
             serverless container revision deploy
+            --folder-id        "$YC_FOLDER_ID"
             --container-name   "$NAME"
             --image            "$IMAGE"
             --cores            1
@@ -153,9 +168,10 @@ jobs:
 
       - name: Smoke-test /health
         env:
-          NAME: ${{ vars.YC_CONTAINER_NAME }}
+          NAME:         ${{ vars.YC_CONTAINER_NAME }}
+          YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
         run: |
-          URL=$(yc serverless container get "$NAME" | jq -r .url)
+          URL=$(yc serverless container get --folder-id "$YC_FOLDER_ID" "$NAME" | jq -r .url)
           echo "Container URL: $URL"
           curl -fsS --retry 5 --retry-delay 3 --retry-connrefused "$URL/health"
 
