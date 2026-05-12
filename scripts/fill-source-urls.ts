@@ -7,23 +7,17 @@
  *   npm run fill-source-urls -- --apply --min-confidence=0.75
  *
  * Defaults to dry-run unless --apply is passed.
+ *
+ * The job logic itself lives in server/lib/fillSourceUrls.ts so the same
+ * code path is shared with the protected /api/admin/fill-source-urls
+ * endpoint — keep risky write logic in one place.
  */
+import { hasWebhook } from "../server/lib/bitrix.ts";
 import {
-  scoreCandidate,
-  buildSearchQueries,
-  normalizeTitleTokens,
-  extractDdgResults,
-  isFutureExhibition,
-  isAggregatorDomain,
-  isAllowlistedDomain,
-  pickBestCandidate,
-  appendParseLogLine,
-  ENTITY_TYPE_ID,
-  OFFICIAL_ALLOWLIST_DOMAINS,
-  SOURCE_FIELD_KEYS,
-  type Candidate,
-} from "./fill-source-urls/lib.ts";
-import { bx, hasWebhook } from "../server/lib/bitrix.ts";
+  runFillSourceUrls,
+  FILL_SOURCE_URLS_DEFAULTS,
+} from "../server/lib/fillSourceUrls.ts";
+import { OFFICIAL_ALLOWLIST_DOMAINS } from "./fill-source-urls/lib.ts";
 
 type CliFlags = {
   dryRun: boolean;
@@ -41,12 +35,8 @@ function parseFlags(argv: string[]): CliFlags {
     dryRun: true,
     apply: false,
     limit: 0,
-    // Higher default: we have learned that 0.75 still lets aggregators
-    // through occasionally. Apply runs should be conservative — better
-    // to skip more than to write a wrong URL into CRM. Dry-run callers
-    // can lower this with --min-confidence=0.6 to inspect borderline hits.
-    minConfidence: 0.85,
-    sleepMs: 1000,
+    minConfidence: FILL_SOURCE_URLS_DEFAULTS.minConfidence,
+    sleepMs: FILL_SOURCE_URLS_DEFAULTS.sleepMs,
     allowUnlisted: false,
     printAllowlist: false,
   };
@@ -95,300 +85,6 @@ function parseFlags(argv: string[]): CliFlags {
   return flags;
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-type CrmItem = Record<string, any>;
-
-async function listFutureCandidates(
-  todayIso: string,
-  since: string | undefined,
-): Promise<CrmItem[]> {
-  const select = [
-    "id",
-    "title",
-    "ufCrm8_1766066484758",
-    "ufCrm8_1766066501630",
-    "ufCrm8SourceUrl",
-    "ufCrm8ParseLog",
-    "UF_CRM_8_SOURCE_URL",
-    "UF_CRM_8_PARSE_LOG",
-  ];
-  const filter: Record<string, unknown> = {
-    ">=ufCrm8_1766066501630": todayIso,
-  };
-  if (since) filter[">=ufCrm8_1766066484758"] = since;
-
-  const out: CrmItem[] = [];
-  let start = 0;
-  let safety = 0;
-  while (safety < 50) {
-    safety++;
-    const result = await bx<{ items?: CrmItem[]; next?: number }>(
-      "crm.item.list",
-      {
-        entityTypeId: ENTITY_TYPE_ID,
-        select,
-        filter,
-        order: { ufCrm8_1766066484758: "ASC" },
-        start,
-      },
-    );
-    const items = result?.items ?? [];
-    out.push(...items);
-    const next = result?.next;
-    if (typeof next === "number" && next > start) {
-      start = next;
-      continue;
-    }
-    break;
-  }
-  return out;
-}
-
-function sourceUrlOf(item: CrmItem): string {
-  for (const key of SOURCE_FIELD_KEYS.url) {
-    const v = item[key];
-    if (typeof v === "string" && v.trim()) return v.trim();
-  }
-  return "";
-}
-
-function parseLogOf(item: CrmItem): string {
-  for (const key of SOURCE_FIELD_KEYS.parseLog) {
-    const v = item[key];
-    if (typeof v === "string") return v;
-  }
-  return "";
-}
-
-const UA =
-  "Mozilla/5.0 (compatible; ExpoSourceFinder/1.0; +https://b24-5syfa7.bitrix24.ru)";
-
-async function ddgSearch(
-  query: string,
-  attempt = 1,
-): Promise<{ url: string; title: string; snippet: string }[]> {
-  const url = `https://duckduckgo.com/html/?q=${encodeURIComponent(query)}`;
-  try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 15000);
-    const res = await fetch(url, {
-      headers: {
-        "user-agent": UA,
-        accept: "text/html,application/xhtml+xml",
-        "accept-language": "ru,en;q=0.8",
-      },
-      signal: controller.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) {
-      if (res.status === 429 || res.status >= 500) {
-        throw new Error(`ddg status ${res.status}`);
-      }
-      return [];
-    }
-    const html = await res.text();
-    return extractDdgResults(html);
-  } catch (err) {
-    if (attempt < 2) {
-      await sleep(1500);
-      return ddgSearch(query, attempt + 1);
-    }
-    throw err;
-  }
-}
-
-function yearFromIso(iso: string | undefined | null): number | undefined {
-  if (!iso || typeof iso !== "string") return undefined;
-  const m = iso.match(/^(\d{4})/);
-  return m ? Number.parseInt(m[1], 10) : undefined;
-}
-
-type ScanResult = {
-  itemId: number;
-  title: string;
-  chosenUrl: string;
-  confidence: number;
-  query: string;
-  status:
-    | "found"
-    | "updated"
-    | "skippedLowConfidence"
-    | "skippedAggregator"
-    | "skippedNotAllowlisted"
-    | "skippedNoResults"
-    | "skippedError"
-    | "dryRun";
-  applyEligible?: boolean;
-  allowlisted?: boolean;
-  note?: string;
-};
-
-async function processItem(
-  item: CrmItem,
-  flags: CliFlags,
-  todayIso: string,
-): Promise<ScanResult> {
-  const title = String(item.title ?? "").trim();
-  const eventStart =
-    typeof item.ufCrm8_1766066484758 === "string"
-      ? item.ufCrm8_1766066484758
-      : undefined;
-  const year = yearFromIso(eventStart);
-  const tokens = normalizeTitleTokens(title);
-  const queries = buildSearchQueries(title, year);
-
-  const allCandidates: Candidate[] = [];
-  let lastQuery = queries[0] ?? title;
-  for (const q of queries) {
-    lastQuery = q;
-    let results: { url: string; title: string; snippet: string }[] = [];
-    try {
-      results = await ddgSearch(q);
-    } catch (err) {
-      return {
-        itemId: Number(item.id),
-        title,
-        chosenUrl: "",
-        confidence: 0,
-        query: q,
-        status: "skippedError",
-        note: err instanceof Error ? err.message : String(err),
-      };
-    }
-    for (const r of results) {
-      allCandidates.push({
-        url: r.url,
-        domain: safeHost(r.url),
-        snippet: r.snippet,
-        snippetTitle: r.title,
-      });
-    }
-    if (allCandidates.length >= 12) break;
-    await sleep(flags.sleepMs);
-  }
-
-  const best = pickBestCandidate(allCandidates, tokens, year);
-  if (!best) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: "",
-      confidence: 0,
-      query: lastQuery,
-      status: "skippedNoResults",
-    };
-  }
-  // Aggregators / directories / social / media are *never* written to CRM,
-  // regardless of their numeric score. Surface them in dry-run output so a
-  // human reviewer can decide whether to add them by hand, but treat the
-  // item itself as un-fillable here.
-  if (best.aggregator || isAggregatorDomain(best.domain)) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "skippedAggregator",
-    };
-  }
-  const allowlisted = isAllowlistedDomain(best.domain);
-  const meetsScore = best.score >= flags.minConfidence;
-  const applyEligible = meetsScore && (allowlisted || flags.allowUnlisted);
-
-  if (!meetsScore) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "skippedLowConfidence",
-      allowlisted,
-      applyEligible: false,
-    };
-  }
-
-  if (flags.dryRun) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "dryRun",
-      allowlisted,
-      applyEligible,
-      note: applyEligible ? undefined : "would skip in apply: not allowlisted",
-    };
-  }
-
-  // Apply mode: domain must be in the curated allowlist unless --allow-unlisted
-  // was passed. This is the production safety net — even high-scoring matches
-  // against unfamiliar domains should be reviewed by a human first.
-  if (!allowlisted && !flags.allowUnlisted) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "skippedNotAllowlisted",
-      allowlisted: false,
-      applyEligible: false,
-    };
-  }
-
-  const nowIso = new Date().toISOString();
-  const logLine = `${todayIso}: URL найден автоматически: ${best.url} (confidence ${best.score.toFixed(2)}, query ${lastQuery})`;
-  const newLog = appendParseLogLine(parseLogOf(item), logLine, 10);
-
-  try {
-    await bx("crm.item.update", {
-      entityTypeId: ENTITY_TYPE_ID,
-      id: Number(item.id),
-      fields: {
-        ufCrm8SourceUrl: best.url,
-        ufCrm8LastChecked: nowIso,
-        ufCrm8ParseLog: newLog,
-      },
-    });
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "updated",
-      allowlisted,
-      applyEligible: true,
-    };
-  } catch (err) {
-    return {
-      itemId: Number(item.id),
-      title,
-      chosenUrl: best.url,
-      confidence: best.score,
-      query: lastQuery,
-      status: "skippedError",
-      allowlisted,
-      applyEligible,
-      note: err instanceof Error ? err.message : String(err),
-    };
-  }
-}
-
-function safeHost(url: string): string {
-  try {
-    return new URL(url).host.toLowerCase().replace(/^www\./, "");
-  } catch {
-    return "";
-  }
-}
-
 async function main(): Promise<void> {
   const flags = parseFlags(process.argv);
   if (flags.printAllowlist) {
@@ -405,8 +101,7 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const now = new Date();
-  const todayIso = now.toISOString().slice(0, 10);
+  const todayIso = new Date().toISOString().slice(0, 10);
   console.log(
     `[fill-source-urls] mode=${flags.apply ? "APPLY" : "DRY-RUN"} today=${todayIso}` +
       ` minConfidence=${flags.minConfidence} limit=${flags.limit || "∞"}` +
@@ -415,38 +110,30 @@ async function main(): Promise<void> {
       ` allowUnlisted=${flags.allowUnlisted}`,
   );
 
-  let items: CrmItem[];
+  let summary;
   try {
-    items = await listFutureCandidates(todayIso, flags.since);
+    summary = await runFillSourceUrls({
+      dryRun: flags.dryRun,
+      limit: flags.limit,
+      minConfidence: flags.minConfidence,
+      since: flags.since,
+      sleepMs: flags.sleepMs,
+      allowUnlisted: flags.allowUnlisted,
+      todayIso,
+    });
   } catch (err) {
     console.error(
-      "Failed to list CRM items:",
+      "Failed to run fill job:",
       err instanceof Error ? err.message : err,
     );
     process.exit(2);
   }
 
-  const scanned = items.length;
-  const future = items.filter((it) =>
-    isFutureExhibition(
-      typeof it.ufCrm8_1766066501630 === "string"
-        ? it.ufCrm8_1766066501630
-        : null,
-      todayIso,
-    ),
-  );
-  const empty = future.filter((it) => !sourceUrlOf(it));
-  const queue = flags.limit > 0 ? empty.slice(0, flags.limit) : empty;
-
   console.log(
-    `[fill-source-urls] scanned=${scanned} future=${future.length} futureEmpty=${empty.length} queue=${queue.length}`,
+    `[fill-source-urls] scanned=${summary.scanned} future=${summary.future} futureEmpty=${summary.futureEmpty} queue=${summary.queue}`,
   );
-
-  const results: ScanResult[] = [];
-  for (let i = 0; i < queue.length; i++) {
-    const item = queue[i];
-    const r = await processItem(item, flags, todayIso);
-    results.push(r);
+  for (let i = 0; i < summary.results.length; i++) {
+    const r = summary.results[i];
     const allowFlag =
       r.allowlisted === undefined
         ? ""
@@ -454,45 +141,30 @@ async function main(): Promise<void> {
           ? " allow=Y"
           : " allow=N";
     const line =
-      `  [${i + 1}/${queue.length}] id=${r.itemId} ` +
+      `  [${i + 1}/${summary.results.length}] id=${r.itemId} ` +
       `${r.status.padEnd(22)} conf=${r.confidence.toFixed(2)}${allowFlag} ` +
       `${r.chosenUrl || "-"}  «${r.title}»` +
       (r.note ? `  (${r.note})` : "");
     console.log(line);
-    await sleep(flags.sleepMs);
   }
 
   const counts = {
-    scanned,
-    futureEmpty: empty.length,
-    found: results.filter((r) =>
-      ["found", "updated", "dryRun"].includes(r.status),
-    ).length,
-    updated: results.filter((r) => r.status === "updated").length,
-    skippedLowConfidence: results.filter(
-      (r) => r.status === "skippedLowConfidence",
-    ).length,
-    skippedAggregator: results.filter((r) => r.status === "skippedAggregator")
-      .length,
-    skippedNotAllowlisted: results.filter(
-      (r) => r.status === "skippedNotAllowlisted",
-    ).length,
-    skippedNoResults: results.filter((r) => r.status === "skippedNoResults")
-      .length,
-    errors: results.filter((r) => r.status === "skippedError").length,
-    // In dry-run: how many dry-run finds would actually be written in apply.
-    dryRunApplyEligible: results.filter(
-      (r) => r.status === "dryRun" && r.applyEligible === true,
-    ).length,
-    dryRunNotAllowlisted: results.filter(
-      (r) => r.status === "dryRun" && r.applyEligible === false,
-    ).length,
+    scanned: summary.scanned,
+    futureEmpty: summary.futureEmpty,
+    found: summary.found,
+    updated: summary.updated,
+    skippedLowConfidence: summary.skippedLowConfidence,
+    skippedAggregator: summary.skippedAggregator,
+    skippedNotAllowlisted: summary.skippedNotAllowlisted,
+    skippedNoResults: summary.skippedNoResults,
+    errors: summary.errors,
+    dryRunApplyEligible: summary.dryRunApplyEligible,
+    dryRunNotAllowlisted: summary.dryRunNotAllowlisted,
   };
   console.log(`\n[fill-source-urls] summary ${JSON.stringify(counts)}`);
 
-  const top = results.slice(0, 50);
   console.log("\n[fill-source-urls] top per-item:");
-  for (const r of top) {
+  for (const r of summary.results.slice(0, 50)) {
     console.log(
       `  id=${r.itemId} status=${r.status} conf=${r.confidence.toFixed(2)} ` +
         `url=${r.chosenUrl || "-"} title=«${r.title}»`,

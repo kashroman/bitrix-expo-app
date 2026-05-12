@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation } from "@tanstack/react-query";
-import { Loader2, Wand2, FileText, Globe, CalendarDays } from "lucide-react";
+import { Loader2, Wand2, FileText, Globe, CalendarDays, ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +10,7 @@ import { Shell, PageTitle } from "./shell";
 import { apiRequest } from "@/lib/queryClient";
 import PlacementListPage from "./placement-list";
 import CalendarPage from "./calendar";
+import { FillSourceUrlsPanel } from "./admin-fill-source-urls";
 
 export default function PlacementMenuPage() {
   return (
@@ -25,6 +26,7 @@ export default function PlacementMenuPage() {
           <TabsTrigger value="link" data-testid="tab-link"><Globe className="mr-2 h-4 w-4" />По ссылке</TabsTrigger>
           <TabsTrigger value="manual" data-testid="tab-manual"><FileText className="mr-2 h-4 w-4" />Вручную</TabsTrigger>
           <TabsTrigger value="recheck" data-testid="tab-recheck"><Wand2 className="mr-2 h-4 w-4" />Автопроверка</TabsTrigger>
+          <TabsTrigger value="admin-fill" data-testid="tab-admin-fill"><ShieldCheck className="mr-2 h-4 w-4" />Заполнение URL</TabsTrigger>
         </TabsList>
         <TabsContent value="calendar">
           {/* Reuse the calendar page body — embedded mode skips the outer
@@ -40,6 +42,7 @@ export default function PlacementMenuPage() {
         </TabsContent>
         <TabsContent value="manual"><ManualForm /></TabsContent>
         <TabsContent value="recheck"><RecheckAllPanel /></TabsContent>
+        <TabsContent value="admin-fill"><FillSourceUrlsPanel /></TabsContent>
       </Tabs>
     </Shell>
   );

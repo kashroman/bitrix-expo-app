@@ -179,3 +179,54 @@ npm run fill-source-urls -- --apply --limit=50 --allow-unlisted
    `OFFICIAL_ALLOWLIST_DOMAINS` и повторить.
 
 Юнит-тесты пайплайна оценки кандидатов и allowlist: `npm test`.
+
+### Запуск из приложения (без Render Shell)
+
+В placement-menu есть вкладка **«Заполнение URL»** — UI поверх защищённого
+эндпоинта `POST /api/admin/fill-source-urls`. Поведение совпадает с CLI: тот
+же сервисный модуль (`server/lib/fillSourceUrls.ts`), те же allowlist-/
+aggregator-гейты, по умолчанию `dryRun=true`, существующий `Source URL`
+никогда не перезаписывается.
+
+Контракт эндпоинта:
+
+```http
+POST /api/admin/fill-source-urls
+x-admin-token: <ADMIN_JOB_TOKEN>          # или Authorization: Bearer <token>
+Content-Type: application/json
+
+{ "dryRun": true, "limit": 20 }
+```
+
+Ответы:
+
+- `200` — JSON с полем `summary` (`scanned`, `future`, `futureEmpty`, `queue`,
+  `found`, `updated`, `skippedLowConfidence`, `skippedAggregator`,
+  `skippedNotAllowlisted`, `skippedNoResults`, `errors`,
+  `dryRunApplyEligible`, `dryRunNotAllowlisted`) и массивом `results`.
+- `401` — отсутствует `x-admin-token`/`Authorization`.
+- `403` — токен не совпадает с `ADMIN_JOB_TOKEN`.
+- `503` — `ADMIN_JOB_TOKEN` не задан в env: эндпоинт отключён, UI-кнопка
+  не активируется.
+- `503` — `BITRIX_WEBHOOK_URL` не задан.
+
+UI-флоу: сначала ввести token (не сохраняется в браузере) и `limit`
+(по умолчанию 20), нажать **«Dry-run заполнения URL»** → проверить таблицу
+кандидатов → только тогда становится активной кнопка **«Apply (пишет в
+Bitrix24)»**, которая требует дополнительного подтверждения перед записью.
+
+### Настройка `ADMIN_JOB_TOKEN` в Render
+
+Без `ADMIN_JOB_TOKEN` эндпоинт возвращает `503 admin-disabled` и UI-кнопка
+не работает. Чтобы включить:
+
+1. Сгенерировать длинный случайный секрет, напр.
+   `openssl rand -hex 32`.
+2. В Render → сервис → **Environment** → **Add Environment Variable**
+   вручную добавить ключ `ADMIN_JOB_TOKEN` со значением секрета.
+3. Сохранить, дождаться авто-redeploy.
+4. Передать значение токена пользователю, который будет открывать
+   `/placement-menu` → вкладку «Заполнение URL» (он не сохраняется в
+   приложении, вводится в поле каждый раз).
+
+Токен в логах не печатается; сравнение — constant-time.

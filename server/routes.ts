@@ -27,6 +27,17 @@ import {
   maybeFillCalculated,
   timelineComment,
 } from "./lib/smartEnrichment.js";
+import { checkAdminToken, adminAuthEnabled } from "./lib/adminAuth.js";
+import { runFillSourceUrls } from "./lib/fillSourceUrls.js";
+
+const fillSourceUrlsBody = z.object({
+  dryRun: z.boolean().optional(),
+  limit: z.number().int().min(0).max(500).optional(),
+  minConfidence: z.number().min(0).max(1).optional(),
+  allowUnlisted: z.boolean().optional(),
+  sleepMs: z.number().int().min(0).max(10_000).optional(),
+  since: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
 
 const urlBody = z.object({ url: z.string().url() });
 const confirmBody = z.object({
@@ -239,6 +250,55 @@ export async function registerRoutes(
       return bitrixError(res, err);
     }
   });
+
+  app.get("/api/admin/status", (req: Request, res: Response) => {
+    res.json({
+      adminAuthEnabled: adminAuthEnabled(),
+      hasWebhook: hasWebhook(),
+    });
+  });
+
+  app.post(
+    "/api/admin/fill-source-urls",
+    async (req: Request, res: Response) => {
+      const auth = checkAdminToken(req);
+      if (!auth.ok) {
+        return res.status(auth.status).json({
+          error: auth.status === 503 ? "admin-disabled" : "unauthorized",
+          message: auth.reason,
+        });
+      }
+      const parsed = fillSourceUrlsBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "bad-request",
+          message: parsed.error.message,
+        });
+      }
+      if (!hasWebhook()) {
+        return res.status(503).json({
+          error: "webhook-required",
+          message: "BITRIX_WEBHOOK_URL is not configured. See README.",
+        });
+      }
+      // dryRun default is true at the service level, but we force the default
+      // here as well so the route contract is explicit.
+      const dryRun = parsed.data.dryRun !== false;
+      try {
+        const summary = await runFillSourceUrls({
+          dryRun,
+          limit: parsed.data.limit,
+          minConfidence: parsed.data.minConfidence,
+          allowUnlisted: parsed.data.allowUnlisted,
+          sleepMs: parsed.data.sleepMs,
+          since: parsed.data.since,
+        });
+        return res.json(summary);
+      } catch (err) {
+        return bitrixError(res, err);
+      }
+    },
+  );
 
   return httpServer;
 }
