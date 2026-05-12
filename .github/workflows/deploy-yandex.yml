@@ -3,15 +3,28 @@
 # This workflow is intentionally gated on `workflow_dispatch` so it never
 # runs automatically. The existing Render auto-deploy is unaffected.
 #
-# Required repo secrets (add only when ready to cut over to Yandex Cloud):
-#   - YC_SA_JSON_CREDENTIALS : service-account key JSON
+# Required repo *Secrets* (sensitive — masked by GitHub):
+#   - YC_SA_JSON_CREDENTIALS : service-account key JSON (for yc CLI auth)
+#   - BITRIX_WEBHOOK_URL     : full inbound webhook URL
+#   - ADMIN_JOB_TOKEN        : long random secret authorising /api/admin/*
+#   - CRON_REPORT_CHAT_ID    : optional, only when CRON_REPORT_CHANNEL=chat
+#
+# Required repo *Variables* (non-secret, plain config):
+#   - YC_DEPLOY_ENABLED      : must be the literal string "true" to enable
 #   - YC_REGISTRY_ID         : Yandex Container Registry id
 #   - YC_CONTAINER_NAME      : Serverless Container name (e.g. bitrix-expo-app)
 #   - YC_SA_ID               : service-account id used to run the container
+#   - BITRIX_PORTAL          : e.g. b24-5syfa7.bitrix24.ru
+#   - BITRIX_UF_ENTITY_ID    : e.g. CRM_8
+#   - APP_BASE_URL           : e.g. https://<id>.containers.yandexcloud.net
+#   - PARSE_RATE_LIMIT_MS    : e.g. 1000
+#   - CRON_REPORT_CHANNEL    : personal | chat
+#   - OWNER_USER_ID          : e.g. 1
 #
-# Runtime application secrets (BITRIX_WEBHOOK_URL, ADMIN_JOB_TOKEN,
-# CRON_REPORT_CHAT_ID, …) live in the Yandex Cloud console / Lockbox and
-# are NEVER referenced by this workflow.
+# IMPORTANT: Yandex Serverless Containers *fully replace* the revision env
+# on every deploy. Anything not listed in `--environment` / `--secret` below
+# disappears. Therefore every variable the app needs at runtime MUST be
+# passed here. See docs/yandex-cloud.md for the full list.
 
 name: deploy-yandex (manual)
 
@@ -29,8 +42,8 @@ permissions:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    # Hard guard: refuse to run unless the YC secrets are present.
-    # Prevents accidental enablement before secrets are configured.
+    # Hard guard: refuse to run unless explicitly enabled via repo variable.
+    # Prevents accidental enablement before secrets/vars are configured.
     if: ${{ vars.YC_DEPLOY_ENABLED == 'true' }}
     steps:
       - name: Checkout
@@ -76,8 +89,8 @@ jobs:
 
       - name: Build & push image
         env:
-          REGISTRY_ID: ${{ secrets.YC_REGISTRY_ID }}
-          NAME:        ${{ secrets.YC_CONTAINER_NAME }}
+          REGISTRY_ID: ${{ vars.YC_REGISTRY_ID }}
+          NAME:        ${{ vars.YC_CONTAINER_NAME }}
           TAG:         ${{ steps.tag.outputs.tag }}
         run: |
           IMAGE="cr.yandex/${REGISTRY_ID}/${NAME}:${TAG}"
@@ -86,31 +99,63 @@ jobs:
           echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
       - name: Deploy new revision
+        # Secrets are read into env (GitHub masks them in logs); they are
+        # passed to `yc` via an args array, never echoed or interpolated
+        # into a printable command line. Yandex replaces the revision env
+        # on every deploy, so all required vars MUST be set here.
         env:
-          NAME:  ${{ secrets.YC_CONTAINER_NAME }}
-          SA_ID: ${{ secrets.YC_SA_ID }}
+          NAME:               ${{ vars.YC_CONTAINER_NAME }}
+          SA_ID:              ${{ vars.YC_SA_ID }}
+          BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
+          BITRIX_UF_ENTITY_ID: ${{ vars.BITRIX_UF_ENTITY_ID }}
+          APP_BASE_URL:       ${{ vars.APP_BASE_URL }}
+          PARSE_RATE_LIMIT_MS: ${{ vars.PARSE_RATE_LIMIT_MS }}
+          CRON_REPORT_CHANNEL: ${{ vars.CRON_REPORT_CHANNEL }}
+          OWNER_USER_ID:      ${{ vars.OWNER_USER_ID }}
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+          ADMIN_JOB_TOKEN:    ${{ secrets.ADMIN_JOB_TOKEN }}
+          CRON_REPORT_CHAT_ID: ${{ secrets.CRON_REPORT_CHAT_ID }}
         run: |
-          # Only non-secret env vars are passed here. Application secrets
-          # (BITRIX_WEBHOOK_URL, ADMIN_JOB_TOKEN, …) MUST stay in the
-          # Yandex Cloud console / Lockbox.
-          yc serverless container revision deploy \
-            --container-name "$NAME" \
-            --image "$IMAGE" \
-            --cores 1 \
-            --memory 512MB \
-            --concurrency 8 \
-            --execution-timeout 60s \
-            --service-account-id "$SA_ID" \
-            --environment NODE_ENV=production \
-            --environment BITRIX_PORTAL=b24-5syfa7.bitrix24.ru \
-            --environment BITRIX_UF_ENTITY_ID=CRM_8 \
-            --environment PARSE_RATE_LIMIT_MS=1000 \
-            --environment CRON_REPORT_CHANNEL=personal \
-            --environment OWNER_USER_ID=1
+          set -euo pipefail
+
+          # Build args incrementally. Secrets are referenced via shell
+          # parameter expansion ("$VAR") so their values never appear in
+          # the workflow YAML or in echoed command lines.
+          args=(
+            serverless container revision deploy
+            --container-name   "$NAME"
+            --image            "$IMAGE"
+            --cores            1
+            --memory           512MB
+            --concurrency      8
+            --execution-timeout 60s
+            --service-account-id "$SA_ID"
+            --environment NODE_ENV=production
+            --environment "BITRIX_PORTAL=$BITRIX_PORTAL"
+            --environment "BITRIX_UF_ENTITY_ID=$BITRIX_UF_ENTITY_ID"
+            --environment "APP_BASE_URL=$APP_BASE_URL"
+            --environment "PARSE_RATE_LIMIT_MS=$PARSE_RATE_LIMIT_MS"
+            --environment "CRON_REPORT_CHANNEL=$CRON_REPORT_CHANNEL"
+            --environment "OWNER_USER_ID=$OWNER_USER_ID"
+            --environment "BITRIX_WEBHOOK_URL=$BITRIX_WEBHOOK_URL"
+            --environment "ADMIN_JOB_TOKEN=$ADMIN_JOB_TOKEN"
+          )
+
+          # Optional: only forward chat id when actually configured.
+          if [ -n "${CRON_REPORT_CHAT_ID:-}" ]; then
+            args+=(--environment "CRON_REPORT_CHAT_ID=$CRON_REPORT_CHAT_ID")
+          fi
+
+          # Disable shell tracing for the actual invocation as a belt-and-
+          # braces measure on top of GitHub's secret masking.
+          set +x
+          yc "${args[@]}"
 
       - name: Smoke-test /health
+        env:
+          NAME: ${{ vars.YC_CONTAINER_NAME }}
         run: |
-          URL=$(yc serverless container get "${{ secrets.YC_CONTAINER_NAME }}" | jq -r .url)
+          URL=$(yc serverless container get "$NAME" | jq -r .url)
           echo "Container URL: $URL"
           curl -fsS --retry 5 --retry-delay 3 --retry-connrefused "$URL/health"
 

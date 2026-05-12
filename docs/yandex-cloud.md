@@ -102,6 +102,12 @@ Pick conservative defaults for the first revision:
 
 ## 5. Deploy a revision
 
+> **Heads-up.** Yandex Serverless Containers *replace* the entire env on
+> every revision deploy. Every variable the app reads at runtime — both
+> non-secret config and secrets — has to be passed in this single call.
+> For the CI path, see [§ GitHub Actions](#github-actions); the workflow
+> wires everything from GitHub Secrets/Variables for you.
+
 ```bash
 yc serverless container revision deploy \
   --container-name "${YC_CONTAINER_NAME}" \
@@ -117,13 +123,17 @@ yc serverless container revision deploy \
   --environment APP_BASE_URL=https://<container-id>.containers.yandexcloud.net \
   --environment PARSE_RATE_LIMIT_MS=1000 \
   --environment CRON_REPORT_CHANNEL=personal \
-  --environment OWNER_USER_ID=1
+  --environment OWNER_USER_ID=1 \
+  --environment "BITRIX_WEBHOOK_URL=${BITRIX_WEBHOOK_URL}" \
+  --environment "ADMIN_JOB_TOKEN=${ADMIN_JOB_TOKEN}"
+  # add --environment "CRON_REPORT_CHAT_ID=${CRON_REPORT_CHAT_ID}" only
+  # when CRON_REPORT_CHANNEL=chat
 ```
 
-Then set the **secret** env vars from the Yandex Cloud console
-(`Serverless Containers → <container> → Edit revision → Environment
-variables`). Do **not** put real secrets on the CLI history or in a file
-under version control.
+For manual one-off deploys, export the secret values into your shell
+beforehand (`export BITRIX_WEBHOOK_URL=…`) so they never appear in your
+shell history as literals. For tighter hygiene, store them in **Yandex
+Lockbox** and bind via `--secret environment-variable=…` instead.
 
 Secrets to add manually (matches the keys in `.env.example`):
 
@@ -245,19 +255,50 @@ Secret (set manually in console / Lockbox; **never** commit):
 A manual deploy workflow is included at
 `.github/workflows/deploy-yandex.yml`. It is **gated on
 `workflow_dispatch`** so it never runs on push and will not interfere with
-the existing Render auto-deploy.
+the existing Render auto-deploy. It is additionally gated on the repo
+variable `YC_DEPLOY_ENABLED == 'true'` — until that flag is set, every
+run is a no-op.
 
-To enable it later, add these repository secrets:
+> **Important.** Yandex Serverless Containers fully **replace** the
+> revision environment on every deploy. Any env var that is not listed
+> in the workflow's `yc serverless container revision deploy` call will
+> be lost. Because of this, both the non-secret and the secret runtime
+> env vars must be wired through GitHub. The workflow reads secrets via
+> `${{ secrets.* }}` (which GitHub masks in logs) and passes them to
+> `yc` through a shell args array — they are never echoed or printed.
 
-- `YC_SA_JSON_CREDENTIALS` — service-account key JSON (from
-  `yc iam key create --service-account-name <sa>`)
-- `YC_REGISTRY_ID`        — Yandex Container Registry id
-- `YC_CONTAINER_NAME`     — `bitrix-expo-app`
-- `YC_SA_ID`              — service-account id used to run the container
+### Repository **Variables** (Settings → Secrets and variables → Actions → Variables)
 
-The workflow only **builds, pushes and deploys an image**. Runtime secrets
-(`BITRIX_WEBHOOK_URL`, `ADMIN_JOB_TOKEN`, …) stay in the Yandex Cloud
-console — the workflow never reads or echoes them.
+Non-secret, plain config. Safe to view/edit.
+
+| name                  | example value                                |
+| --------------------- | -------------------------------------------- |
+| `YC_DEPLOY_ENABLED`   | `true` (must be the literal string)          |
+| `YC_REGISTRY_ID`      | `crp1ii5pjvvu0ghb60oh`                       |
+| `YC_CONTAINER_NAME`   | `bitrix-expo-app`                            |
+| `YC_SA_ID`            | `ajev3fjbvssv56apd7bt`                       |
+| `BITRIX_PORTAL`       | `b24-5syfa7.bitrix24.ru`                     |
+| `BITRIX_UF_ENTITY_ID` | `CRM_8`                                      |
+| `APP_BASE_URL`        | `https://bba8ln220jfloq5251dv.containers.yandexcloud.net` |
+| `PARSE_RATE_LIMIT_MS` | `1000`                                       |
+| `CRON_REPORT_CHANNEL` | `personal`                                   |
+| `OWNER_USER_ID`       | `1`                                          |
+
+### Repository **Secrets** (Settings → Secrets and variables → Actions → Secrets)
+
+Sensitive — masked by GitHub in logs and never exposed in the workflow YAML.
+
+| name                     | source                                                 |
+| ------------------------ | ------------------------------------------------------ |
+| `YC_SA_JSON_CREDENTIALS` | `yc iam key create --service-account-name <sa>` JSON   |
+| `BITRIX_WEBHOOK_URL`     | Bitrix24 → Developer resources → Inbound webhook URL   |
+| `ADMIN_JOB_TOKEN`        | `openssl rand -hex 32`                                 |
+| `CRON_REPORT_CHAT_ID`    | *Optional.* Only when `CRON_REPORT_CHANNEL=chat`       |
+
+The workflow **builds, pushes and deploys** the image, and assembles the
+full revision env from these Variables and Secrets. Runtime app secrets
+are no longer set in the Yandex Cloud console — they live in GitHub
+Secrets so every deploy is reproducible.
 
 ---
 
