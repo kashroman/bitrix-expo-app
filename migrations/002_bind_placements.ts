@@ -18,6 +18,15 @@
  *   npm run rebind-placements                     # dry-run with stale cleanup
  *   npm run rebind-placements -- --apply          # cleanup stale + bind targets
  *   npm run bind-placements -- --check-fields     # also list UF status
+ *
+ *   # No-browser fallback when placement.get/list is unavailable: unbind the
+ *   # exact handlers we'd have produced under a known-stale base, then bind
+ *   # APP_BASE_URL. Tolerates "not found" / already-unbound responses.
+ *   STALE_BASE_URL=https://calendar-interpro-app.onrender.com \
+ *     npm run rebind-placements -- --apply
+ *   # or:
+ *   npm run rebind-placements -- --apply \
+ *     --stale-base-url=https://calendar-interpro-app.onrender.com
  */
 
 import "dotenv/config";
@@ -35,6 +44,28 @@ function getAppBase(): string {
   const raw = (process.env.APP_BASE_URL ?? "").trim();
   const base = raw || "https://calendar-interpro-app.onrender.com";
   return base.replace(/\/+$/, "");
+}
+
+function readCliFlag(prefix: string): string | undefined {
+  const hit = process.argv.find((a) => a.startsWith(prefix));
+  if (!hit) return undefined;
+  return hit.slice(prefix.length);
+}
+
+/**
+ * Optional "stale" base URL used for an exact-handler unbind fallback when
+ * `placement.get/list` is unavailable via the current webhook. Combined with
+ * the same managed routes, it lets us unbind known-stale handlers (e.g. the
+ * old Render URL) without needing to enumerate registrations first.
+ *
+ * Returns the trimmed, trailing-slash-stripped value, or "" if not provided.
+ */
+function getStaleBase(): string {
+  const cli = readCliFlag("--stale-base-url=");
+  const env = (process.env.STALE_BASE_URL ?? "").trim();
+  const raw = (cli ?? env ?? "").trim();
+  if (!raw) return "";
+  return raw.replace(/\/+$/, "");
 }
 
 function buildTargets(appBase: string): Target[] {
@@ -191,12 +222,15 @@ async function main() {
   const cleanupStale = process.argv.includes("--cleanup-stale");
   const appBase = getAppBase();
   const appHost = safeHost(appBase);
+  const staleBase = getStaleBase();
+  const staleHost = staleBase ? safeHost(staleBase) : "";
   const targets = buildTargets(appBase);
   const managed = managedKeys(targets);
 
   console.log(
     `[bind] appBase=${appBase} host=${appHost} entityTypeId=${ENTITY_TYPE_ID} ` +
-      `dryRun=${dryRun} cleanupStale=${cleanupStale}`,
+      `dryRun=${dryRun} cleanupStale=${cleanupStale}` +
+      (staleBase ? ` staleHost=${staleHost}` : ""),
   );
   console.log(`[bind] planned ${targets.length} handler(s):`);
   for (const t of targets) {
@@ -210,8 +244,9 @@ async function main() {
     registered = await listRegistered();
   }
 
-  type StalePlan = { placement: string; handler: string; host: string; path: string };
+  type StalePlan = { placement: string; handler: string; host: string; path: string; source: "scan" | "fallback" };
   const stalePlan: StalePlan[] = [];
+  const seenKey = new Set<string>();
   if (cleanupStale) {
     if (!registered) {
       console.warn(
@@ -229,12 +264,43 @@ async function main() {
         if (!managed.has(`${placement}|${path}`)) continue;
         // Same host as APP_BASE_URL → already correct, skip.
         if (host && host === appHost) continue;
-        stalePlan.push({ placement, handler, host, path });
+        stalePlan.push({ placement, handler, host, path, source: "scan" });
+        seenKey.add(`${placement}|${handler}`);
       }
-      console.log(`[bind] cleanup-stale: ${stalePlan.length} handler(s) to unbind`);
-      for (const s of stalePlan) {
-        console.log(`  - UNBIND ${s.placement} host=${s.host} path=${s.path}`);
+    }
+
+    // Fallback: when STALE_BASE_URL is provided, compute the exact handlers
+    // we'd have generated under that base for the same managed routes and
+    // queue them for unbind — even when placement.get/list is unavailable,
+    // since placement.unbind only needs (PLACEMENT, HANDLER) and tolerates
+    // "not found" responses (treated as already-unbound below).
+    if (staleBase) {
+      if (staleHost && staleHost === appHost) {
+        console.log(
+          "[bind] cleanup-stale: stale-base-url host matches appBase host; skipping fallback",
+        );
+      } else {
+        for (const t of targets) {
+          const handler = `${staleBase}${t.route}`;
+          const key = `${t.placement}|${handler}`;
+          if (seenKey.has(key)) continue;
+          stalePlan.push({
+            placement: t.placement,
+            handler,
+            host: staleHost,
+            path: t.route,
+            source: "fallback",
+          });
+          seenKey.add(key);
+        }
       }
+    }
+
+    console.log(`[bind] cleanup-stale: ${stalePlan.length} handler(s) to unbind`);
+    for (const s of stalePlan) {
+      console.log(
+        `  - UNBIND ${s.placement} host=${s.host} path=${s.path} (${s.source})`,
+      );
     }
   }
 
@@ -256,15 +322,21 @@ async function main() {
     try {
       await bx("placement.unbind", { PLACEMENT: s.placement, HANDLER: s.handler });
       staleUnbound++;
-      console.log(`[bind] STALE UNBOUND ${s.placement} host=${s.host} path=${s.path}`);
+      console.log(
+        `[bind] STALE UNBOUND ${s.placement} host=${s.host} path=${s.path} (${s.source})`,
+      );
     } catch (err) {
       if (isNotFoundError(err)) {
-        console.log(`[bind] STALE GONE     ${s.placement} host=${s.host} path=${s.path}`);
+        console.log(
+          `[bind] STALE GONE     ${s.placement} host=${s.host} path=${s.path} (${s.source})`,
+        );
         continue;
       }
       staleFailed++;
       const msg = err instanceof Error ? err.message : String(err);
-      console.warn(`[bind] STALE FAIL     ${s.placement} host=${s.host} path=${s.path}: ${msg}`);
+      console.warn(
+        `[bind] STALE FAIL     ${s.placement} host=${s.host} path=${s.path} (${s.source}): ${msg}`,
+      );
     }
   }
 

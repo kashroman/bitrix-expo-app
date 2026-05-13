@@ -204,20 +204,44 @@ Only do this once steps 1–7 are green:
 
    1. Go to **Actions → rebind-placements (manual) → Run workflow**.
    2. Leave `mode` on `dry-run` for the first run, and leave `app_base_url`
-      empty to use `vars.APP_BASE_URL`.
-   3. Review the plan in the job log.
+      empty to use `vars.APP_BASE_URL`. The `stale_base_url` input
+      defaults to the previous Render URL
+      (`https://calendar-interpro-app.onrender.com`) — leave it as-is for
+      the Render → Yandex cut-over, or blank it out for portals that never
+      ran on Render.
+   3. Review the plan in the job log. With `stale_base_url` set, you'll see
+      planned `UNBIND ... (fallback)` lines for the 7 managed placement +
+      route pairs under the stale host, followed by the planned binds under
+      `APP_BASE_URL`.
    4. Re-run with `mode = apply` once the plan looks right.
+
+   **Why `stale_base_url`?** Some inbound webhooks don't expose
+   `placement.get` / `placement.list`. When that happens, the script logs
+   `cleanup-stale: placement.get/list unavailable via this webhook; skipping
+   stale scan.` and the scan can't see the old handler to unbind it — which
+   would leave the Render and Yandex handlers double-bound. Setting
+   `stale_base_url` makes the script compute the exact handlers it *would
+   have* generated under that base for the same 7 managed routes and call
+   `placement.unbind` for each (tolerating "not found" responses), so the
+   cut-over still works without `placement.list`.
 
    For local runs (only when needed):
 
    ```bash
-   # 1) Preview the plan (no API writes):
+   # 1) Preview the plan (no API writes). STALE_BASE_URL is optional —
+   #    include it to also plan exact-handler unbinds for the old Render URL:
    APP_BASE_URL=https://bba8ln220jfloq5251dv.containers.yandexcloud.net \
+   STALE_BASE_URL=https://calendar-interpro-app.onrender.com \
      npm run rebind-placements -- --dry-run
 
    # 2) Apply once the plan looks right:
    APP_BASE_URL=https://bba8ln220jfloq5251dv.containers.yandexcloud.net \
+   STALE_BASE_URL=https://calendar-interpro-app.onrender.com \
      npm run rebind-placements -- --apply
+
+   # Equivalent flag form (avoids exporting STALE_BASE_URL):
+   npm run rebind-placements -- --apply \
+     --stale-base-url=https://calendar-interpro-app.onrender.com
    ```
 
    Both commands require `BITRIX_WEBHOOK_URL` to be exported in the shell
@@ -339,6 +363,13 @@ shell.
   - `mode` — `dry-run` (default) or `apply`. `apply` performs API writes.
   - `app_base_url` — optional override; when empty, `vars.APP_BASE_URL`
     is used.
+  - `stale_base_url` — optional. When set, the script computes the exact
+    handlers it would have generated under that base for the 7 managed
+    routes and unbinds each via `placement.unbind` (tolerating "not found")
+    before binding `APP_BASE_URL`. Provides a no-browser fallback when the
+    webhook can't call `placement.get` / `placement.list`. Defaults to
+    `https://calendar-interpro-app.onrender.com` (the previous Render
+    deployment); blank it out for portals that never ran on Render.
 - **Required Secret:** `BITRIX_WEBHOOK_URL` (already configured for the
   deploy workflow — same secret).
 - **Required Variable:** `APP_BASE_URL` (already configured).
@@ -348,6 +379,8 @@ shell.
 Recommended flow:
 
 1. Run with `mode = dry-run` first and inspect the plan in the job log.
+   Confirm the planned `UNBIND ... (fallback)` lines target only the 7
+   managed placement + route pairs under the stale host.
 2. Run again with `mode = apply` once the plan looks right.
 
 ---

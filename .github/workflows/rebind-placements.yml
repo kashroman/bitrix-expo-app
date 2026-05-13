@@ -36,6 +36,10 @@ on:
         description: "Override APP_BASE_URL (leave empty to use the repo variable)"
         required: false
         default: ""
+      stale_base_url:
+        description: "Optional stale base URL — when set, the script unbinds exact handlers under this base before binding APP_BASE_URL (no-browser fallback when placement.list is unavailable). Leave empty to skip."
+        required: false
+        default: "https://calendar-interpro-app.onrender.com"
 
 permissions:
   contents: read
@@ -56,8 +60,9 @@ jobs:
       - name: Resolve effective APP_BASE_URL
         id: cfg
         env:
-          INPUT_URL: ${{ github.event.inputs.app_base_url }}
-          VAR_URL:   ${{ vars.APP_BASE_URL }}
+          INPUT_URL:       ${{ github.event.inputs.app_base_url }}
+          VAR_URL:         ${{ vars.APP_BASE_URL }}
+          INPUT_STALE_URL: ${{ github.event.inputs.stale_base_url }}
         run: |
           set -euo pipefail
           if [ -n "${INPUT_URL:-}" ]; then
@@ -74,6 +79,17 @@ jobs:
           echo "app_base_url=$EFFECTIVE_URL" >> "$GITHUB_OUTPUT"
           echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
           echo "Effective APP_BASE_URL: $EFFECTIVE_URL (from $SOURCE)"
+
+          # Stale base URL is purely optional. When provided, the migration
+          # script computes exact stale handlers (no placement.list needed)
+          # and unbinds them tolerantly before binding APP_BASE_URL.
+          STALE_URL="${INPUT_STALE_URL:-}"
+          echo "stale_base_url=$STALE_URL" >> "$GITHUB_OUTPUT"
+          if [ -n "$STALE_URL" ]; then
+            echo "Effective STALE_BASE_URL: $STALE_URL"
+          else
+            echo "STALE_BASE_URL: (empty — no exact-handler fallback)"
+          fi
 
       - name: Validate secrets
         env:
@@ -98,6 +114,7 @@ jobs:
           BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
           BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
           APP_BASE_URL:       ${{ steps.cfg.outputs.app_base_url }}
+          STALE_BASE_URL:     ${{ steps.cfg.outputs.stale_base_url }}
           MODE:               ${{ github.event.inputs.mode }}
         run: |
           set -euo pipefail
@@ -120,15 +137,21 @@ jobs:
       - name: Job summary
         if: always()
         env:
-          MODE: ${{ github.event.inputs.mode }}
-          URL:  ${{ steps.cfg.outputs.app_base_url }}
-          SRC:  ${{ steps.cfg.outputs.source }}
+          MODE:      ${{ github.event.inputs.mode }}
+          URL:       ${{ steps.cfg.outputs.app_base_url }}
+          SRC:       ${{ steps.cfg.outputs.source }}
+          STALE_URL: ${{ steps.cfg.outputs.stale_base_url }}
         run: |
           {
             echo "## rebind-placements"
             echo ""
             echo "- Mode: \`$MODE\`"
             echo "- APP_BASE_URL: \`$URL\` (from $SRC)"
+            if [ -n "${STALE_URL:-}" ]; then
+              echo "- STALE_BASE_URL: \`$STALE_URL\` (exact-handler fallback enabled)"
+            else
+              echo "- STALE_BASE_URL: _(empty — no exact-handler fallback)_"
+            fi
             echo "- BITRIX_WEBHOOK_URL: provided via repo secret (masked)"
             echo ""
             echo "See the job log for the placement plan / results."
