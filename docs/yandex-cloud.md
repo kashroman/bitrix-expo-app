@@ -195,7 +195,20 @@ Only do this once steps 1–7 are green:
 2. Re-bind the 7 managed placements to the Yandex Cloud URL. The script is
    safe-by-default (dry-run unless `--apply`), and `--cleanup-stale` will
    unbind handlers for the same managed routes whose host is **not** the
-   current `APP_BASE_URL` host — typically the old Render handlers:
+   current `APP_BASE_URL` host — typically the old Render handlers.
+
+   The recommended path is the manual GitHub Actions workflow
+   `.github/workflows/rebind-placements.yml` — it runs the same script on
+   GitHub-hosted runners using the repo's `BITRIX_WEBHOOK_URL` secret and
+   `APP_BASE_URL` variable, so no local shell or browser is needed:
+
+   1. Go to **Actions → rebind-placements (manual) → Run workflow**.
+   2. Leave `mode` on `dry-run` for the first run, and leave `app_base_url`
+      empty to use `vars.APP_BASE_URL`.
+   3. Review the plan in the job log.
+   4. Re-run with `mode = apply` once the plan looks right.
+
+   For local runs (only when needed):
 
    ```bash
    # 1) Preview the plan (no API writes):
@@ -313,6 +326,29 @@ The workflow **builds, pushes and deploys** the image, and assembles the
 full revision env from these Variables and Secrets. Runtime app secrets
 are no longer set in the Yandex Cloud console — they live in GitHub
 Secrets so every deploy is reproducible.
+
+### `rebind-placements (manual)` workflow
+
+`.github/workflows/rebind-placements.yml` runs the existing safe-by-default
+`npm run rebind-placements` script in GitHub Actions so the Bitrix24
+placement cut-over (§ Cut-over from Render) can be done without a local
+shell.
+
+- **Trigger:** `workflow_dispatch` only.
+- **Inputs:**
+  - `mode` — `dry-run` (default) or `apply`. `apply` performs API writes.
+  - `app_base_url` — optional override; when empty, `vars.APP_BASE_URL`
+    is used.
+- **Required Secret:** `BITRIX_WEBHOOK_URL` (already configured for the
+  deploy workflow — same secret).
+- **Required Variable:** `APP_BASE_URL` (already configured).
+- The webhook value is read from `${{ secrets.* }}`, exported into the
+  step env for the script, and never echoed.
+
+Recommended flow:
+
+1. Run with `mode = dry-run` first and inspect the plan in the job log.
+2. Run again with `mode = apply` once the plan looks right.
 
 ---
 

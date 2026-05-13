@@ -1,0 +1,135 @@
+# Manual Bitrix24 placement re-bind for the Yandex Cloud cut-over.
+#
+# Runs the existing safe-by-default `npm run rebind-placements` script
+# from GitHub Actions so the Bitrix24 placement cut-over can be performed
+# without a local browser / shell. The underlying migration script is the
+# canonical implementation — this workflow is a thin wrapper.
+#
+# Required repo *Secrets* (masked by GitHub):
+#   - BITRIX_WEBHOOK_URL : full inbound webhook URL (never echoed)
+#
+# Required repo *Variables*:
+#   - APP_BASE_URL       : current public app URL (Yandex Cloud container URL).
+#                          Used unless overridden by the `app_base_url` input.
+#
+# Optional repo *Variables*:
+#   - BITRIX_PORTAL      : portal hostname (only consumed by the script if it
+#                          references it; harmless to pass through).
+#
+# The job runs on `workflow_dispatch` only — never on push. `mode` defaults
+# to `dry-run`; `apply` requires the operator to explicitly select it.
+
+name: rebind-placements (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode — dry-run previews the plan, apply performs API writes"
+        required: true
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - apply
+      app_base_url:
+        description: "Override APP_BASE_URL (leave empty to use the repo variable)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  rebind:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Resolve effective APP_BASE_URL
+        id: cfg
+        env:
+          INPUT_URL: ${{ github.event.inputs.app_base_url }}
+          VAR_URL:   ${{ vars.APP_BASE_URL }}
+        run: |
+          set -euo pipefail
+          if [ -n "${INPUT_URL:-}" ]; then
+            EFFECTIVE_URL="$INPUT_URL"
+            SOURCE="workflow input"
+          else
+            EFFECTIVE_URL="${VAR_URL:-}"
+            SOURCE="vars.APP_BASE_URL"
+          fi
+          if [ -z "${EFFECTIVE_URL:-}" ]; then
+            echo "::error::No APP_BASE_URL provided. Set the input or the repo variable APP_BASE_URL." >&2
+            exit 1
+          fi
+          echo "app_base_url=$EFFECTIVE_URL" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "Effective APP_BASE_URL: $EFFECTIVE_URL (from $SOURCE)"
+
+      - name: Validate secrets
+        env:
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+        run: |
+          set -euo pipefail
+          if [ -z "${BITRIX_WEBHOOK_URL:-}" ]; then
+            echo "::error::BITRIX_WEBHOOK_URL secret is not set" >&2
+            exit 1
+          fi
+          # Do not echo the value; only confirm presence.
+          echo "BITRIX_WEBHOOK_URL: present (masked)"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run rebind-placements (${{ github.event.inputs.mode }})
+        # Secrets are exported into the step env; the script reads them
+        # from process.env. The webhook URL is never written to logs by
+        # the script itself, and we do not echo $BITRIX_WEBHOOK_URL here.
+        env:
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+          BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
+          APP_BASE_URL:       ${{ steps.cfg.outputs.app_base_url }}
+          MODE:               ${{ github.event.inputs.mode }}
+        run: |
+          set -euo pipefail
+          set +x
+          case "$MODE" in
+            apply)
+              echo "Mode: APPLY (live API writes)"
+              npm run rebind-placements -- --apply
+              ;;
+            dry-run|"")
+              echo "Mode: DRY-RUN (no API writes)"
+              npm run rebind-placements -- --dry-run
+              ;;
+            *)
+              echo "::error::Unknown mode '$MODE' — must be 'dry-run' or 'apply'" >&2
+              exit 1
+              ;;
+          esac
+
+      - name: Job summary
+        if: always()
+        env:
+          MODE: ${{ github.event.inputs.mode }}
+          URL:  ${{ steps.cfg.outputs.app_base_url }}
+          SRC:  ${{ steps.cfg.outputs.source }}
+        run: |
+          {
+            echo "## rebind-placements"
+            echo ""
+            echo "- Mode: \`$MODE\`"
+            echo "- APP_BASE_URL: \`$URL\` (from $SRC)"
+            echo "- BITRIX_WEBHOOK_URL: provided via repo secret (masked)"
+            echo ""
+            echo "See the job log for the placement plan / results."
+          } >> "$GITHUB_STEP_SUMMARY"
