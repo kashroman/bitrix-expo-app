@@ -18,23 +18,23 @@ import {
   PHASE_FILLS,
 } from "@/lib/config";
 
-const LEFT_COL_PX = 240;
-const MONTH_NAMES_RU = [
-  "Январь",
-  "Февраль",
-  "Март",
-  "Апрель",
+const LEFT_COL_PX = 260;
+const MONTH_NAMES_RU_SHORT = [
+  "Янв",
+  "Фев",
+  "Мар",
+  "Апр",
   "Май",
-  "Июнь",
-  "Июль",
-  "Август",
-  "Сентябрь",
-  "Октябрь",
-  "Ноябрь",
-  "Декабрь",
+  "Июн",
+  "Июл",
+  "Авг",
+  "Сен",
+  "Окт",
+  "Ноя",
+  "Дек",
 ];
 
-const HEADER_ROW_HEIGHT = 18; // overall expo period band
+const HEADER_ROW_HEIGHT = 18;
 const DEAL_ROW_HEIGHT = 18;
 const ROW_PADDING_Y = 6;
 const NEUTRAL_BAR_COLOR = "#94a3b8";
@@ -45,16 +45,15 @@ function stripTime(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-function monthStartOf(year: number, month: number): Date {
-  return new Date(year, month, 1);
+function dayOfYear(d: Date): number {
+  const start = new Date(d.getFullYear(), 0, 1);
+  const diff = stripTime(d).getTime() - stripTime(start).getTime();
+  return Math.floor(diff / 86_400_000);
 }
 
-function monthEndOf(year: number, month: number): Date {
-  return new Date(year, month + 1, 0);
-}
-
-function daysInMonth(year: number, month: number): number {
-  return monthEndOf(year, month).getDate();
+function daysInYear(year: number): number {
+  const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return isLeap ? 366 : 365;
 }
 
 function expoOverallRange(expo: ExpoItem): Range | undefined {
@@ -77,23 +76,26 @@ function expoOverallRange(expo: ExpoItem): Range | undefined {
   return { start: start!, end: end! };
 }
 
-function clipToMonth(
+// Position a range inside the requested year as left/width percentages.
+// Clips on year edges so cross-year exhibitions still render.
+function clipToYear(
   range: Range | undefined,
   year: number,
-  month: number,
-): { startDay: number; endDay: number } | undefined {
+): { leftPct: number; widthPct: number } | undefined {
   if (!range) return undefined;
-  const monthStart = stripTime(monthStartOf(year, month)).getTime();
-  const monthEnd = stripTime(monthEndOf(year, month)).getTime();
+  const yearStart = stripTime(new Date(year, 0, 1)).getTime();
+  const yearEnd = stripTime(new Date(year, 11, 31)).getTime();
   const s = stripTime(range.start).getTime();
   const e = stripTime(range.end).getTime();
-  if (e < monthStart || s > monthEnd) return undefined;
-  const clippedStart = Math.max(s, monthStart);
-  const clippedEnd = Math.min(e, monthEnd);
-  return {
-    startDay: new Date(clippedStart).getDate(),
-    endDay: new Date(clippedEnd).getDate(),
-  };
+  if (e < yearStart || s > yearEnd) return undefined;
+  const clippedStart = Math.max(s, yearStart);
+  const clippedEnd = Math.min(e, yearEnd);
+  const total = daysInYear(year);
+  const startDayIdx = Math.floor((clippedStart - yearStart) / 86_400_000);
+  const endDayIdx = Math.floor((clippedEnd - yearStart) / 86_400_000);
+  const leftPct = (startDayIdx / total) * 100;
+  const widthPct = Math.max(0.3, ((endDayIdx - startDayIdx + 1) / total) * 100);
+  return { leftPct, widthPct };
 }
 
 function compareExpos(a: ExpoItem, b: ExpoItem): number {
@@ -125,11 +127,20 @@ function dealSummaryLine(deal: BuildScheduleDeal): string {
   return parts.join(" · ");
 }
 
+// Filter expos whose phases touch the year [y-01-01, y-12-31].
+function expoTouchesYear(expo: ExpoItem, year: number): boolean {
+  const range = expoOverallRange(expo);
+  if (!range) return false;
+  return (
+    range.start.getFullYear() <= year && range.end.getFullYear() >= year
+  );
+}
+
 export function BuildScheduleView({
   expos,
   dealsByExpoId,
-  initialMonth,
-  onMonthChange,
+  initialYear,
+  onYearChange,
   onSelectExpo,
   onSelectDeal,
   emptyMessage,
@@ -137,48 +148,32 @@ export function BuildScheduleView({
 }: {
   expos: ExpoItem[];
   dealsByExpoId: Map<number, BuildScheduleDeal[]> | undefined;
-  initialMonth?: Date;
-  onMonthChange?: (monthStart: Date) => void;
+  initialYear?: number;
+  onYearChange?: (year: number) => void;
   onSelectExpo: (expo: ExpoItem) => void;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
   emptyMessage?: string;
   isFetching?: boolean;
 }) {
-  const [cursor, setCursor] = useState<Date>(() => {
-    if (initialMonth)
-      return monthStartOf(initialMonth.getFullYear(), initialMonth.getMonth());
-    const now = new Date();
-    return monthStartOf(now.getFullYear(), now.getMonth());
-  });
-
-  const initialYear = initialMonth?.getFullYear();
-  const initialMonthIdx = initialMonth?.getMonth();
-  useEffect(() => {
-    if (initialYear === undefined || initialMonthIdx === undefined) return;
-    setCursor((prev) => {
-      if (
-        prev.getFullYear() === initialYear &&
-        prev.getMonth() === initialMonthIdx
-      ) {
-        return prev;
-      }
-      return monthStartOf(initialYear, initialMonthIdx);
-    });
-  }, [initialYear, initialMonthIdx]);
+  const currentYear = new Date().getFullYear();
+  const [year, setYear] = useState<number>(() => initialYear ?? currentYear);
 
   useEffect(() => {
-    onMonthChange?.(cursor);
-  }, [cursor, onMonthChange]);
+    if (initialYear === undefined) return;
+    setYear((prev) => (prev === initialYear ? prev : initialYear));
+  }, [initialYear]);
 
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
-  const totalDays = daysInMonth(year, month);
+  useEffect(() => {
+    onYearChange?.(year);
+  }, [year, onYearChange]);
 
-  const sortedExpos = useMemo(() => [...expos].sort(compareExpos), [expos]);
+  const sortedExpos = useMemo(
+    () => [...expos].filter((e) => expoTouchesYear(e, year)).sort(compareExpos),
+    [expos, year],
+  );
 
   const yearOptions = useMemo(() => {
     const set = new Set<number>();
-    const currentYear = new Date().getFullYear();
     for (let y = currentYear - 2; y <= currentYear + 3; y++) set.add(y);
     expos.forEach((expo) => {
       const s = parseDate(expo.expoStart);
@@ -186,85 +181,43 @@ export function BuildScheduleView({
       if (s) set.add(s.getFullYear());
       if (e) set.add(e.getFullYear());
     });
+    set.add(year);
     return Array.from(set).sort((a, b) => a - b);
-  }, [expos]);
+  }, [expos, currentYear, year]);
 
-  const goPrev = () => setCursor(monthStartOf(year, month - 1));
-  const goNext = () => setCursor(monthStartOf(year, month + 1));
-  const goToday = () => {
-    const now = new Date();
-    setCursor(monthStartOf(now.getFullYear(), now.getMonth()));
-  };
+  const goPrev = () => setYear((y) => y - 1);
+  const goNext = () => setYear((y) => y + 1);
+  const goToday = () => setYear(currentYear);
 
-  const today = stripTime(new Date());
-  const todayIndex =
-    today.getFullYear() === year && today.getMonth() === month
-      ? today.getDate()
-      : -1;
+  const today = new Date();
+  const todayLeftPct =
+    today.getFullYear() === year
+      ? (dayOfYear(today) / daysInYear(year)) * 100
+      : undefined;
 
   const isEmpty = sortedExpos.length === 0;
   const emptyText =
     emptyMessage ??
     (isFetching
-      ? "Загрузка сделок за выбранный месяц…"
-      : "Нет выставок со сделками на стадиях графика застройки.");
+      ? "Загрузка сделок за выбранный год…"
+      : "Нет выставок со сделками на стадиях графика застройки в этом году.");
 
   return (
     <div>
-      <MonthControls
-        cursor={cursor}
+      <YearControls
+        year={year}
         onPrev={goPrev}
         onNext={goNext}
         onToday={goToday}
-        onSelect={(d) => setCursor(d)}
+        onSelect={setYear}
         yearOptions={yearOptions}
       />
 
       <div className="mt-3 overflow-hidden rounded-md border bg-background">
-        <div
-          className="grid min-w-0 items-stretch border-b bg-background/95 text-xs"
-          style={{
-            gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
-          }}
-        >
-          <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-muted-foreground">
-            Выставка · сделки
-          </div>
-          {Array.from({ length: totalDays }, (_, i) => {
-            const dayNum = i + 1;
-            const date = new Date(year, month, dayNum);
-            const dow = date.getDay();
-            const isWeekend = dow === 0 || dow === 6;
-            const isToday = dayNum === todayIndex;
-            return (
-              <div
-                key={dayNum}
-                className={`flex min-w-0 flex-col items-center justify-center border-r py-1 text-[10px] tabular-nums ${
-                  isWeekend ? "bg-muted/40" : ""
-                } ${isToday ? "bg-primary/10 font-semibold text-primary" : "text-muted-foreground"}`}
-                title={date.toLocaleDateString("ru-RU", {
-                  weekday: "long",
-                  day: "numeric",
-                  month: "long",
-                })}
-              >
-                <span className="leading-none">{dayNum}</span>
-                <span className="leading-none text-[9px] opacity-70">
-                  {["вс", "пн", "вт", "ср", "чт", "пт", "сб"][dow]}
-                </span>
-              </div>
-            );
-          })}
-        </div>
+        <YearHeader year={year} todayLeftPct={todayLeftPct} />
 
         {isEmpty ? (
-          <EmptyGridBody
-            year={year}
-            month={month}
-            totalDays={totalDays}
-            todayIndex={todayIndex}
-            text={emptyText}
-          />
+          <EmptyGridBody text={emptyText} todayLeftPct={todayLeftPct} />
         ) : null}
 
         {sortedExpos.map((expo, rowIndex) => {
@@ -276,8 +229,7 @@ export function BuildScheduleView({
               deals={deals}
               rowIndex={rowIndex}
               year={year}
-              month={month}
-              totalDays={totalDays}
+              todayLeftPct={todayLeftPct}
               onSelectExpo={onSelectExpo}
               onSelectDeal={onSelectDeal}
             />
@@ -290,13 +242,54 @@ export function BuildScheduleView({
   );
 }
 
+function YearHeader({
+  year,
+  todayLeftPct,
+}: {
+  year: number;
+  todayLeftPct: number | undefined;
+}) {
+  return (
+    <div
+      className="relative grid min-w-0 items-stretch border-b bg-background/95 text-xs"
+      style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr` }}
+    >
+      <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-muted-foreground">
+        Выставка · сделки
+      </div>
+      <div className="relative">
+        <div
+          className="grid"
+          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
+        >
+          {MONTH_NAMES_RU_SHORT.map((name, idx) => (
+            <div
+              key={idx}
+              className="flex items-center justify-center border-r py-1 text-[11px] tabular-nums text-muted-foreground last:border-r-0"
+              title={`${name} ${year}`}
+            >
+              {name}
+            </div>
+          ))}
+        </div>
+        {todayLeftPct !== undefined ? (
+          <div
+            className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/70"
+            style={{ left: `${todayLeftPct}%` }}
+            aria-hidden
+          />
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 function BuildScheduleRow({
   expo,
   deals,
   rowIndex,
   year,
-  month,
-  totalDays,
+  todayLeftPct,
   onSelectExpo,
   onSelectDeal,
 }: {
@@ -304,13 +297,12 @@ function BuildScheduleRow({
   deals: BuildScheduleDeal[];
   rowIndex: number;
   year: number;
-  month: number;
-  totalDays: number;
+  todayLeftPct: number | undefined;
   onSelectExpo: (expo: ExpoItem) => void;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
 }) {
   const overall = expoOverallRange(expo);
-  const clip = clipToMonth(overall, year, month);
+  const clip = clipToYear(overall, year);
   const dealsCount = deals.length;
   const innerHeight =
     ROW_PADDING_Y * 2 +
@@ -322,7 +314,7 @@ function BuildScheduleRow({
     <div
       className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
       style={{
-        gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
+        gridTemplateColumns: `${LEFT_COL_PX}px 1fr`,
         minHeight: `${Math.max(56, innerHeight)}px`,
       }}
       data-testid={`build-schedule-row-${expo.id}`}
@@ -343,31 +335,24 @@ function BuildScheduleRow({
       </button>
       <div
         className="relative"
-        style={{
-          gridColumn: `2 / span ${totalDays}`,
-          minHeight: `${innerHeight}px`,
-        }}
+        style={{ minHeight: `${innerHeight}px` }}
       >
         <div
           className="absolute inset-0 grid"
-          style={{
-            gridTemplateColumns: `repeat(${totalDays}, minmax(0, 1fr))`,
-          }}
+          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
           aria-hidden
         >
-          {Array.from({ length: totalDays }, (_, i) => {
-            const dayNum = i + 1;
-            const date = new Date(year, month, dayNum);
-            const dow = date.getDay();
-            const isWeekend = dow === 0 || dow === 6;
-            return (
-              <div
-                key={dayNum}
-                className={`border-r border-border/40 ${isWeekend ? "bg-muted/30" : ""}`}
-              />
-            );
-          })}
+          {Array.from({ length: 12 }, (_, i) => (
+            <div key={i} className="border-r border-border/40 last:border-r-0" />
+          ))}
         </div>
+        {todayLeftPct !== undefined ? (
+          <div
+            className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
+            style={{ left: `${todayLeftPct}%` }}
+            aria-hidden
+          />
+        ) : null}
 
         {clip ? (
           <div
@@ -375,8 +360,8 @@ function BuildScheduleRow({
             style={{
               top: `${ROW_PADDING_Y}px`,
               height: `${HEADER_ROW_HEIGHT}px`,
-              left: `${((clip.startDay - 1) / totalDays) * 100}%`,
-              width: `${((clip.endDay - clip.startDay + 1) / totalDays) * 100}%`,
+              left: `${clip.leftPct}%`,
+              width: `${clip.widthPct}%`,
               background: PHASE_FILLS.expo,
               border: "1px solid rgba(34,197,94,0.45)",
             }}
@@ -385,9 +370,6 @@ function BuildScheduleRow({
         ) : null}
 
         {deals.map((deal, idx) => {
-          // Deal bar spans the exhibition's overall period (clipped to month).
-          // We use the parent expo's range so users can scan an entire row at
-          // a glance — Bitrix deals don't expose per-deal phase dates here.
           const dealClip = clip;
           if (!dealClip) return null;
           const top =
@@ -405,8 +387,8 @@ function BuildScheduleRow({
               style={{
                 top: `${top}px`,
                 height: `${DEAL_ROW_HEIGHT}px`,
-                left: `${((dealClip.startDay - 1) / totalDays) * 100}%`,
-                width: `${((dealClip.endDay - dealClip.startDay + 1) / totalDays) * 100}%`,
+                left: `${dealClip.leftPct}%`,
+                width: `${dealClip.widthPct}%`,
                 background: dealColor(deal),
               }}
               title={dealSummaryLine(deal)}
@@ -430,43 +412,36 @@ function BuildScheduleRow({
 }
 
 function EmptyGridBody({
-  year,
-  month,
-  totalDays,
-  todayIndex,
   text,
+  todayLeftPct,
 }: {
-  year: number;
-  month: number;
-  totalDays: number;
-  todayIndex: number;
   text: string;
+  todayLeftPct: number | undefined;
 }) {
   return (
     <div
       className="relative grid min-w-0 items-stretch border-b"
-      style={{
-        gridTemplateColumns: `${LEFT_COL_PX}px repeat(${totalDays}, minmax(0, 1fr))`,
-        minHeight: `112px`,
-      }}
+      style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr`, minHeight: "112px" }}
     >
       <div className="border-r bg-background/70" aria-hidden />
-      {Array.from({ length: totalDays }, (_, i) => {
-        const dayNum = i + 1;
-        const date = new Date(year, month, dayNum);
-        const dow = date.getDay();
-        const isWeekend = dow === 0 || dow === 6;
-        const isToday = dayNum === todayIndex;
-        return (
+      <div className="relative">
+        <div
+          className="absolute inset-0 grid"
+          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
+          aria-hidden
+        >
+          {Array.from({ length: 12 }, (_, i) => (
+            <div key={i} className="border-r border-border/40 last:border-r-0" />
+          ))}
+        </div>
+        {todayLeftPct !== undefined ? (
           <div
-            key={dayNum}
-            className={`border-r border-border/40 ${isWeekend ? "bg-muted/30" : ""} ${
-              isToday ? "bg-primary/5" : ""
-            }`}
+            className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
+            style={{ left: `${todayLeftPct}%` }}
             aria-hidden
           />
-        );
-      })}
+        ) : null}
+      </div>
       <div
         className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-muted-foreground"
         data-testid="build-schedule-empty"
@@ -477,30 +452,28 @@ function EmptyGridBody({
   );
 }
 
-function MonthControls({
-  cursor,
+function YearControls({
+  year,
   onPrev,
   onNext,
   onToday,
   onSelect,
   yearOptions,
 }: {
-  cursor: Date;
+  year: number;
   onPrev: () => void;
   onNext: () => void;
   onToday: () => void;
-  onSelect: (d: Date) => void;
+  onSelect: (y: number) => void;
   yearOptions: number[];
 }) {
-  const year = cursor.getFullYear();
-  const month = cursor.getMonth();
   return (
     <div className="flex flex-wrap items-center gap-2">
       <Button
         variant="outline"
         size="icon"
         onClick={onPrev}
-        aria-label="Предыдущий месяц"
+        aria-label="Предыдущий год"
         data-testid="build-schedule-prev"
       >
         <ChevronLeft className="h-4 w-4" />
@@ -511,35 +484,20 @@ function MonthControls({
         onClick={onToday}
         data-testid="build-schedule-today"
       >
-        Сегодня
+        Текущий год
       </Button>
       <Button
         variant="outline"
         size="icon"
         onClick={onNext}
-        aria-label="Следующий месяц"
+        aria-label="Следующий год"
         data-testid="build-schedule-next"
       >
         <ChevronRight className="h-4 w-4" />
       </Button>
       <Select
-        value={String(month)}
-        onValueChange={(v) => onSelect(monthStartOf(year, Number(v)))}
-      >
-        <SelectTrigger className="w-[160px]" data-testid="build-schedule-month">
-          <SelectValue />
-        </SelectTrigger>
-        <SelectContent>
-          {MONTH_NAMES_RU.map((name, idx) => (
-            <SelectItem key={idx} value={String(idx)}>
-              {name}
-            </SelectItem>
-          ))}
-        </SelectContent>
-      </Select>
-      <Select
         value={String(year)}
-        onValueChange={(v) => onSelect(monthStartOf(Number(v), month))}
+        onValueChange={(v) => onSelect(Number(v))}
       >
         <SelectTrigger className="w-[120px]" data-testid="build-schedule-year">
           <SelectValue />
@@ -552,9 +510,7 @@ function MonthControls({
           ))}
         </SelectContent>
       </Select>
-      <div className="ml-auto text-sm text-muted-foreground">
-        {MONTH_NAMES_RU[month]} {year}
-      </div>
+      <div className="ml-auto text-sm text-muted-foreground">{year}</div>
     </div>
   );
 }
