@@ -257,6 +257,54 @@ Only do this once steps 1–7 are green:
 
 ---
 
+## 8a. Long-running Source URL enrichment on serverless
+
+The in-app **«Заполнение URL»** flow (`POST /api/admin/fill-source-urls/start`
++ polling GET) keeps a job map in **process memory**. On Yandex Serverless
+Containers (and any host that may scale to multiple instances or scale to
+zero) the POST that creates a job can land on one instance while a later
+GET for status lands on a different / cold instance — the second instance
+has no record of the job and returns `404`, even though the original job
+is still running. The in-app async UI is therefore only reliable on
+single-instance hosts (e.g. Render's web service) unless an external job
+store (Redis / DB) is added.
+
+**Recommended path on Yandex Cloud (and other serverless hosts):** run
+the existing CLI from GitHub Actions, which gives the job a stable,
+single-process host with no cold-start risk. A manual workflow is wired
+up at `.github/workflows/fill-source-urls.yml`:
+
+- Trigger: `workflow_dispatch` only (never on push).
+- Inputs: `mode` (`dry-run` default / `apply`), `limit` (default `20`),
+  optional `min_confidence`, optional `allow_unlisted` (default `false`).
+- Reads `BITRIX_WEBHOOK_URL` from repo secrets (masked, never echoed).
+- Tees per-item output to an artifact (`fill-source-urls-log`) and pushes
+  the summary line to the GitHub step summary.
+
+Dispatch from the CLI (requires `gh` auth with `workflow` scope on this
+repo):
+
+```sh
+# Dry-run, 20 items (safe default — no CRM writes)
+gh workflow run fill-source-urls.yml \
+  -f mode=dry-run -f limit=20
+
+# Apply, 50 items, allowlist-only
+gh workflow run fill-source-urls.yml \
+  -f mode=apply -f limit=50
+```
+
+The CLI itself (`npm run fill-source-urls`) defaults to `--dry-run` and
+never overwrites an existing `ufCrm8SourceUrl`; `apply` requires the
+operator to explicitly select it in the workflow inputs.
+
+The in-app UI remains available for environments where it is reliable
+(single-instance Render web service) and is the right tool for quick
+ad-hoc dry-runs. For batch enrichment on serverless, prefer the
+GitHub Actions workflow.
+
+---
+
 ## 9. Weekly cron job
 
 Render hosts a separate cron service (see `render.yaml`). On Yandex Cloud

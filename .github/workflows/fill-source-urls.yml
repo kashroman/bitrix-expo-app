@@ -1,0 +1,204 @@
+# Manual Source URL backfill for future exhibitions (smart process 1050).
+#
+# Runs the existing `npm run fill-source-urls` CLI on a GitHub-hosted runner
+# so the long-running enrichment job has a stable, single-process host. The
+# in-app async UI (POST /api/admin/fill-source-urls) keeps a job map in
+# process memory — on Yandex Serverless Containers the POST that starts the
+# job and a follow-up GET for status can land on different / cold instances,
+# making the UI flow unreliable. This workflow is the recommended path for
+# serverless hosts until an external job store is added.
+#
+# Required repo *Secrets* (masked by GitHub):
+#   - BITRIX_WEBHOOK_URL : full inbound webhook URL (never echoed)
+#
+# The job runs on `workflow_dispatch` only — never on push. `mode` defaults
+# to `dry-run`; `apply` requires the operator to explicitly select it. The
+# underlying script defaults to dry-run too, and never overwrites an
+# existing Source URL.
+
+name: fill-source-urls (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Run mode — dry-run previews candidates, apply writes Source URL to Bitrix24"
+        required: true
+        type: choice
+        default: dry-run
+        options:
+          - dry-run
+          - apply
+      limit:
+        description: "Max future items to scan (0 = no limit). Keep small for first runs."
+        required: false
+        default: "20"
+      min_confidence:
+        description: "Minimum candidate confidence (0..1). Empty = script default (0.75)."
+        required: false
+        default: ""
+      allow_unlisted:
+        description: "Allow writes to domains outside OFFICIAL_ALLOWLIST_DOMAINS. Only use after manual review of dry-run output."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  fill:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Validate inputs and secrets
+        id: cfg
+        env:
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+          INPUT_MODE:           ${{ github.event.inputs.mode }}
+          INPUT_LIMIT:          ${{ github.event.inputs.limit }}
+          INPUT_MIN_CONFIDENCE: ${{ github.event.inputs.min_confidence }}
+          INPUT_ALLOW_UNLISTED: ${{ github.event.inputs.allow_unlisted }}
+        run: |
+          set -euo pipefail
+          set +x
+          if [ -z "${BITRIX_WEBHOOK_URL:-}" ]; then
+            echo "::error::BITRIX_WEBHOOK_URL secret is not set" >&2
+            exit 1
+          fi
+          # Do not echo the value; only confirm presence.
+          echo "BITRIX_WEBHOOK_URL: present (masked)"
+
+          MODE="${INPUT_MODE:-dry-run}"
+          case "$MODE" in
+            dry-run|apply) ;;
+            *)
+              echo "::error::Unknown mode '$MODE' — must be 'dry-run' or 'apply'" >&2
+              exit 1
+              ;;
+          esac
+
+          LIMIT_RAW="${INPUT_LIMIT:-20}"
+          if ! [[ "$LIMIT_RAW" =~ ^[0-9]+$ ]]; then
+            echo "::error::limit must be a non-negative integer, got '$LIMIT_RAW'" >&2
+            exit 1
+          fi
+
+          MIN_CONF_RAW="${INPUT_MIN_CONFIDENCE:-}"
+          if [ -n "$MIN_CONF_RAW" ]; then
+            if ! [[ "$MIN_CONF_RAW" =~ ^0(\.[0-9]+)?$|^1(\.0+)?$ ]]; then
+              echo "::error::min_confidence must be in [0,1], got '$MIN_CONF_RAW'" >&2
+              exit 1
+            fi
+          fi
+
+          ALLOW_UNLISTED="${INPUT_ALLOW_UNLISTED:-false}"
+          case "$ALLOW_UNLISTED" in
+            true|false) ;;
+            *)
+              echo "::error::allow_unlisted must be 'true' or 'false', got '$ALLOW_UNLISTED'" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "mode=$MODE"                     >> "$GITHUB_OUTPUT"
+          echo "limit=$LIMIT_RAW"               >> "$GITHUB_OUTPUT"
+          echo "min_confidence=$MIN_CONF_RAW"   >> "$GITHUB_OUTPUT"
+          echo "allow_unlisted=$ALLOW_UNLISTED" >> "$GITHUB_OUTPUT"
+
+          echo "Resolved: mode=$MODE limit=$LIMIT_RAW min_confidence=${MIN_CONF_RAW:-default} allow_unlisted=$ALLOW_UNLISTED"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run fill-source-urls (${{ steps.cfg.outputs.mode }})
+        # Secrets are exported into the step env; the CLI reads them from
+        # process.env. The webhook URL is never written to logs by the
+        # script itself, and we do not echo $BITRIX_WEBHOOK_URL here.
+        env:
+          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
+          BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
+          MODE:           ${{ steps.cfg.outputs.mode }}
+          LIMIT:          ${{ steps.cfg.outputs.limit }}
+          MIN_CONFIDENCE: ${{ steps.cfg.outputs.min_confidence }}
+          ALLOW_UNLISTED: ${{ steps.cfg.outputs.allow_unlisted }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          ARGS=()
+          case "$MODE" in
+            apply)
+              echo "Mode: APPLY (live CRM writes — Source URL only, existing values preserved)"
+              ARGS+=("--apply")
+              ;;
+            dry-run)
+              echo "Mode: DRY-RUN (no CRM writes)"
+              ARGS+=("--dry-run")
+              ;;
+          esac
+          ARGS+=("--limit=$LIMIT")
+          if [ -n "${MIN_CONFIDENCE:-}" ]; then
+            ARGS+=("--min-confidence=$MIN_CONFIDENCE")
+          fi
+          if [ "${ALLOW_UNLISTED:-false}" = "true" ]; then
+            ARGS+=("--allow-unlisted")
+          fi
+
+          mkdir -p /tmp/fsu
+          # Tee output to an artifact log for review. The CLI does not
+          # print the webhook URL; normal candidate URLs are intentionally
+          # logged so a human reviewer can audit the dry-run plan.
+          npm run fill-source-urls -- "${ARGS[@]}" 2>&1 | tee /tmp/fsu/fill-source-urls.log
+
+      - name: Upload log artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fill-source-urls-log
+          path: /tmp/fsu/fill-source-urls.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Job summary
+        if: always()
+        env:
+          MODE:           ${{ steps.cfg.outputs.mode }}
+          LIMIT:          ${{ steps.cfg.outputs.limit }}
+          MIN_CONFIDENCE: ${{ steps.cfg.outputs.min_confidence }}
+          ALLOW_UNLISTED: ${{ steps.cfg.outputs.allow_unlisted }}
+        run: |
+          set -euo pipefail
+          set +x
+          {
+            echo "## fill-source-urls"
+            echo ""
+            echo "- Mode: \`${MODE:-dry-run}\`"
+            echo "- limit: \`${LIMIT:-20}\`"
+            echo "- min_confidence: \`${MIN_CONFIDENCE:-default}\`"
+            echo "- allow_unlisted: \`${ALLOW_UNLISTED:-false}\`"
+            echo "- BITRIX_WEBHOOK_URL: provided via repo secret (masked)"
+            echo ""
+            if [ -f /tmp/fsu/fill-source-urls.log ]; then
+              # Surface the script's own summary line (JSON counts) without
+              # dumping the full per-item log into the summary panel.
+              SUMMARY_LINE=$(grep -E "\[fill-source-urls\] summary " /tmp/fsu/fill-source-urls.log | tail -n 1 || true)
+              if [ -n "$SUMMARY_LINE" ]; then
+                echo "### Summary counts"
+                echo ""
+                echo "\`\`\`"
+                echo "$SUMMARY_LINE"
+                echo "\`\`\`"
+                echo ""
+              fi
+            fi
+            echo "Full per-item log is attached as the \`fill-source-urls-log\` artifact."
+          } >> "$GITHUB_STEP_SUMMARY"
