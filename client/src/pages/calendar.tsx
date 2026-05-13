@@ -1,11 +1,10 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown, Loader2, Hammer } from "lucide-react";
+import { RefreshCw, BarChart3, ChevronDown, Loader2, Hammer } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
 import { GanttTimeline } from "@/components/gantt";
@@ -61,6 +60,9 @@ import {
   getExpoFieldDiscovery,
 } from "@/lib/expo-fields";
 
+// `calendar` and `list` are kept in the type for backward compatibility with
+// internal code, but the UI only exposes `gantt` (rebranded as «Календарь
+// выставок») and `build-schedule` («График застройки»).
 type ViewMode = "gantt" | "calendar" | "list" | "build-schedule";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
@@ -83,9 +85,12 @@ function monthKeyOf(d: Date): string {
 
 export default function CalendarPage({ embedded = false }: { embedded?: boolean } = {}) {
   const [view, setView] = useState<ViewMode>("gantt");
-  const [period, setPeriod] = useState<PeriodMode>("all");
-  const [responsible, setResponsible] = useState<string>("all");
-  const [search, setSearch] = useState("");
+  // Filters by period / responsible / title search were removed from the UI
+  // per user request. The state is retained as constants so the filtering
+  // logic below stays intact (and easy to re-enable later if needed).
+  const period: PeriodMode = "all";
+  const responsible = "all";
+  const search = "";
   const [activeMonth, setActiveMonth] = useState<Date>(() => {
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
@@ -234,7 +239,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
       <PageTitle
         eyebrow="Календарь"
         title="Календарь выставок"
-        description="Основной рабочий экран: переключение между Gantt, Calendar и List, фильтры по периоду и ответственному, поиск."
+        description="Основной рабочий экран: переключение между «Календарём выставок» и «Графиком застройки» по текущему месяцу."
       />
 
       {!isInsideBitrix() && (
@@ -246,47 +251,15 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
       )}
 
       <Card className="mb-4">
-        <CardContent className="grid gap-3 p-4 md:grid-cols-[auto_auto_auto_1fr_auto]">
+        <CardContent className="flex flex-wrap items-center gap-3 p-4">
           <div className="flex flex-wrap rounded-md border p-0.5">
-            <ViewButton mode="gantt" active={view} onClick={setView} icon={<BarChart3 className="h-4 w-4" />} label="Gantt" />
-            <ViewButton mode="calendar" active={view} onClick={setView} icon={<CalendarDays className="h-4 w-4" />} label="Calendar" />
-            <ViewButton mode="list" active={view} onClick={setView} icon={<ListIcon className="h-4 w-4" />} label="List" />
+            <ViewButton mode="gantt" active={view} onClick={setView} icon={<BarChart3 className="h-4 w-4" />} label="Календарь выставок" />
             <ViewButton mode="build-schedule" active={view} onClick={setView} icon={<Hammer className="h-4 w-4" />} label="График застройки" />
-          </div>
-          <Select value={period} onValueChange={(v) => setPeriod(v as PeriodMode)}>
-            <SelectTrigger className="w-[180px]" data-testid="select-period"><SelectValue /></SelectTrigger>
-            <SelectContent>
-              <SelectItem value="all">Все периоды</SelectItem>
-              <SelectItem value="current">Сейчас идут</SelectItem>
-              <SelectItem value="future">Будущие</SelectItem>
-              <SelectItem value="past">Прошедшие</SelectItem>
-              <SelectItem value="year">Текущий год</SelectItem>
-            </SelectContent>
-          </Select>
-          {responsibles.length > 0 && (
-            <Select value={responsible} onValueChange={setResponsible}>
-              <SelectTrigger className="w-[180px]" data-testid="select-responsible"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="all">Все ответственные</SelectItem>
-                {responsibles.map((id) => (
-                  <SelectItem key={id} value={id}>ID {id}</SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          )}
-          <div className="relative">
-            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-            <Input
-              className="pl-9"
-              placeholder="Поиск по названию выставки"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              data-testid="input-search"
-            />
           </div>
           <Button
             variant="outline"
             size="sm"
+            className="ml-auto"
             onClick={() => {
               queryClient.invalidateQueries({ queryKey: ["expo-list"] });
               queryClient.invalidateQueries({ queryKey: ["expo-list-month"] });
