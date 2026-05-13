@@ -29,6 +29,7 @@ import {
 } from "./lib/smartEnrichment.js";
 import { checkAdminToken, adminAuthEnabled } from "./lib/adminAuth.js";
 import { runFillSourceUrls } from "./lib/fillSourceUrls.js";
+import { fillSourceUrlsJobs } from "./lib/fillSourceUrlsJobs.js";
 
 const fillSourceUrlsBody = z.object({
   dryRun: z.boolean().optional(),
@@ -297,6 +298,92 @@ export async function registerRoutes(
       } catch (err) {
         return bitrixError(res, err);
       }
+    },
+  );
+
+  app.post(
+    "/api/admin/fill-source-urls/jobs",
+    (req: Request, res: Response) => {
+      const auth = checkAdminToken(req);
+      if (!auth.ok) {
+        return res.status(auth.status).json({
+          error: auth.status === 503 ? "admin-disabled" : "unauthorized",
+          message: auth.reason,
+        });
+      }
+      const parsed = fillSourceUrlsBody.safeParse(req.body ?? {});
+      if (!parsed.success) {
+        return res.status(400).json({
+          error: "bad-request",
+          message: parsed.error.message,
+        });
+      }
+      if (!hasWebhook()) {
+        return res.status(503).json({
+          error: "webhook-required",
+          message: "BITRIX_WEBHOOK_URL is not configured. See README.",
+        });
+      }
+      const dryRun = parsed.data.dryRun !== false;
+      const job = fillSourceUrlsJobs.start({
+        dryRun,
+        limit: parsed.data.limit,
+        minConfidence: parsed.data.minConfidence,
+        allowUnlisted: parsed.data.allowUnlisted,
+        sleepMs: parsed.data.sleepMs,
+        since: parsed.data.since,
+      });
+      return res.status(202).json(job);
+    },
+  );
+
+  app.get(
+    "/api/admin/fill-source-urls/jobs/:jobId",
+    (req: Request, res: Response) => {
+      const auth = checkAdminToken(req);
+      if (!auth.ok) {
+        return res.status(auth.status).json({
+          error: auth.status === 503 ? "admin-disabled" : "unauthorized",
+          message: auth.reason,
+        });
+      }
+      const job = fillSourceUrlsJobs.get(String(req.params.jobId));
+      if (!job) {
+        return res.status(404).json({
+          error: "not-found",
+          message:
+            "Job not found. Note: in-memory jobs are lost on container cold start.",
+        });
+      }
+      return res.json(job);
+    },
+  );
+
+  app.post(
+    "/api/admin/fill-source-urls/jobs/:jobId/cancel",
+    (req: Request, res: Response) => {
+      const auth = checkAdminToken(req);
+      if (!auth.ok) {
+        return res.status(auth.status).json({
+          error: auth.status === 503 ? "admin-disabled" : "unauthorized",
+          message: auth.reason,
+        });
+      }
+      const ok = fillSourceUrlsJobs.cancel(String(req.params.jobId));
+      if (!ok) {
+        const exists = fillSourceUrlsJobs.get(String(req.params.jobId));
+        if (!exists) {
+          return res.status(404).json({
+            error: "not-found",
+            message: "Job not found.",
+          });
+        }
+        return res
+          .status(409)
+          .json({ error: "not-cancellable", message: "Job already finished." });
+      }
+      const job = fillSourceUrlsJobs.get(String(req.params.jobId));
+      return res.json(job);
     },
   );
 

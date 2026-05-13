@@ -34,6 +34,16 @@ export const FILL_SOURCE_URLS_DEFAULTS = {
   limit: 0,
 } as const;
 
+export type FillSourceUrlsProgress = {
+  phase: "scanning" | "processing" | "done";
+  scanned: number;
+  future: number;
+  futureEmpty: number;
+  queue: number;
+  processed: number;
+  results: FillSourceUrlsItemResult[];
+};
+
 export type FillSourceUrlsOptions = {
   /** When true (default), no CRM writes happen. */
   dryRun?: boolean;
@@ -49,7 +59,18 @@ export type FillSourceUrlsOptions = {
   allowUnlisted?: boolean;
   /** Override today's date (mainly for tests). */
   todayIso?: string;
+  /** Optional cancellation signal. */
+  signal?: AbortSignal;
+  /** Optional progress callback fired after each item (and once after scanning). */
+  onProgress?: (p: FillSourceUrlsProgress) => void;
 };
+
+export class FillSourceUrlsAbortError extends Error {
+  constructor() {
+    super("aborted");
+    this.name = "FillSourceUrlsAbortError";
+  }
+}
 
 export type FillSourceUrlsStatus =
   | "found"
@@ -469,6 +490,11 @@ export async function runFillSourceUrls(
   const todayIso =
     options.todayIso ?? deps.now().toISOString().slice(0, 10);
 
+  const checkAborted = () => {
+    if (options.signal?.aborted) throw new FillSourceUrlsAbortError();
+  };
+
+  checkAborted();
   const items = await listFutureCandidates(deps, todayIso, options.since);
 
   const scanned = items.length;
@@ -484,7 +510,21 @@ export async function runFillSourceUrls(
   const queue = limit > 0 ? empty.slice(0, limit) : empty;
 
   const results: FillSourceUrlsItemResult[] = [];
+
+  if (options.onProgress) {
+    options.onProgress({
+      phase: "scanning",
+      scanned,
+      future: futureItems.length,
+      futureEmpty: empty.length,
+      queue: queue.length,
+      processed: 0,
+      results: [],
+    });
+  }
+
   for (const item of queue) {
+    checkAborted();
     const r = await processItem(
       deps,
       item,
@@ -492,10 +532,21 @@ export async function runFillSourceUrls(
       todayIso,
     );
     results.push(r);
+    if (options.onProgress) {
+      options.onProgress({
+        phase: "processing",
+        scanned,
+        future: futureItems.length,
+        futureEmpty: empty.length,
+        queue: queue.length,
+        processed: results.length,
+        results: results.slice(),
+      });
+    }
     await deps.sleep(sleepMs);
   }
 
-  return summarize(results, {
+  const summary = summarize(results, {
     mode: dryRun ? "dryRun" : "apply",
     todayIso,
     minConfidence,
@@ -507,4 +558,18 @@ export async function runFillSourceUrls(
     queue: queue.length,
     allowlistEntries: OFFICIAL_ALLOWLIST_DOMAINS.length,
   });
+
+  if (options.onProgress) {
+    options.onProgress({
+      phase: "done",
+      scanned,
+      future: futureItems.length,
+      futureEmpty: empty.length,
+      queue: queue.length,
+      processed: results.length,
+      results: results.slice(),
+    });
+  }
+
+  return summary;
 }

@@ -1,19 +1,42 @@
 /**
- * Admin panel for the protected POST /api/admin/fill-source-urls endpoint.
+ * Admin panel for the protected fill-source-urls job endpoints.
  *
  * UX safety contract:
  *  - the token field is NOT persisted to localStorage / sessionStorage
  *  - the first call is ALWAYS dryRun=true; the Apply button stays disabled
- *    until a dry-run has succeeded, and clicking it requires an explicit
+ *    until a dry-run has finished, and clicking it requires an explicit
  *    second confirmation
  *  - apply writes are clearly labelled as "пишет в Bitrix24"
+ *
+ * The panel uses the async job API (POST /jobs + GET /jobs/:id) so long-running
+ * scans do not time out on the Yandex Serverless Container / Render proxy. The
+ * job runs in-memory in a single process — if the container cold-starts, the
+ * job is lost. Operators can simply re-run.
  */
-import { useState } from "react";
-import { Loader2, Play, ShieldCheck, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import {
+  Loader2,
+  Play,
+  ShieldCheck,
+  AlertTriangle,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Progress } from "@/components/ui/progress";
+
+type ItemStatus =
+  | "found"
+  | "updated"
+  | "dryRun"
+  | "skippedLowConfidence"
+  | "skippedAggregator"
+  | "skippedNotAllowlisted"
+  | "skippedNoResults"
+  | "skippedError";
 
 type ItemResult = {
   itemId: number;
@@ -21,15 +44,7 @@ type ItemResult = {
   chosenUrl: string;
   confidence: number;
   query: string;
-  status:
-    | "found"
-    | "updated"
-    | "dryRun"
-    | "skippedLowConfidence"
-    | "skippedAggregator"
-    | "skippedNotAllowlisted"
-    | "skippedNoResults"
-    | "skippedError";
+  status: ItemStatus;
   allowlisted?: boolean;
   applyEligible?: boolean;
   note?: string;
@@ -58,19 +73,46 @@ type Summary = {
   results: ItemResult[];
 };
 
+type JobStatus = "queued" | "running" | "done" | "error" | "cancelled";
+
+type Job = {
+  jobId: string;
+  status: JobStatus;
+  mode: "dryRun" | "apply";
+  createdAt: number;
+  startedAt?: number;
+  finishedAt?: number;
+  input: {
+    dryRun?: boolean;
+    limit?: number;
+  };
+  progress: {
+    phase: "scanning" | "processing" | "done";
+    scanned: number;
+    future: number;
+    futureEmpty: number;
+    queue: number;
+    processed: number;
+    results: ItemResult[];
+  };
+  summary?: Summary;
+  error?: string;
+};
+
 type ErrorBody = { error?: string; message?: string };
 
-async function callFillEndpoint(
+async function apiFetch<T>(
+  url: string,
   token: string,
-  body: { dryRun: boolean; limit: number },
-): Promise<Summary> {
-  const res = await fetch("/api/admin/fill-source-urls", {
-    method: "POST",
+  init?: RequestInit,
+): Promise<T> {
+  const res = await fetch(url, {
+    ...init,
     headers: {
       "Content-Type": "application/json",
       "x-admin-token": token,
+      ...(init?.headers ?? {}),
     },
-    body: JSON.stringify(body),
   });
   if (!res.ok) {
     let info: ErrorBody = {};
@@ -82,63 +124,132 @@ async function callFillEndpoint(
     const label = info.error ?? `http-${res.status}`;
     throw new Error(`${label}: ${info.message ?? res.statusText}`);
   }
-  return (await res.json()) as Summary;
+  return (await res.json()) as T;
 }
+
+async function startJob(
+  token: string,
+  body: { dryRun: boolean; limit: number },
+): Promise<Job> {
+  return apiFetch<Job>("/api/admin/fill-source-urls/jobs", token, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+async function getJob(token: string, jobId: string): Promise<Job> {
+  return apiFetch<Job>(
+    `/api/admin/fill-source-urls/jobs/${encodeURIComponent(jobId)}`,
+    token,
+    { method: "GET" },
+  );
+}
+
+async function cancelJob(token: string, jobId: string): Promise<Job> {
+  return apiFetch<Job>(
+    `/api/admin/fill-source-urls/jobs/${encodeURIComponent(jobId)}/cancel`,
+    token,
+    { method: "POST" },
+  );
+}
+
+const POLL_MS = 1500;
 
 export function FillSourceUrlsPanel() {
   const [token, setToken] = useState("");
   const [limit, setLimit] = useState(20);
-  const [summary, setSummary] = useState<Summary | null>(null);
+  const [job, setJob] = useState<Job | null>(null);
   const [pending, setPending] = useState<null | "dry" | "apply">(null);
   const [error, setError] = useState<string | null>(null);
   const [confirming, setConfirming] = useState(false);
+  const pollTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const dryRunCompleted = summary?.mode === "dryRun";
+  useEffect(() => {
+    return () => {
+      if (pollTimer.current) clearTimeout(pollTimer.current);
+    };
+  }, []);
+
+  const isTerminal =
+    job?.status === "done" ||
+    job?.status === "error" ||
+    job?.status === "cancelled";
+  const isRunning =
+    job?.status === "queued" || job?.status === "running";
+  const lastSummary = job?.summary;
+  const dryRunCompleted =
+    job?.status === "done" && job?.mode === "dryRun" && Boolean(lastSummary);
   const hasApplyEligible =
-    dryRunCompleted && summary && summary.dryRunApplyEligible > 0;
+    dryRunCompleted &&
+    lastSummary !== undefined &&
+    lastSummary.dryRunApplyEligible > 0;
 
-  async function runDry() {
+  function pollLoop(activeToken: string, jobId: string) {
+    if (pollTimer.current) clearTimeout(pollTimer.current);
+    pollTimer.current = setTimeout(async () => {
+      try {
+        const next = await getJob(activeToken, jobId);
+        setJob(next);
+        if (
+          next.status === "done" ||
+          next.status === "error" ||
+          next.status === "cancelled"
+        ) {
+          setPending(null);
+          return;
+        }
+        pollLoop(activeToken, jobId);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setPending(null);
+      }
+    }, POLL_MS);
+  }
+
+  async function launch(mode: "dry" | "apply") {
     if (!token.trim()) {
-      setError("Введите admin token (env ADMIN_JOB_TOKEN на Render).");
+      setError("Введите admin token (env ADMIN_JOB_TOKEN на сервере).");
       return;
     }
     setError(null);
     setConfirming(false);
-    setPending("dry");
+    setPending(mode);
+    setJob(null);
     try {
-      const result = await callFillEndpoint(token.trim(), {
-        dryRun: true,
+      const started = await startJob(token.trim(), {
+        dryRun: mode === "dry",
         limit,
       });
-      setSummary(result);
+      setJob(started);
+      pollLoop(token.trim(), started.jobId);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-      setSummary(null);
-    } finally {
       setPending(null);
+    }
+  }
+
+  async function onCancel() {
+    if (!job || !isRunning) return;
+    try {
+      const updated = await cancelJob(token.trim(), job.jobId);
+      setJob(updated);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
   async function runApply() {
-    if (!summary || summary.mode !== "dryRun") {
+    if (!dryRunCompleted) {
       setError("Сначала выполните успешный dry-run.");
       return;
     }
-    setError(null);
-    setConfirming(false);
-    setPending("apply");
-    try {
-      const result = await callFillEndpoint(token.trim(), {
-        dryRun: false,
-        limit,
-      });
-      setSummary(result);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPending(null);
-    }
+    await launch("apply");
   }
+
+  const queueTotal = job?.progress.queue ?? 0;
+  const processed = job?.progress.processed ?? 0;
+  const progressPct =
+    queueTotal > 0 ? Math.min(100, Math.round((processed / queueTotal) * 100)) : 0;
 
   return (
     <Card data-testid="card-admin-fill">
@@ -153,8 +264,14 @@ export function FillSourceUrlsPanel() {
           Ищет официальный сайт для будущих карточек выставок с пустым полем
           «Источник (URL)». Никогда не перезаписывает уже заполненные ссылки.
           Запускается только из этой панели — токен берётся из env
-          <code className="mx-1 rounded bg-muted px-1 py-0.5 text-[11px]">ADMIN_JOB_TOKEN</code>
-          на Render.
+          <code className="mx-1 rounded bg-muted px-1 py-0.5 text-[11px]">
+            ADMIN_JOB_TOKEN
+          </code>
+          на сервере.
+        </p>
+        <p className="text-[11px] text-muted-foreground">
+          Задание выполняется асинхронно. При cold-start контейнера прогресс
+          теряется — можно перезапустить.
         </p>
 
         <div className="grid gap-3 sm:grid-cols-3">
@@ -188,8 +305,8 @@ export function FillSourceUrlsPanel() {
 
         <div className="flex flex-wrap items-center gap-2">
           <Button
-            onClick={runDry}
-            disabled={pending !== null || !token.trim()}
+            onClick={() => launch("dry")}
+            disabled={pending !== null || !token.trim() || isRunning}
             data-testid="button-admin-dry-run"
           >
             {pending === "dry" ? (
@@ -205,6 +322,7 @@ export function FillSourceUrlsPanel() {
               onClick={() => setConfirming(true)}
               disabled={
                 pending !== null ||
+                isRunning ||
                 !dryRunCompleted ||
                 !hasApplyEligible
               }
@@ -241,9 +359,20 @@ export function FillSourceUrlsPanel() {
               </Button>
             </div>
           )}
+          {isRunning && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={onCancel}
+              data-testid="button-admin-cancel-job"
+            >
+              <XCircle className="mr-1 h-3 w-3" />
+              Отменить job
+            </Button>
+          )}
         </div>
 
-        {!dryRunCompleted && (
+        {!dryRunCompleted && !isRunning && (
           <p className="text-xs text-muted-foreground">
             Кнопка Apply активируется после успешного dry-run, если найдены
             кандидаты в allowlist.
@@ -259,11 +388,71 @@ export function FillSourceUrlsPanel() {
           </div>
         )}
 
-        {summary && (
-          <SummaryView summary={summary} />
+        {job && (
+          <JobProgressView
+            job={job}
+            progressPct={progressPct}
+            queueTotal={queueTotal}
+            processed={processed}
+          />
+        )}
+
+        {job && isTerminal && job.summary && (
+          <SummaryView summary={job.summary} />
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function JobProgressView({
+  job,
+  progressPct,
+  queueTotal,
+  processed,
+}: {
+  job: Job;
+  progressPct: number;
+  queueTotal: number;
+  processed: number;
+}) {
+  const phaseLabel =
+    job.status === "queued"
+      ? "Очередь…"
+      : job.status === "running" && job.progress.phase === "scanning"
+        ? "Сканирование CRM…"
+        : job.status === "running"
+          ? "Обработка кандидатов…"
+          : job.status === "cancelled"
+            ? "Отменено"
+            : job.status === "error"
+              ? "Ошибка"
+              : "Готово";
+  return (
+    <div
+      className="rounded border bg-muted/30 p-2 text-xs"
+      data-testid="block-admin-progress"
+    >
+      <div className="flex items-center justify-between">
+        <span className="font-medium">{phaseLabel}</span>
+        <span className="font-mono text-muted-foreground">
+          {processed}/{queueTotal || "?"}
+        </span>
+      </div>
+      <Progress className="mt-1 h-1.5" value={progressPct} />
+      <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground">
+        <span>jobId: <span className="font-mono">{job.jobId.slice(0, 8)}…</span></span>
+        <span>mode: {job.mode}</span>
+        <span>scanned: {job.progress.scanned}</span>
+        <span>future: {job.progress.future}</span>
+        <span>futureEmpty: {job.progress.futureEmpty}</span>
+      </div>
+      {job.error && (
+        <div className="mt-1 text-red-600 dark:text-red-300">
+          {job.error}
+        </div>
+      )}
+    </div>
   );
 }
 
