@@ -57,6 +57,13 @@ export type FillSourceUrlsOptions = {
   sleepMs?: number;
   /** Allow apply against domains outside OFFICIAL_ALLOWLIST_DOMAINS. */
   allowUnlisted?: boolean;
+  /**
+   * Optional whitelist of Bitrix item IDs to process. When provided, items
+   * outside this set are filtered out AFTER the future-only / empty filter,
+   * so existing safety gates still apply. Use this to apply only a reviewed
+   * subset of dry-run candidates.
+   */
+  onlyIds?: number[];
   /** Override today's date (mainly for tests). */
   todayIso?: string;
   /** Optional cancellation signal. */
@@ -104,6 +111,7 @@ export type FillSourceUrlsSummary = {
   future: number;
   futureEmpty: number;
   queue: number;
+  skippedNotSelected: number;
   found: number;
   updated: number;
   skippedLowConfidence: number;
@@ -507,7 +515,15 @@ export async function runFillSourceUrls(
     ),
   );
   const empty = futureItems.filter((it) => !sourceUrlOf(it));
-  const queue = limit > 0 ? empty.slice(0, limit) : empty;
+  const onlyIdsSet =
+    options.onlyIds && options.onlyIds.length > 0
+      ? new Set(options.onlyIds.map((n) => Number(n)).filter((n) => Number.isFinite(n)))
+      : null;
+  const selected = onlyIdsSet
+    ? empty.filter((it) => onlyIdsSet.has(Number(it.id)))
+    : empty;
+  const skippedNotSelected = onlyIdsSet ? empty.length - selected.length : 0;
+  const queue = limit > 0 ? selected.slice(0, limit) : selected;
 
   const results: FillSourceUrlsItemResult[] = [];
 
@@ -556,6 +572,7 @@ export async function runFillSourceUrls(
     future: futureItems.length,
     futureEmpty: empty.length,
     queue: queue.length,
+    skippedNotSelected,
     allowlistEntries: OFFICIAL_ALLOWLIST_DOMAINS.length,
   });
 

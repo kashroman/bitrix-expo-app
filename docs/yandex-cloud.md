@@ -276,7 +276,8 @@ up at `.github/workflows/fill-source-urls.yml`:
 
 - Trigger: `workflow_dispatch` only (never on push).
 - Inputs: `mode` (`dry-run` default / `apply`), `limit` (default `20`),
-  optional `min_confidence`, optional `allow_unlisted` (default `false`).
+  optional `min_confidence`, optional `allow_unlisted` (default `false`),
+  optional `only_ids` (comma-separated Bitrix item IDs — empty = all).
 - Reads `BITRIX_WEBHOOK_URL` from repo secrets (masked, never echoed).
 - Tees per-item output to an artifact (`fill-source-urls-log`) and pushes
   the summary line to the GitHub step summary.
@@ -292,6 +293,12 @@ gh workflow run fill-source-urls.yml \
 # Apply, 50 items, allowlist-only
 gh workflow run fill-source-urls.yml \
   -f mode=apply -f limit=50
+
+# Apply only specific reviewed item IDs (after auditing a dry-run that
+# included false positives — use only_ids to narrow the apply to the
+# items you have confirmed are safe).
+gh workflow run fill-source-urls.yml \
+  -f mode=apply -f only_ids=1220,1198
 ```
 
 The CLI itself (`npm run fill-source-urls`) defaults to `--dry-run` and

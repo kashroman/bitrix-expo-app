@@ -42,6 +42,10 @@ on:
         required: false
         type: boolean
         default: false
+      only_ids:
+        description: "Comma-separated Bitrix item IDs to process (e.g. '1220,1198'). Empty = all future-empty items. Use after reviewing dry-run output to apply only safe matches."
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -67,6 +71,7 @@ jobs:
           INPUT_LIMIT:          ${{ github.event.inputs.limit }}
           INPUT_MIN_CONFIDENCE: ${{ github.event.inputs.min_confidence }}
           INPUT_ALLOW_UNLISTED: ${{ github.event.inputs.allow_unlisted }}
+          INPUT_ONLY_IDS:       ${{ github.event.inputs.only_ids }}
         run: |
           set -euo pipefail
           set +x
@@ -109,12 +114,23 @@ jobs:
               ;;
           esac
 
+          ONLY_IDS_RAW="${INPUT_ONLY_IDS:-}"
+          # Normalise: drop spaces, accept comma-separated positive integers.
+          ONLY_IDS_CLEAN=$(printf '%s' "$ONLY_IDS_RAW" | tr -d '[:space:]')
+          if [ -n "$ONLY_IDS_CLEAN" ]; then
+            if ! [[ "$ONLY_IDS_CLEAN" =~ ^[0-9]+(,[0-9]+)*$ ]]; then
+              echo "::error::only_ids must be a comma-separated list of positive integers, got '$ONLY_IDS_RAW'" >&2
+              exit 1
+            fi
+          fi
+
           echo "mode=$MODE"                     >> "$GITHUB_OUTPUT"
           echo "limit=$LIMIT_RAW"               >> "$GITHUB_OUTPUT"
           echo "min_confidence=$MIN_CONF_RAW"   >> "$GITHUB_OUTPUT"
           echo "allow_unlisted=$ALLOW_UNLISTED" >> "$GITHUB_OUTPUT"
+          echo "only_ids=$ONLY_IDS_CLEAN"       >> "$GITHUB_OUTPUT"
 
-          echo "Resolved: mode=$MODE limit=$LIMIT_RAW min_confidence=${MIN_CONF_RAW:-default} allow_unlisted=$ALLOW_UNLISTED"
+          echo "Resolved: mode=$MODE limit=$LIMIT_RAW min_confidence=${MIN_CONF_RAW:-default} allow_unlisted=$ALLOW_UNLISTED only_ids=${ONLY_IDS_CLEAN:-<all>}"
 
       - name: Install dependencies
         run: npm ci
@@ -130,6 +146,7 @@ jobs:
           LIMIT:          ${{ steps.cfg.outputs.limit }}
           MIN_CONFIDENCE: ${{ steps.cfg.outputs.min_confidence }}
           ALLOW_UNLISTED: ${{ steps.cfg.outputs.allow_unlisted }}
+          ONLY_IDS:       ${{ steps.cfg.outputs.only_ids }}
         run: |
           set -euo pipefail
           set +x
@@ -151,6 +168,10 @@ jobs:
           fi
           if [ "${ALLOW_UNLISTED:-false}" = "true" ]; then
             ARGS+=("--allow-unlisted")
+          fi
+          if [ -n "${ONLY_IDS:-}" ]; then
+            echo "Restricting to reviewed item IDs: $ONLY_IDS"
+            ARGS+=("--only-ids=$ONLY_IDS")
           fi
 
           mkdir -p /tmp/fsu
@@ -175,6 +196,7 @@ jobs:
           LIMIT:          ${{ steps.cfg.outputs.limit }}
           MIN_CONFIDENCE: ${{ steps.cfg.outputs.min_confidence }}
           ALLOW_UNLISTED: ${{ steps.cfg.outputs.allow_unlisted }}
+          ONLY_IDS:       ${{ steps.cfg.outputs.only_ids }}
         run: |
           set -euo pipefail
           set +x
@@ -185,6 +207,7 @@ jobs:
             echo "- limit: \`${LIMIT:-20}\`"
             echo "- min_confidence: \`${MIN_CONFIDENCE:-default}\`"
             echo "- allow_unlisted: \`${ALLOW_UNLISTED:-false}\`"
+            echo "- only_ids: \`${ONLY_IDS:-<all>}\`"
             echo "- BITRIX_WEBHOOK_URL: provided via repo secret (masked)"
             echo ""
             if [ -f /tmp/fsu/fill-source-urls.log ]; then

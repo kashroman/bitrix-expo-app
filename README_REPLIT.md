@@ -153,7 +153,10 @@ Bitrix24, хранящийся в переменной окружения `BITRI
 CLI-флаги: `--dry-run` (по умолчанию), `--apply`, `--limit=N`,
 `--min-confidence=0.85`, `--since=YYYY-MM-DD`, `--sleep-ms=1000`,
 `--allow-unlisted` (по умолчанию выключено), `--print-allowlist`
-(показать текущий allowlist и выйти).
+(показать текущий allowlist и выйти),
+`--only-ids=1220,1198` (или env `ONLY_IDS=...`) — после ревью dry-run
+запустить `--apply` только по проверенным item id; элементы вне списка
+получат `skippedNotSelected` и в CRM не пишутся.
 
 Команды для Render Shell:
 
@@ -166,6 +169,9 @@ npm run fill-source-urls -- --apply --limit=50
 
 # Если нужно (после ручного ревью) — записать unlisted-домены тоже
 npm run fill-source-urls -- --apply --limit=50 --allow-unlisted
+
+# Записать только проверенные id (остальные пропустить как skippedNotSelected)
+npm run fill-source-urls -- --apply --only-ids=1220,1198
 ```
 
 Рекомендуемый порядок для первого продового запуска:

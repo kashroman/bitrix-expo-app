@@ -28,7 +28,19 @@ type CliFlags = {
   sleepMs: number;
   allowUnlisted: boolean;
   printAllowlist: boolean;
+  onlyIds?: number[];
 };
+
+function parseOnlyIds(raw: string | undefined): number[] | undefined {
+  if (!raw) return undefined;
+  const ids = raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0)
+    .map((s) => Number.parseInt(s, 10))
+    .filter((n) => Number.isFinite(n) && n > 0);
+  return ids.length > 0 ? Array.from(new Set(ids)) : undefined;
+}
 
 function parseFlags(argv: string[]): CliFlags {
   const flags: CliFlags = {
@@ -80,7 +92,18 @@ function parseFlags(argv: string[]): CliFlags {
         if (Number.isFinite(n) && n >= 0) flags.sleepMs = n;
         break;
       }
+      case "--only-ids": {
+        const ids = parseOnlyIds(val);
+        if (ids) flags.onlyIds = ids;
+        break;
+      }
     }
+  }
+  // ONLY_IDS env can supply the same list when --only-ids is not provided
+  // (useful for workflow runners that prefer env vars to CLI args).
+  if (!flags.onlyIds) {
+    const envIds = parseOnlyIds(process.env.ONLY_IDS);
+    if (envIds) flags.onlyIds = envIds;
   }
   return flags;
 }
@@ -107,7 +130,8 @@ async function main(): Promise<void> {
       ` minConfidence=${flags.minConfidence} limit=${flags.limit || "∞"}` +
       ` sleepMs=${flags.sleepMs}${flags.since ? ` since=${flags.since}` : ""}` +
       ` allowlistEntries=${OFFICIAL_ALLOWLIST_DOMAINS.length}` +
-      ` allowUnlisted=${flags.allowUnlisted}`,
+      ` allowUnlisted=${flags.allowUnlisted}` +
+      (flags.onlyIds ? ` onlyIds=[${flags.onlyIds.join(",")}]` : ""),
   );
 
   let summary;
@@ -119,6 +143,7 @@ async function main(): Promise<void> {
       since: flags.since,
       sleepMs: flags.sleepMs,
       allowUnlisted: flags.allowUnlisted,
+      onlyIds: flags.onlyIds,
       todayIso,
     });
   } catch (err) {
@@ -130,7 +155,10 @@ async function main(): Promise<void> {
   }
 
   console.log(
-    `[fill-source-urls] scanned=${summary.scanned} future=${summary.future} futureEmpty=${summary.futureEmpty} queue=${summary.queue}`,
+    `[fill-source-urls] scanned=${summary.scanned} future=${summary.future} futureEmpty=${summary.futureEmpty} queue=${summary.queue}` +
+      (summary.skippedNotSelected
+        ? ` skippedNotSelected=${summary.skippedNotSelected}`
+        : ""),
   );
   for (let i = 0; i < summary.results.length; i++) {
     const r = summary.results[i];
@@ -151,6 +179,8 @@ async function main(): Promise<void> {
   const counts = {
     scanned: summary.scanned,
     futureEmpty: summary.futureEmpty,
+    queue: summary.queue,
+    skippedNotSelected: summary.skippedNotSelected,
     found: summary.found,
     updated: summary.updated,
     skippedLowConfidence: summary.skippedLowConfidence,

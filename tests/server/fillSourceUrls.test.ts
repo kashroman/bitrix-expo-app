@@ -159,6 +159,62 @@ describe("runFillSourceUrls — service", () => {
     );
   });
 
+  it("onlyIds filters the queue to the reviewed IDs (apply path)", async () => {
+    const items = [
+      { ...futureExpoItem, id: 1220 },
+      { ...futureExpoItem, id: 1198 },
+      { ...futureExpoItem, id: 1199, title: "Технофорум 2026" },
+      { ...futureExpoItem, id: 1200, title: "СТО Экспо 2026" },
+    ];
+    const { fakeBx, ddgSearch, sleep, now, calls } = makeDeps({
+      items,
+      ddgResults: [allowlistedSearchHit],
+    });
+    const summary = await runFillSourceUrls(
+      {
+        dryRun: false,
+        todayIso: "2026-05-12",
+        sleepMs: 0,
+        onlyIds: [1220, 1198],
+      },
+      { bx: fakeBx, ddgSearch, sleep, now },
+    );
+    assert.equal(summary.futureEmpty, 4);
+    assert.equal(summary.queue, 2);
+    assert.equal(summary.skippedNotSelected, 2);
+    // Only the two selected IDs reach the per-item processing path.
+    const processedIds = summary.results.map((r) => r.itemId).sort();
+    assert.deepEqual(processedIds, [1198, 1220]);
+    // Update calls must be limited to selected IDs.
+    const updateIds = calls
+      .filter((c) => c.method === "crm.item.update")
+      .map((c) => Number(c.params.id))
+      .sort();
+    assert.deepEqual(updateIds, [1198, 1220]);
+  });
+
+  it("onlyIds in dry-run still excludes non-selected items from results", async () => {
+    const items = [
+      { ...futureExpoItem, id: 1220 },
+      { ...futureExpoItem, id: 1199, title: "Технофорум 2026" },
+    ];
+    const { fakeBx, ddgSearch, sleep, now, calls } = makeDeps({
+      items,
+      ddgResults: [allowlistedSearchHit],
+    });
+    const summary = await runFillSourceUrls(
+      { dryRun: true, todayIso: "2026-05-12", sleepMs: 0, onlyIds: [1220] },
+      { bx: fakeBx, ddgSearch, sleep, now },
+    );
+    assert.equal(summary.skippedNotSelected, 1);
+    assert.equal(summary.results.length, 1);
+    assert.equal(summary.results[0].itemId, 1220);
+    assert.equal(
+      calls.filter((c) => c.method === "crm.item.update").length,
+      0,
+    );
+  });
+
   it("limit clamps the queue size", async () => {
     const items = Array.from({ length: 5 }).map((_, i) => ({
       ...futureExpoItem,
