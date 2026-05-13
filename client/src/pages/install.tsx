@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { CheckCircle2, FileWarning, Loader2 } from "lucide-react";
+import { CheckCircle2, FileWarning, Loader2, Search } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -36,16 +36,52 @@ type InstallTargetHandler = {
   description: string;
 };
 
+type VerifyEntry = {
+  placement: string;
+  expectedHandler: string;
+  found: boolean;
+  actualHandler?: string;
+  message?: string;
+};
+
 type InstallDiagnostics = {
   origin: string;
   registered: RegisteredHandler[];
+  registeredError?: string;
   stale: RegisteredHandler[];
   unbound: { placement: string; handler: string; ok: boolean; message?: string }[];
   bound: { placement: string; handler: string; ok: boolean; alreadyBound: boolean; message?: string }[];
   targets: InstallTargetHandler[];
+  verified: VerifyEntry[];
   errors: string[];
   finished: boolean;
 };
+
+type CheckDiagnostics = {
+  origin: string;
+  registered: RegisteredHandler[];
+  managedRows: RegisteredHandler[];
+  errorMessage?: string;
+  ranAt: string;
+};
+
+const YANDEX_HOST_MARKER = "containers.yandexcloud.net";
+const RENDER_HOST_MARKER = "onrender.com";
+
+function classifyHost(handler: string, currentOrigin: string): { label: string; tone: "ok" | "stale" | "neutral" } {
+  if (!handler) return { label: "—", tone: "neutral" };
+  let url: URL;
+  try {
+    url = new URL(handler);
+  } catch {
+    return { label: "невалидный URL", tone: "stale" };
+  }
+  const host = url.host.toLowerCase();
+  if (currentOrigin && url.origin === currentOrigin) return { label: `current (${host})`, tone: "ok" };
+  if (host.includes(YANDEX_HOST_MARKER)) return { label: `Yandex (${host})`, tone: "ok" };
+  if (host.includes(RENDER_HOST_MARKER)) return { label: `Render-legacy (${host})`, tone: "stale" };
+  return { label: host, tone: "neutral" };
+}
 
 export default function InstallPage() {
   const ready = useQuery({
@@ -59,6 +95,8 @@ export default function InstallPage() {
   const [manualEntityTypeId, setManualEntityTypeId] = useState(String(EXPO_ENTITY_TYPE_ID));
   const [installStatus, setInstallStatus] = useState<{ tone: "success" | "warning"; title: string; text: string } | null>(null);
   const [diagnostics, setDiagnostics] = useState<InstallDiagnostics | null>(null);
+  const [checkStatus, setCheckStatus] = useState<{ tone: "success" | "warning"; title: string; text: string } | null>(null);
+  const [checkDiagnostics, setCheckDiagnostics] = useState<CheckDiagnostics | null>(null);
   const entityTypeId = Number(manualEntityTypeId) || EXPO_ENTITY_TYPE_ID;
 
   const install = useMutation({
@@ -120,6 +158,7 @@ export default function InstallPage() {
         unbound: [],
         bound: [],
         targets,
+        verified: [],
         errors: [],
         finished: false,
       };
@@ -127,7 +166,9 @@ export default function InstallPage() {
       try {
         diag.registered = await listRegisteredPlacements();
       } catch (error) {
-        diag.errors.push(`placement.get: ${error instanceof Error ? error.message : String(error)}`);
+        const msg = error instanceof Error ? error.message : String(error);
+        diag.registeredError = msg;
+        diag.errors.push(`placement.get: ${msg}`);
       }
       setDiagnostics({ ...diag });
 
@@ -190,14 +231,48 @@ export default function InstallPage() {
         setDiagnostics({ ...diag });
       }
 
+      // Post-bind verification: re-query placement.get and match each target.
+      let verifyRows: RegisteredHandler[] = [];
+      try {
+        verifyRows = await listRegisteredPlacements();
+        diag.registered = verifyRows;
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        diag.errors.push(`placement.get (verify): ${msg}`);
+      }
+      diag.verified = targets.map((target) => {
+        const match = verifyRows.find(
+          (row) => row.placement === target.placement && row.handler === target.handler,
+        );
+        if (match) {
+          return { placement: target.placement, expectedHandler: target.handler, found: true, actualHandler: match.handler };
+        }
+        const samePlacement = verifyRows.find((row) => row.placement === target.placement);
+        return {
+          placement: target.placement,
+          expectedHandler: target.handler,
+          found: false,
+          actualHandler: samePlacement?.handler,
+          message: samePlacement
+            ? "найден другой handler для этого placement"
+            : "placement.get не вернул этот handler",
+        };
+      });
+      setDiagnostics({ ...diag });
+
       const allBindsOk = diag.bound.every((entry) => entry.ok);
-      if (allBindsOk) {
+      const allVerifiedOk = diag.verified.every((v) => v.found);
+      if (allBindsOk && allVerifiedOk) {
         try {
           window.BX24.installFinish();
           diag.finished = true;
         } catch (error) {
           diag.errors.push(`installFinish: ${error instanceof Error ? error.message : String(error)}`);
         }
+      } else if (allBindsOk && !allVerifiedOk) {
+        diag.errors.push(
+          `Не вызываем installFinish: placement.get не подтвердил ${diag.verified.filter((v) => !v.found).length} handler(ов).`,
+        );
       }
       setDiagnostics({ ...diag });
 
@@ -216,6 +291,40 @@ export default function InstallPage() {
     },
   });
 
+  const check = useMutation({
+    mutationFn: async (): Promise<CheckDiagnostics> => {
+      if (!window.BX24) throw new Error("Откройте страницу внутри Bitrix24 — BX24 SDK недоступен.");
+      const origin = window.location.origin;
+      const managed = new Set(getManagedPlacements(entityTypeId));
+      const ranAt = new Date().toISOString();
+      try {
+        const rows = await listRegisteredPlacements();
+        const managedRows = rows.filter((row) => managed.has(row.placement));
+        return { origin, registered: rows, managedRows, ranAt };
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return { origin, registered: [], managedRows: [], errorMessage: msg, ranAt };
+      }
+    },
+    onSuccess: (data) => {
+      setCheckDiagnostics(data);
+      if (data.errorMessage) {
+        setCheckStatus({ tone: "warning", title: "placement.get вернул ошибку", text: data.errorMessage });
+      } else {
+        const yandexCount = data.managedRows.filter((r) => r.handler.includes(YANDEX_HOST_MARKER)).length;
+        const renderCount = data.managedRows.filter((r) => r.handler.includes(RENDER_HOST_MARKER)).length;
+        setCheckStatus({
+          tone: renderCount > 0 ? "warning" : "success",
+          title: `placement.get: managed=${data.managedRows.length}`,
+          text: `Yandex handlers: ${yandexCount}, Render-legacy: ${renderCount}, всего строк: ${data.registered.length}.`,
+        });
+      }
+    },
+    onError: (error) => {
+      setCheckStatus({ tone: "warning", title: "Не удалось проверить placements", text: error instanceof Error ? error.message : String(error) });
+    },
+  });
+
   return (
     <Shell>
       <PageTitle
@@ -229,7 +338,11 @@ export default function InstallPage() {
           <CardHeader><CardTitle className="text-lg">Действия</CardTitle></CardHeader>
           <CardContent className="space-y-4">
             {!ready.data?.inside && (
-              <Notice tone="warning" title="Открыто вне Bitrix24" text="Кнопка установки работает только внутри iframe установки Bitrix24." />
+              <Notice
+                tone="warning"
+                title="Открыто вне Bitrix24"
+                text="BX24 SDK недоступен. Кнопки установки и проверки требуют контекста Bitrix24 (iframe приложения). Откройте страницу /install через карточку приложения внутри Bitrix24, чтобы placement.bind/get работали."
+              />
             )}
             <div className="grid gap-2">
               <Label htmlFor="entity-type-id">entityTypeId смарт-процесса “Выставки”</Label>
@@ -253,15 +366,28 @@ export default function InstallPage() {
               <code className="rounded bg-background px-2 py-1 text-xs">LEFT_MENU → /placement-menu</code>
             </div>
             {installStatus && <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} />}
-            <Button onClick={() => install.mutate()} disabled={install.isPending || !ready.data?.inside} data-testid="button-install">
-              {install.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
-              Переустановить и завершить установку
-            </Button>
+            {checkStatus && <Notice tone={checkStatus.tone} title={checkStatus.title} text={checkStatus.text} />}
+            <div className="flex flex-wrap gap-2">
+              <Button onClick={() => install.mutate()} disabled={install.isPending || !ready.data?.inside} data-testid="button-install">
+                {install.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
+                Переустановить и завершить установку
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => check.mutate()}
+                disabled={check.isPending || !ready.data?.inside}
+                data-testid="button-check-placements"
+              >
+                {check.isPending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Search className="mr-2 h-4 w-4" />}
+                Проверить placements
+              </Button>
+            </div>
           </CardContent>
         </Card>
 
         <DiagnosticsPanel diagnostics={diagnostics} entityTypeId={entityTypeId} />
       </div>
+      <CheckPanel diagnostics={checkDiagnostics} entityTypeId={entityTypeId} />
       <LinkFieldsCard inside={Boolean(ready.data?.inside)} />
       <Card className="mt-6 border-blue-300 bg-blue-50 dark:border-blue-900 dark:bg-blue-950/30">
         <CardHeader>
@@ -313,16 +439,61 @@ function DiagnosticsPanel({ diagnostics, entityTypeId }: { diagnostics: InstallD
         <Separator />
         <div>
           <div className="mb-2 text-sm font-medium">Зарегистрировано ({diagnostics.registered.length})</div>
-          {diagnostics.registered.length === 0 ? (
+          {diagnostics.registeredError ? (
+            <div className="text-sm text-red-600">placement.get: {diagnostics.registeredError}</div>
+          ) : diagnostics.registered.length === 0 ? (
             <div className="text-sm text-muted-foreground">placement.get не вернул строк.</div>
           ) : (
             <div className="grid gap-2">
-              {diagnostics.registered.filter((row) => managed.has(row.placement)).map((row, index) => (
+              {diagnostics.registered.filter((row) => managed.has(row.placement)).map((row, index) => {
+                const stale = diagnostics.stale.some((s) => s.handler === row.handler && s.placement === row.placement);
+                const cls = classifyHost(row.handler, diagnostics.origin);
+                return (
+                  <Row
+                    key={`reg-${index}`}
+                    placement={row.placement}
+                    handler={row.handler}
+                    tone={stale ? "stale" : cls.tone}
+                    note={cls.label}
+                  />
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <Separator />
+        <div>
+          <div className="mb-2 text-sm font-medium">Проверка после bind ({diagnostics.verified.length})</div>
+          {diagnostics.verified.length === 0 ? (
+            <div className="text-sm text-muted-foreground">Не выполнена.</div>
+          ) : (
+            <div className="grid gap-2">
+              {diagnostics.verified.map((v, index) => (
                 <Row
-                  key={`reg-${index}`}
+                  key={`verify-${index}`}
+                  placement={v.placement}
+                  handler={v.found ? v.actualHandler ?? v.expectedHandler : (v.actualHandler ?? v.expectedHandler)}
+                  tone={v.found ? "ok" : "error"}
+                  note={v.found ? "найден в placement.get" : v.message}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+        <Separator />
+        <div>
+          <div className="mb-2 text-sm font-medium">Unbind stale ({diagnostics.unbound.length})</div>
+          {diagnostics.unbound.length === 0 ? (
+            <div className="text-sm text-muted-foreground">Stale handlers не найдено или unbind не выполнялся.</div>
+          ) : (
+            <div className="grid gap-2">
+              {diagnostics.unbound.map((row, index) => (
+                <Row
+                  key={`unbind-${index}`}
                   placement={row.placement}
                   handler={row.handler}
-                  tone={diagnostics.stale.some((s) => s.handler === row.handler && s.placement === row.placement) ? "stale" : "neutral"}
+                  tone={row.ok ? "ok" : "error"}
+                  note={row.ok ? "unbound" : row.message}
                 />
               ))}
             </div>
@@ -359,6 +530,95 @@ function DiagnosticsPanel({ diagnostics, entityTypeId }: { diagnostics: InstallD
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+function CheckPanel({ diagnostics, entityTypeId }: { diagnostics: CheckDiagnostics | null; entityTypeId: number }) {
+  const managed = useMemo(() => new Set(getManagedPlacements(entityTypeId)), [entityTypeId]);
+  if (!diagnostics) return null;
+  const yandexRows = diagnostics.managedRows.filter((r) => r.handler.includes(YANDEX_HOST_MARKER));
+  const renderRows = diagnostics.managedRows.filter((r) => r.handler.includes(RENDER_HOST_MARKER));
+  const otherRows = diagnostics.managedRows.filter(
+    (r) => !r.handler.includes(YANDEX_HOST_MARKER) && !r.handler.includes(RENDER_HOST_MARKER),
+  );
+  const unmanagedRows = diagnostics.registered.filter((r) => !managed.has(r.placement));
+  return (
+    <Card className="mt-6" data-testid="card-check-placements">
+      <CardHeader>
+        <CardTitle className="text-base">placement.get — текущая регистрация</CardTitle>
+      </CardHeader>
+      <CardContent className="space-y-3 text-sm">
+        <div className="text-xs text-muted-foreground">Запущено: {diagnostics.ranAt}. Origin: <code>{diagnostics.origin}</code>.</div>
+        {diagnostics.errorMessage ? (
+          <div className="rounded-md border border-red-300 bg-red-50 p-2 text-red-700 dark:border-red-900 dark:bg-red-950/30">
+            placement.get отказано: <code className="break-all">{diagnostics.errorMessage}</code>
+          </div>
+        ) : (
+          <>
+            <div className="grid gap-2 text-xs sm:grid-cols-3">
+              <Stat label="Yandex" value={yandexRows.length} tone="ok" />
+              <Stat label="Render-legacy" value={renderRows.length} tone={renderRows.length > 0 ? "stale" : "neutral"} />
+              <Stat label="Other host" value={otherRows.length} tone="neutral" />
+            </div>
+            <div>
+              <div className="mb-2 text-xs font-medium">Managed placements ({diagnostics.managedRows.length})</div>
+              {diagnostics.managedRows.length === 0 ? (
+                <div className="text-xs text-muted-foreground">Нет managed handlers в ответе placement.get.</div>
+              ) : (
+                <div className="grid gap-2">
+                  {diagnostics.managedRows.map((row, index) => {
+                    const cls = classifyHost(row.handler, diagnostics.origin);
+                    return (
+                      <Row
+                        key={`mng-${index}`}
+                        placement={row.placement}
+                        handler={row.handler}
+                        tone={cls.tone}
+                        note={cls.label}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            {unmanagedRows.length > 0 && (
+              <details className="text-xs">
+                <summary className="cursor-pointer text-muted-foreground">
+                  Прочие placement-ы ({unmanagedRows.length})
+                </summary>
+                <div className="mt-2 grid gap-2">
+                  {unmanagedRows.map((row, index) => {
+                    const cls = classifyHost(row.handler, diagnostics.origin);
+                    return (
+                      <Row
+                        key={`oth-${index}`}
+                        placement={row.placement}
+                        handler={row.handler}
+                        tone={cls.tone}
+                        note={cls.label}
+                      />
+                    );
+                  })}
+                </div>
+              </details>
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function Stat({ label, value, tone }: { label: string; value: number; tone: "ok" | "stale" | "neutral" }) {
+  const color =
+    tone === "ok" ? "border-emerald-300 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-950/30"
+    : tone === "stale" ? "border-amber-300 bg-amber-50 dark:border-amber-900 dark:bg-amber-950/30"
+    : "border-border bg-card";
+  return (
+    <div className={`rounded-md border p-2 ${color}`}>
+      <div className="text-[11px] uppercase tracking-wide text-muted-foreground">{label}</div>
+      <div className="text-lg font-semibold">{value}</div>
+    </div>
   );
 }
 
