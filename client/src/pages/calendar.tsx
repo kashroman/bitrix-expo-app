@@ -1,7 +1,7 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown, Loader2 } from "lucide-react";
+import { RefreshCw, BarChart3, CalendarDays, List as ListIcon, Search, ChevronDown, Loader2, Hammer } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,16 +10,21 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
 import { GanttTimeline } from "@/components/gantt";
 import { CalendarView } from "@/components/calendar-view";
+import { BuildScheduleView } from "@/components/build-schedule";
 import {
   buildExpoAggregate,
+  BuildScheduleDeal,
+  BuildScheduleResult,
   ExpoAggregate,
   ExpoItem,
+  fetchBuildScheduleDeals,
   fetchDealsForStageProbe,
   fetchExpoList,
   fetchExposByMonth,
   fetchDealStages,
   fetchDealStagesDetailed,
   fetchMonthlyDealsByRecentScan,
+  filterExposWithBuildScheduleDeals,
   isFoundAggregate,
   probeDealById,
   statusTitleMap,
@@ -56,7 +61,7 @@ import {
   getExpoFieldDiscovery,
 } from "@/lib/expo-fields";
 
-type ViewMode = "gantt" | "calendar" | "list";
+type ViewMode = "gantt" | "calendar" | "list" | "build-schedule";
 type PeriodMode = "all" | "current" | "future" | "past" | "year";
 
 // Recent-deal-scan tuning. The Gantt renders exhibitions first (a
@@ -95,7 +100,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   const monthExpos = useQuery<MonthExpoLoadResult>({
     queryKey: ["expo-list-month", activeMonthKey],
     queryFn: () => fetchExposByMonth(activeMonth),
-    enabled: isBitrix && view === "gantt",
+    enabled: isBitrix && (view === "gantt" || view === "build-schedule"),
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -108,10 +113,12 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     placeholderData: keepPreviousData,
   });
 
+  const usesMonthScopedExpos = view === "gantt" || view === "build-schedule";
+
   const expos = useQuery({
     queryKey: ["expo-list"],
     queryFn: fetchExpoList,
-    enabled: isBitrix && view !== "gantt",
+    enabled: isBitrix && !usesMonthScopedExpos,
   });
 
   // With placeholderData: keepPreviousData the query returns last month's
@@ -119,37 +126,35 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // the active month — otherwise expose an empty list and flag fetching.
   const monthDataIsForActiveMonth =
     monthExpos.data?.diagnostics.monthKey === activeMonthKey;
-  const activeExpos: ExpoItem[] =
-    view === "gantt"
-      ? monthDataIsForActiveMonth
-        ? monthExpos.data?.items ?? []
-        : []
-      : expos.data ?? [];
+  const activeExpos: ExpoItem[] = usesMonthScopedExpos
+    ? monthDataIsForActiveMonth
+      ? monthExpos.data?.items ?? []
+      : []
+    : expos.data ?? [];
   // First-time load: no data yet, query is fetching. On subsequent month
   // switches we keep GanttView mounted and surface fetching state inside.
-  const ganttFirstLoad =
-    view === "gantt" && monthExpos.isFetching && !monthExpos.data;
-  const activeIsLoading =
-    view === "gantt" ? ganttFirstLoad : expos.isLoading;
-  const ganttIsFetchingNewMonth =
-    view === "gantt" &&
+  const monthFirstLoad =
+    usesMonthScopedExpos && monthExpos.isFetching && !monthExpos.data;
+  const activeIsLoading = usesMonthScopedExpos ? monthFirstLoad : expos.isLoading;
+  const monthIsFetchingNewMonth =
+    usesMonthScopedExpos &&
     monthExpos.isFetching &&
     !monthDataIsForActiveMonth &&
     Boolean(monthExpos.data);
-  const activeIsError =
-    view === "gantt"
-      ? monthExpos.isError ||
-        (monthDataIsForActiveMonth &&
-          Boolean(monthExpos.data?.diagnostics.error))
-      : expos.isError;
-  const activeError =
-    view === "gantt"
-      ? (monthDataIsForActiveMonth
-          ? monthExpos.data?.diagnostics.error
-          : undefined) ??
-        (monthExpos.error as Error | undefined)?.message ??
-        monthExpos.error
-      : (expos.error as Error | undefined)?.message ?? expos.error;
+  const ganttIsFetchingNewMonth =
+    view === "gantt" && monthIsFetchingNewMonth;
+  const activeIsError = usesMonthScopedExpos
+    ? monthExpos.isError ||
+      (monthDataIsForActiveMonth &&
+        Boolean(monthExpos.data?.diagnostics.error))
+    : expos.isError;
+  const activeError = usesMonthScopedExpos
+    ? (monthDataIsForActiveMonth
+        ? monthExpos.data?.diagnostics.error
+        : undefined) ??
+      (monthExpos.error as Error | undefined)?.message ??
+      monthExpos.error
+    : (expos.error as Error | undefined)?.message ?? expos.error;
 
   const responsibles = useMemo(() => {
     const ids = new Set<string>();
@@ -187,7 +192,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // 30 IDs/chunk × concurrency 2 means a 60-row visible set finishes
   // in 1–2 round-trips.
   const counterExpoIds = useMemo(() => {
-    if (view === "gantt") {
+    if (view === "gantt" || view === "build-schedule") {
       return exposOverlappingMonth(filtered, activeMonth).map((e) => e.id);
     }
     return filtered.map((e) => e.id);
@@ -195,6 +200,33 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
 
   const bulkCounts = useBulkExpoCounts(counterExpoIds, {
     enabled: isBitrix && counterExpoIds.length > 0,
+  });
+
+  // --- Build Schedule data ---
+  // Fetch deal details (id/title/client/manager/budget/stage) for the
+  // exhibitions visible in the current month, using the @<dealField>
+  // chunked IN-filter so the number of REST calls stays bounded by
+  // ceil(N/30). Stage filter is applied server-side via @STAGE_ID and
+  // again client-side as a safety net.
+  const buildScheduleExpoIds = useMemo(() => {
+    if (view !== "build-schedule") return [] as number[];
+    return exposOverlappingMonth(filtered, activeMonth).map((e) => Number(e.id));
+  }, [view, filtered, activeMonth]);
+  const buildScheduleKey = useMemo(
+    () => buildScheduleExpoIds.slice().sort((a, b) => a - b),
+    [buildScheduleExpoIds],
+  );
+  const buildScheduleQuery = useQuery<BuildScheduleResult>({
+    queryKey: ["build-schedule-deals", activeMonthKey, buildScheduleKey],
+    queryFn: () => fetchBuildScheduleDeals(buildScheduleKey),
+    enabled:
+      isBitrix &&
+      view === "build-schedule" &&
+      buildScheduleKey.length > 0,
+    staleTime: 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+    placeholderData: keepPreviousData,
   });
 
   return (
@@ -215,10 +247,11 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
 
       <Card className="mb-4">
         <CardContent className="grid gap-3 p-4 md:grid-cols-[auto_auto_auto_1fr_auto]">
-          <div className="flex rounded-md border p-0.5">
+          <div className="flex flex-wrap rounded-md border p-0.5">
             <ViewButton mode="gantt" active={view} onClick={setView} icon={<BarChart3 className="h-4 w-4" />} label="Gantt" />
             <ViewButton mode="calendar" active={view} onClick={setView} icon={<CalendarDays className="h-4 w-4" />} label="Calendar" />
             <ViewButton mode="list" active={view} onClick={setView} icon={<ListIcon className="h-4 w-4" />} label="List" />
+            <ViewButton mode="build-schedule" active={view} onClick={setView} icon={<Hammer className="h-4 w-4" />} label="График застройки" />
           </div>
           <Select value={period} onValueChange={(v) => setPeriod(v as PeriodMode)}>
             <SelectTrigger className="w-[180px]" data-testid="select-period"><SelectValue /></SelectTrigger>
@@ -257,6 +290,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             onClick={() => {
               queryClient.invalidateQueries({ queryKey: ["expo-list"] });
               queryClient.invalidateQueries({ queryKey: ["expo-list-month"] });
+              queryClient.invalidateQueries({ queryKey: ["build-schedule-deals"] });
             }}
             data-testid="button-refresh"
           >
@@ -289,6 +323,14 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
                     : "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
                   : undefined
               }
+            />
+          ) : view === "build-schedule" ? (
+            <BuildScheduleSection
+              expos={filtered}
+              activeMonth={activeMonth}
+              onMonthChange={setActiveMonth}
+              isFetchingExpos={monthIsFetchingNewMonth}
+              dealsQuery={buildScheduleQuery}
             />
           ) : !filtered.length ? (
             <Empty text="Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс." />
@@ -420,6 +462,95 @@ function GanttView({
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
       />
+    </div>
+  );
+}
+
+function BuildScheduleSection({
+  expos,
+  activeMonth,
+  onMonthChange,
+  isFetchingExpos,
+  dealsQuery,
+}: {
+  expos: ExpoItem[];
+  activeMonth: Date;
+  onMonthChange: (d: Date) => void;
+  isFetchingExpos: boolean;
+  dealsQuery: ReturnType<typeof useQuery<BuildScheduleResult>>;
+}) {
+  const overlapping = useMemo(
+    () => exposOverlappingMonth(expos, activeMonth),
+    [expos, activeMonth],
+  );
+  const dealsByExpoId = dealsQuery.data?.byExpoId;
+  const withDeals = useMemo(
+    () => filterExposWithBuildScheduleDeals(overlapping, dealsByExpoId),
+    [overlapping, dealsByExpoId],
+  );
+  const isFetchingDeals = dealsQuery.isFetching;
+  const diag = dealsQuery.data?.diagnostics;
+  return (
+    <div className="space-y-2">
+      {isFetchingExpos ? (
+        <div
+          className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200"
+          data-testid="build-schedule-month-fetching-banner"
+        >
+          <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+          <span>Загрузка выставок за выбранный месяц…</span>
+        </div>
+      ) : null}
+      {isFetchingDeals && overlapping.length > 0 ? (
+        <div
+          className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800 dark:border-blue-900 dark:bg-blue-950/40 dark:text-blue-200"
+          data-testid="build-schedule-deals-fetching-banner"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Загрузка сделок на стадиях графика застройки…</span>
+        </div>
+      ) : null}
+      {dealsQuery.isError ? (
+        <div
+          className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800 dark:border-red-900 dark:bg-red-950/40 dark:text-red-200"
+          data-testid="build-schedule-error"
+        >
+          Не удалось загрузить сделки:{" "}
+          {(dealsQuery.error as Error | undefined)?.message ?? "неизвестная ошибка"}
+        </div>
+      ) : null}
+      <BuildScheduleView
+        expos={withDeals}
+        dealsByExpoId={dealsByExpoId}
+        initialMonth={activeMonth}
+        onMonthChange={onMonthChange}
+        onSelectExpo={(expo) => navigateToEvent(expo.id)}
+        onSelectDeal={(deal) => {
+          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
+          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
+        }}
+        isFetching={isFetchingDeals}
+        emptyMessage={
+          overlapping.length === 0
+            ? "Ни одна выставка не попадает в выбранный месяц."
+            : isFetchingDeals
+              ? "Загрузка сделок…"
+              : "Нет выставок со сделками на стадиях графика застройки в этом месяце."
+        }
+      />
+      {diag ? (
+        <div
+          className="text-[11px] text-muted-foreground"
+          data-testid="build-schedule-diagnostics"
+        >
+          Запросов: {diag.dealRequests} · строк загружено:{" "}
+          {diag.dealRowsLoaded} · сделок в графике: {diag.dealRowsKept}
+          {diag.dealFailures.length > 0
+            ? ` · ошибок: ${diag.dealFailures.length}`
+            : ""}
+          {" · "}за {diag.durationMs} мс
+        </div>
+      ) : null}
     </div>
   );
 }

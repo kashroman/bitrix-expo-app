@@ -180,6 +180,42 @@ export const DEAL_STATUS_ORDER: DealStatusKey[] = [
   "projectCompleted",
 ];
 
+// Stage IDs that qualify a deal for the "График застройки" (build schedule)
+// tab. A deal whose normalized stage tail equals one of these is shown as a
+// colored bar inside the exhibition's row. Default = ["8", "9", "WON"].
+// Override via VITE_BUILD_SCHEDULE_STAGE_IDS (comma-separated) when the
+// account uses different pinned IDs. The Bitrix deal funnel does not expose
+// "and-higher" ordering through REST without category-specific stage lists,
+// so this list is treated as an explicit whitelist.
+function readBuildScheduleStageIdsEnv(): string[] | undefined {
+  const raw =
+    (typeof import.meta !== "undefined" &&
+      (import.meta as { env?: Record<string, string | undefined> }).env
+        ?.VITE_BUILD_SCHEDULE_STAGE_IDS) ||
+    undefined;
+  if (!raw) return undefined;
+  return raw
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+export const BUILD_SCHEDULE_STAGE_IDS: string[] =
+  readBuildScheduleStageIdsEnv() ?? ["8", "9", "WON"];
+
+export function matchBuildScheduleStage(
+  stageId: string | undefined | null,
+): string | undefined {
+  if (stageId === undefined || stageId === null) return undefined;
+  const text = String(stageId).trim();
+  if (!text) return undefined;
+  const tail = text.split(":").pop() ?? text;
+  for (const pinned of BUILD_SCHEDULE_STAGE_IDS) {
+    if (pinned === text || pinned === tail) return pinned;
+  }
+  return undefined;
+}
+
 export function normalizeStageText(value: string): string {
   return value
     .toLocaleLowerCase("ru-RU")
