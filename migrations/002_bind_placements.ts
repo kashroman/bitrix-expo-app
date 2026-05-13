@@ -10,10 +10,14 @@
  * (PLACEMENT, HANDLER, TITLE, ...). Do NOT switch to camelCase here — that
  * is a separate convention used by `userfieldconfig.*` (see migration 001).
  *
+ * SAFETY: defaults to dry-run. Live changes require `--apply` (alias `--live`).
+ *
  * Usage:
- *   npm run bind-placements                 # unbind stale + bind all
- *   npm run bind-placements -- --dry-run    # print plan, no calls
- *   npm run bind-placements -- --check-fields  # also list UF status
+ *   npm run bind-placements                       # dry-run (default)
+ *   npm run bind-placements -- --apply            # bind targets (and unbind same-handler dupes)
+ *   npm run rebind-placements                     # dry-run with stale cleanup
+ *   npm run rebind-placements -- --apply          # cleanup stale + bind targets
+ *   npm run bind-placements -- --check-fields     # also list UF status
  */
 
 import "dotenv/config";
@@ -43,6 +47,33 @@ function buildTargets(appBase: string): Target[] {
     { placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_DETAIL_TAB`, route: "/placement-detail", title: "Источник данных" },
     { placement: "LEFT_MENU", route: "/placement-menu", title: "Календарь выставок" },
   ];
+}
+
+/**
+ * Set of (PLACEMENT, normalized route) pairs that this app manages. Used by
+ * --cleanup-stale to decide which existing handlers we are allowed to unbind:
+ * we only touch placements+routes we own. Anything else stays untouched.
+ */
+function managedKeys(targets: Target[]): Set<string> {
+  const set = new Set<string>();
+  for (const t of targets) set.add(`${t.placement}|${t.route}`);
+  return set;
+}
+
+function safeHost(u: string): string {
+  try {
+    return new URL(u).host;
+  } catch {
+    return "";
+  }
+}
+
+function safePath(u: string): string {
+  try {
+    return new URL(u).pathname.replace(/\/+$/, "") || "/";
+  } catch {
+    return "";
+  }
 }
 
 function isNotFoundError(err: unknown): boolean {
@@ -152,20 +183,64 @@ async function checkFields(): Promise<void> {
 }
 
 async function main() {
-  const dryRun = process.argv.includes("--dry-run");
+  // SAFE-BY-DEFAULT: dry-run unless the caller passes --apply (or --live).
+  // --dry-run is still accepted for back-compat / explicitness.
+  const apply = process.argv.includes("--apply") || process.argv.includes("--live");
+  const dryRun = !apply || process.argv.includes("--dry-run");
   const wantCheckFields = process.argv.includes("--check-fields");
+  const cleanupStale = process.argv.includes("--cleanup-stale");
   const appBase = getAppBase();
+  const appHost = safeHost(appBase);
   const targets = buildTargets(appBase);
+  const managed = managedKeys(targets);
 
-  console.log(`[bind] appBase=${appBase} entityTypeId=${ENTITY_TYPE_ID} dryRun=${dryRun}`);
+  console.log(
+    `[bind] appBase=${appBase} host=${appHost} entityTypeId=${ENTITY_TYPE_ID} ` +
+      `dryRun=${dryRun} cleanupStale=${cleanupStale}`,
+  );
   console.log(`[bind] planned ${targets.length} handler(s):`);
   for (const t of targets) {
     console.log(`  - ${t.placement} -> ${appBase}${t.route}  (${t.title})`);
   }
 
+  // Inspect current state when possible; needed for cleanup planning and for
+  // a clearer dry-run preview.
+  let registered: Array<Record<string, any>> | null = null;
+  if (hasWebhook()) {
+    registered = await listRegistered();
+  }
+
+  type StalePlan = { placement: string; handler: string; host: string; path: string };
+  const stalePlan: StalePlan[] = [];
+  if (cleanupStale) {
+    if (!registered) {
+      console.warn(
+        "[bind] cleanup-stale: placement.get/list unavailable via this webhook; skipping stale scan.",
+      );
+    } else {
+      for (const row of registered) {
+        const placement = String(row.PLACEMENT ?? row.placement ?? "");
+        const handler = String(row.HANDLER ?? row.handler ?? "");
+        if (!placement || !handler) continue;
+        const host = safeHost(handler);
+        const path = safePath(handler);
+        // Only touch a placement+route this app owns. This prevents accidental
+        // unbinds of unrelated third-party apps that share a placement code.
+        if (!managed.has(`${placement}|${path}`)) continue;
+        // Same host as APP_BASE_URL → already correct, skip.
+        if (host && host === appHost) continue;
+        stalePlan.push({ placement, handler, host, path });
+      }
+      console.log(`[bind] cleanup-stale: ${stalePlan.length} handler(s) to unbind`);
+      for (const s of stalePlan) {
+        console.log(`  - UNBIND ${s.placement} host=${s.host} path=${s.path}`);
+      }
+    }
+  }
+
   if (dryRun) {
     if (wantCheckFields && hasWebhook()) await checkFields();
-    console.log("[bind] dry-run: nothing called");
+    console.log("[bind] dry-run: nothing called. Pass --apply to execute.");
     return;
   }
 
@@ -174,6 +249,27 @@ async function main() {
     process.exit(1);
   }
 
+  // 1) Cleanup stale handlers (whose host != appHost) for the managed routes.
+  let staleUnbound = 0;
+  let staleFailed = 0;
+  for (const s of stalePlan) {
+    try {
+      await bx("placement.unbind", { PLACEMENT: s.placement, HANDLER: s.handler });
+      staleUnbound++;
+      console.log(`[bind] STALE UNBOUND ${s.placement} host=${s.host} path=${s.path}`);
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        console.log(`[bind] STALE GONE     ${s.placement} host=${s.host} path=${s.path}`);
+        continue;
+      }
+      staleFailed++;
+      const msg = err instanceof Error ? err.message : String(err);
+      console.warn(`[bind] STALE FAIL     ${s.placement} host=${s.host} path=${s.path}: ${msg}`);
+    }
+  }
+
+  // 2) Bind all desired targets (unbinding the same-host handler first to
+  //    keep the call idempotent — placement.bind errors otherwise).
   const results: Array<{ placement: string; handler: string; bind: string; unbind: string }> = [];
   for (const target of targets) {
     const handler = `${appBase}${target.route}`;
@@ -190,28 +286,32 @@ async function main() {
   }
 
   console.log("\n[bind] verifying via placement.get/list ...");
-  const registered = await listRegistered();
-  if (!registered) {
+  const after = await listRegistered();
+  if (!after) {
     console.warn("[bind] warning: placement.get/list unavailable via this webhook; trust the bind results above.");
   } else {
-    const filtered = registered.filter((row) => {
+    const filtered = after.filter((row) => {
       const handler = String(row.HANDLER ?? row.handler ?? "");
-      return handler.includes(appBase);
+      return safeHost(handler) === appHost;
     });
-    console.log(`[bind] registered handlers under ${appBase}: ${filtered.length}`);
+    console.log(`[bind] registered handlers under host=${appHost}: ${filtered.length}`);
     for (const row of filtered) {
       const placement = String(row.PLACEMENT ?? row.placement ?? "");
       const handler = String(row.HANDLER ?? row.handler ?? "");
       const title = row.TITLE ?? row.title ?? "";
-      console.log(`  - ${placement} -> ${handler}  (${title})`);
+      console.log(`  - ${placement} host=${safeHost(handler)} path=${safePath(handler)}  (${title})`);
     }
   }
 
   if (wantCheckFields) await checkFields();
 
   const failed = results.filter((r) => r.bind.startsWith("Bitrix call") || r.bind.startsWith("HTTP_"));
-  if (failed.length) {
-    console.error(`[bind] ${failed.length} handler(s) failed`);
+  console.log(
+    `[bind] summary: stale unbound=${staleUnbound} stale failed=${staleFailed} ` +
+      `bound/exists=${results.length - failed.length} failed=${failed.length}`,
+  );
+  if (failed.length || staleFailed) {
+    console.error(`[bind] ${failed.length + staleFailed} operation(s) failed`);
     process.exit(2);
   }
   console.log("[bind] done");

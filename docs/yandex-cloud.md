@@ -192,13 +192,26 @@ Only do this once steps 1–7 are green:
 1. In Bitrix24 admin → **Applications → Local applications**, update the
    handler URL (the `APP_BASE_URL` echoed in placement registrations) to
    the Yandex Cloud URL.
-2. Re-run the placement-binding migration **only if a placement handler URL
-   actually changed**:
+2. Re-bind the 7 managed placements to the Yandex Cloud URL. The script is
+   safe-by-default (dry-run unless `--apply`), and `--cleanup-stale` will
+   unbind handlers for the same managed routes whose host is **not** the
+   current `APP_BASE_URL` host — typically the old Render handlers:
 
    ```bash
-   # one-off, from a trusted machine with BITRIX_WEBHOOK_URL exported
-   npm run bind-placements
+   # 1) Preview the plan (no API writes):
+   APP_BASE_URL=https://bba8ln220jfloq5251dv.containers.yandexcloud.net \
+     npm run rebind-placements -- --dry-run
+
+   # 2) Apply once the plan looks right:
+   APP_BASE_URL=https://bba8ln220jfloq5251dv.containers.yandexcloud.net \
+     npm run rebind-placements -- --apply
    ```
+
+   Both commands require `BITRIX_WEBHOOK_URL` to be exported in the shell
+   (don't paste it inline — it will land in shell history). The script only
+   touches the 7 placement+route pairs it owns; any unrelated handlers are
+   left intact. It logs counts and `host=…`/`path=…` per change — never the
+   webhook URL.
 
 3. Smoke-test the placements inside Bitrix24 (open a smart-process item, hit
    the embedded UI, verify the admin "Fill source URLs" button works).
