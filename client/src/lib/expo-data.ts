@@ -1,5 +1,6 @@
 import { callBx, CrmItem, listAllBx, listAllBxDetailed } from "./bitrix";
 import {
+  BUILD_SCHEDULE_STAGE_IDS,
   DEAL_GROUP_LABELS,
   DEAL_STATUS_ORDER,
   DealGroupKey,
@@ -17,6 +18,8 @@ import {
   groupForDeal,
   groupForLead,
   leadExpoFieldCode,
+  matchBuildScheduleStage,
+  matchDealStatus,
 } from "./config";
 import {
   expoDateSelectCodes,
@@ -2825,4 +2828,309 @@ export async function fetchExpoCountsBulk(
     c.durationMs = diagnostics.durationMs;
   });
   return { byExpoId, diagnostics };
+}
+
+// --- Build-schedule deal details (Iteration 2) ------------------------------
+//
+// The "График застройки" tab needs full deal details (id, title, client,
+// manager, budget, stage) for every deal in BUILD_SCHEDULE_STAGE_IDS that is
+// linked to a visible exhibition. We reuse the same chunked `@<linkField>`
+// pattern as fetchExpoCountsBulk so the worst-case is O(ceil(N/30)) REST
+// requests for N visible exhibitions. Bitrix supports stacking filter keys,
+// so we add `@STAGE_ID: BUILD_SCHEDULE_STAGE_IDS` to push the stage filter
+// server-side as well.
+
+export type BuildScheduleDeal = {
+  id: number;
+  expoIds: number[];
+  title: string;
+  stageId: string;
+  stageTail: string;
+  status: DealStatusKey | undefined;
+  assignedById?: string;
+  clientName?: string;
+  manager?: string;
+  budget?: string;
+  bitrixUrl?: string;
+  raw: Record<string, unknown>;
+};
+
+export type BuildScheduleDiagnostics = {
+  expoIdsRequested: number;
+  stageIds: string[];
+  dealField: string | null;
+  dealChunks: number;
+  dealRequests: number;
+  dealRowsLoaded: number;
+  dealRowsKept: number;
+  dealFailures: string[];
+  durationMs: number;
+  truncated: boolean;
+  deadlineReached: boolean;
+};
+
+export type BuildScheduleResult = {
+  byExpoId: Map<number, BuildScheduleDeal[]>;
+  deals: BuildScheduleDeal[];
+  diagnostics: BuildScheduleDiagnostics;
+};
+
+const BUILD_SCHEDULE_DEAL_SELECT = [
+  "ID",
+  "TITLE",
+  "STAGE_ID",
+  "ASSIGNED_BY_ID",
+  "ASSIGNED_BY_NAME",
+  "ASSIGNED_BY_LAST_NAME",
+  "OPPORTUNITY",
+  "CURRENCY_ID",
+  "COMPANY_ID",
+  "COMPANY_TITLE",
+  "CONTACT_ID",
+  "DATE_MODIFY",
+];
+
+function readDealRowField(
+  row: Record<string, unknown>,
+  ...keys: string[]
+): unknown {
+  for (const k of keys) {
+    if (row[k] !== undefined && row[k] !== null && row[k] !== "") return row[k];
+    const lower = k.toLowerCase();
+    if (row[lower] !== undefined && row[lower] !== null && row[lower] !== "") {
+      return row[lower];
+    }
+    const camel = k.replace(/_([a-z])/gi, (_, c: string) => c.toUpperCase());
+    if (row[camel] !== undefined && row[camel] !== null && row[camel] !== "") {
+      return row[camel];
+    }
+  }
+  return undefined;
+}
+
+function extractDealClient(row: Record<string, unknown>): string | undefined {
+  const company = readDealRowField(row, "COMPANY_TITLE", "COMPANY_NAME");
+  if (typeof company === "string" && company.trim()) return company.trim();
+  const contact = readDealRowField(row, "CONTACT_NAME", "CONTACT_FULL_NAME");
+  if (typeof contact === "string" && contact.trim()) return contact.trim();
+  return undefined;
+}
+
+function extractDealManager(row: Record<string, unknown>): string | undefined {
+  const name = readDealRowField(row, "ASSIGNED_BY_NAME");
+  const last = readDealRowField(row, "ASSIGNED_BY_LAST_NAME");
+  const parts: string[] = [];
+  if (typeof name === "string" && name.trim()) parts.push(name.trim());
+  if (typeof last === "string" && last.trim()) parts.push(last.trim());
+  if (parts.length) return parts.join(" ");
+  const id = readDealRowField(row, "ASSIGNED_BY_ID");
+  if (id !== undefined && id !== null && String(id).trim()) {
+    return `ID ${String(id).trim()}`;
+  }
+  return undefined;
+}
+
+function extractDealBudget(row: Record<string, unknown>): string | undefined {
+  const amount = readDealRowField(row, "OPPORTUNITY");
+  if (amount === undefined || amount === null || amount === "") return undefined;
+  const currency = String(
+    readDealRowField(row, "CURRENCY_ID") ?? "",
+  ).trim();
+  const num = Number(amount);
+  const formatted = Number.isFinite(num)
+    ? new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(num)
+    : String(amount);
+  return currency ? `${formatted} ${currency}` : formatted;
+}
+
+function bitrixDealUrl(id: number): string | undefined {
+  const portal =
+    (typeof import.meta !== "undefined" &&
+      (import.meta as { env?: Record<string, string | undefined> }).env
+        ?.VITE_BITRIX_PORTAL_URL) ||
+    "";
+  if (!portal) return undefined;
+  return `${portal.replace(/\/$/, "")}/crm/deal/details/${id}/`;
+}
+
+export async function fetchBuildScheduleDeals(
+  expoIds: Array<number | string>,
+  options: {
+    stageIds?: string[];
+    chunkSize?: number;
+    concurrency?: number;
+    dealField?: string | null;
+  } = {},
+): Promise<BuildScheduleResult> {
+  const start = Date.now();
+  const ids = Array.from(
+    new Set(
+      expoIds
+        .map((id) => Number(id))
+        .filter((id) => Number.isFinite(id) && id > 0),
+    ),
+  ).sort((a, b) => a - b);
+
+  const stageIds =
+    options.stageIds && options.stageIds.length > 0
+      ? options.stageIds
+      : BUILD_SCHEDULE_STAGE_IDS;
+  const dealField =
+    options.dealField === undefined ? dealExpoFieldCode : options.dealField;
+  const chunkSize = Math.max(
+    1,
+    Math.min(100, Math.floor(options.chunkSize ?? BULK_COUNTS_CHUNK_SIZE_DEFAULT)),
+  );
+  const concurrency = Math.max(
+    1,
+    Math.min(4, Math.floor(options.concurrency ?? BULK_COUNTS_CONCURRENCY_DEFAULT)),
+  );
+
+  const byExpoId = new Map<number, BuildScheduleDeal[]>();
+  ids.forEach((id) => byExpoId.set(id, []));
+  const deals: BuildScheduleDeal[] = [];
+  const seenDeals = new Set<number>();
+
+  const diagnostics: BuildScheduleDiagnostics = {
+    expoIdsRequested: ids.length,
+    stageIds: [...stageIds],
+    dealField,
+    dealChunks: 0,
+    dealRequests: 0,
+    dealRowsLoaded: 0,
+    dealRowsKept: 0,
+    dealFailures: [],
+    durationMs: 0,
+    truncated: false,
+    deadlineReached: false,
+  };
+
+  if (!dealField || ids.length === 0) {
+    if (!dealField) diagnostics.dealFailures.push("Deal UF не настроен");
+    diagnostics.durationMs = Date.now() - start;
+    return { byExpoId, deals, diagnostics };
+  }
+
+  const select = Array.from(
+    new Set([...BUILD_SCHEDULE_DEAL_SELECT, dealField]),
+  );
+  const chunks = chunkArray(ids, chunkSize);
+  diagnostics.dealChunks = chunks.length;
+
+  const recordRow = (row: Record<string, unknown>, chunkIds: number[]) => {
+    const dealIdRaw =
+      readDealRowField(row, "ID") ?? readDealRowField(row, "id");
+    const dealId = Number(dealIdRaw);
+    if (!Number.isFinite(dealId) || dealId <= 0) return;
+    const stageRaw = String(readDealRowField(row, "STAGE_ID") ?? "").trim();
+    const stageTail = stageRaw.split(":").pop() ?? stageRaw;
+    // Server-side stage filter may not be supported on every account; double
+    // check client-side so unexpected rows are dropped quietly.
+    if (!matchBuildScheduleStage(stageRaw) && !stageIds.includes(stageTail)) {
+      return;
+    }
+    const linked = expoIdsFromLinkValue(readLinkFieldValue(row, dealField));
+    const expoMatches = linked.filter((tid) => byExpoId.has(tid));
+    const targets = expoMatches.length > 0 ? expoMatches : [];
+    if (targets.length === 0) {
+      // Fallback for accounts where the link value comes back empty/encoded
+      // unexpectedly: attribute to the first chunk id so the deal still
+      // shows up somewhere instead of being silently lost.
+      const fallback = chunkIds.find((id) => byExpoId.has(id));
+      if (fallback === undefined) return;
+      targets.push(fallback);
+    }
+
+    let entry: BuildScheduleDeal;
+    if (seenDeals.has(dealId)) {
+      const existing = deals.find((d) => d.id === dealId);
+      if (!existing) return;
+      for (const tid of targets) {
+        if (!existing.expoIds.includes(tid)) {
+          existing.expoIds.push(tid);
+          byExpoId.get(tid)?.push(existing);
+        }
+      }
+      return;
+    }
+    seenDeals.add(dealId);
+    const title = String(readDealRowField(row, "TITLE") ?? "").trim() || `Сделка #${dealId}`;
+    entry = {
+      id: dealId,
+      expoIds: [...targets],
+      title,
+      stageId: stageRaw,
+      stageTail,
+      status: matchDealStatus(stageRaw, title) ?? undefined,
+      assignedById:
+        readDealRowField(row, "ASSIGNED_BY_ID") !== undefined
+          ? String(readDealRowField(row, "ASSIGNED_BY_ID"))
+          : undefined,
+      clientName: extractDealClient(row),
+      manager: extractDealManager(row),
+      budget: extractDealBudget(row),
+      bitrixUrl: bitrixDealUrl(dealId),
+      raw: row,
+    };
+    deals.push(entry);
+    diagnostics.dealRowsKept += 1;
+    for (const tid of targets) {
+      byExpoId.get(tid)?.push(entry);
+    }
+  };
+
+  await runChunkedRequests(chunks, concurrency, async (chunkIds) => {
+    diagnostics.dealRequests += 1;
+    try {
+      const res = await listAllBxDetailed<Record<string, unknown>>(
+        "crm.deal.list",
+        {
+          filter: {
+            [`@${dealField}`]: chunkIds,
+            "@STAGE_ID": stageIds,
+          },
+          select,
+          order: { ID: "DESC" },
+        },
+        {
+          maxPages: BULK_COUNTS_MAX_PAGES_PER_CHUNK,
+          timeoutMs: BULK_COUNTS_PER_PAGE_TIMEOUT_MS,
+          deadlineMs: BULK_COUNTS_DEADLINE_MS,
+        },
+      );
+      diagnostics.dealRowsLoaded += res.rows.length;
+      if (res.truncated) diagnostics.truncated = true;
+      if (res.deadlineReached) diagnostics.deadlineReached = true;
+      for (const row of res.rows) recordRow(row, chunkIds);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      diagnostics.dealFailures.push(msg);
+    }
+  });
+
+  diagnostics.durationMs = Date.now() - start;
+  return { byExpoId, deals, diagnostics };
+}
+
+// Aggregation/filter helper exposed for tests and the BuildScheduleView so
+// the visible exhibition list shrinks to only those with at least one deal.
+export function filterExposWithBuildScheduleDeals(
+  expos: ExpoItem[],
+  byExpoId: Map<number, BuildScheduleDeal[]> | undefined,
+): ExpoItem[] {
+  if (!byExpoId) return [];
+  return expos.filter((e) => (byExpoId.get(Number(e.id)) ?? []).length > 0);
+}
+
+// Tiny pure helper for tests: classify a stage id/tail against the build
+// schedule whitelist without pulling the full deal-status matcher.
+export function isBuildScheduleStage(
+  stageId: string | undefined | null,
+  whitelist: string[] = BUILD_SCHEDULE_STAGE_IDS,
+): boolean {
+  if (stageId === undefined || stageId === null) return false;
+  const text = String(stageId).trim();
+  if (!text) return false;
+  const tail = text.split(":").pop() ?? text;
+  return whitelist.includes(text) || whitelist.includes(tail);
 }
