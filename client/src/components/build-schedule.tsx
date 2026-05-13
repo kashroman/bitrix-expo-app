@@ -17,22 +17,13 @@ import {
   DealStatusKey,
   PHASE_FILLS,
 } from "@/lib/config";
+import {
+  daysInYear,
+  monthSegments,
+  type MonthSegment,
+} from "@/lib/build-schedule-months";
 
 const LEFT_COL_PX = 260;
-const MONTH_NAMES_RU_SHORT = [
-  "Янв",
-  "Фев",
-  "Мар",
-  "Апр",
-  "Май",
-  "Июн",
-  "Июл",
-  "Авг",
-  "Сен",
-  "Окт",
-  "Ноя",
-  "Дек",
-];
 
 const HEADER_ROW_HEIGHT = 18;
 const DEAL_ROW_HEIGHT = 18;
@@ -49,11 +40,6 @@ function dayOfYear(d: Date): number {
   const start = new Date(d.getFullYear(), 0, 1);
   const diff = stripTime(d).getTime() - stripTime(start).getTime();
   return Math.floor(diff / 86_400_000);
-}
-
-function daysInYear(year: number): number {
-  const isLeap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-  return isLeap ? 366 : 365;
 }
 
 function expoOverallRange(expo: ExpoItem): Range | undefined {
@@ -195,6 +181,8 @@ export function BuildScheduleView({
       ? (dayOfYear(today) / daysInYear(year)) * 100
       : undefined;
 
+  const months = useMemo(() => monthSegments(year), [year]);
+
   const isEmpty = sortedExpos.length === 0;
   const emptyText =
     emptyMessage ??
@@ -214,10 +202,14 @@ export function BuildScheduleView({
       />
 
       <div className="mt-3 overflow-hidden rounded-md border bg-background">
-        <YearHeader year={year} todayLeftPct={todayLeftPct} />
+        <YearHeader year={year} todayLeftPct={todayLeftPct} months={months} />
 
         {isEmpty ? (
-          <EmptyGridBody text={emptyText} todayLeftPct={todayLeftPct} />
+          <EmptyGridBody
+            text={emptyText}
+            todayLeftPct={todayLeftPct}
+            months={months}
+          />
         ) : null}
 
         {sortedExpos.map((expo, rowIndex) => {
@@ -230,6 +222,7 @@ export function BuildScheduleView({
               rowIndex={rowIndex}
               year={year}
               todayLeftPct={todayLeftPct}
+              months={months}
               onSelectExpo={onSelectExpo}
               onSelectDeal={onSelectDeal}
             />
@@ -245,33 +238,31 @@ export function BuildScheduleView({
 function YearHeader({
   year,
   todayLeftPct,
+  months,
 }: {
   year: number;
   todayLeftPct: number | undefined;
+  months: MonthSegment[];
 }) {
   return (
     <div
-      className="relative grid min-w-0 items-stretch border-b bg-background/95 text-xs"
+      className="relative grid min-w-0 items-stretch border-b bg-muted/40 text-xs"
       style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr` }}
     >
       <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-muted-foreground">
         Выставка · сделки
       </div>
-      <div className="relative">
-        <div
-          className="grid"
-          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
-        >
-          {MONTH_NAMES_RU_SHORT.map((name, idx) => (
-            <div
-              key={idx}
-              className="flex items-center justify-center border-r py-1 text-[11px] tabular-nums text-muted-foreground last:border-r-0"
-              title={`${name} ${year}`}
-            >
-              {name}
-            </div>
-          ))}
-        </div>
+      <div className="relative h-7">
+        {months.map((m) => (
+          <div
+            key={m.index}
+            className="absolute inset-y-0 flex items-center justify-center border-r border-border/70 text-[11px] font-medium uppercase tracking-wide text-muted-foreground last:border-r-0"
+            style={{ left: `${m.leftPct}%`, width: `${m.widthPct}%` }}
+            title={`${m.name} ${year}`}
+          >
+            <span className="truncate px-1">{m.name}</span>
+          </div>
+        ))}
         {todayLeftPct !== undefined ? (
           <div
             className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/70"
@@ -284,12 +275,31 @@ function YearHeader({
   );
 }
 
+// Vertical month columns shown behind row content: alternating shading and
+// dividers so the year reads as 12 month groups without offsetting bars.
+function MonthGridBackdrop({ months }: { months: MonthSegment[] }) {
+  return (
+    <div className="pointer-events-none absolute inset-0" aria-hidden>
+      {months.map((m) => (
+        <div
+          key={m.index}
+          className={`absolute inset-y-0 border-r border-border/40 last:border-r-0 ${
+            m.index % 2 === 1 ? "bg-muted/30" : ""
+          }`}
+          style={{ left: `${m.leftPct}%`, width: `${m.widthPct}%` }}
+        />
+      ))}
+    </div>
+  );
+}
+
 function BuildScheduleRow({
   expo,
   deals,
   rowIndex,
   year,
   todayLeftPct,
+  months,
   onSelectExpo,
   onSelectDeal,
 }: {
@@ -298,6 +308,7 @@ function BuildScheduleRow({
   rowIndex: number;
   year: number;
   todayLeftPct: number | undefined;
+  months: MonthSegment[];
   onSelectExpo: (expo: ExpoItem) => void;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
 }) {
@@ -337,15 +348,7 @@ function BuildScheduleRow({
         className="relative"
         style={{ minHeight: `${innerHeight}px` }}
       >
-        <div
-          className="absolute inset-0 grid"
-          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
-          aria-hidden
-        >
-          {Array.from({ length: 12 }, (_, i) => (
-            <div key={i} className="border-r border-border/40 last:border-r-0" />
-          ))}
-        </div>
+        <MonthGridBackdrop months={months} />
         {todayLeftPct !== undefined ? (
           <div
             className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
@@ -414,9 +417,11 @@ function BuildScheduleRow({
 function EmptyGridBody({
   text,
   todayLeftPct,
+  months,
 }: {
   text: string;
   todayLeftPct: number | undefined;
+  months: MonthSegment[];
 }) {
   return (
     <div
@@ -425,15 +430,7 @@ function EmptyGridBody({
     >
       <div className="border-r bg-background/70" aria-hidden />
       <div className="relative">
-        <div
-          className="absolute inset-0 grid"
-          style={{ gridTemplateColumns: `repeat(12, minmax(0, 1fr))` }}
-          aria-hidden
-        >
-          {Array.from({ length: 12 }, (_, i) => (
-            <div key={i} className="border-r border-border/40 last:border-r-0" />
-          ))}
-        </div>
+        <MonthGridBackdrop months={months} />
         {todayLeftPct !== undefined ? (
           <div
             className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
