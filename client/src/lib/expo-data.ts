@@ -779,6 +779,118 @@ export async function fetchExposByMonth(
   };
 }
 
+// --- Year-scoped exhibition loader -----------------------------------------
+//
+// Same overlap rule as the month loader, but the bounds span Jan 1 — Dec 31
+// of the requested year. Used by the Build Schedule year view so a single
+// load returns every exhibition whose phases touch the year.
+export function yearBoundsIso(year: number): {
+  yearStart: Date;
+  yearEnd: Date;
+  yearStartIso: string;
+  yearEndIso: string;
+  yearKey: string;
+} {
+  const yearStart = new Date(year, 0, 1, 0, 0, 0, 0);
+  const yearEnd = new Date(year, 11, 31, 23, 59, 59, 999);
+  return {
+    yearStart,
+    yearEnd,
+    yearStartIso: yearStart.toISOString(),
+    yearEndIso: yearEnd.toISOString(),
+    yearKey: String(year),
+  };
+}
+
+export type YearExpoLoadResult = {
+  items: ExpoItem[];
+  diagnostics: {
+    yearKey: string;
+    pagesLoaded: number;
+    itemCount: number;
+    durationMs: number;
+    error?: string;
+    timedOut?: boolean;
+    eventStrategyCount: number;
+    fullPeriodStrategyCount: number;
+    duplicateCount: number;
+  };
+};
+
+export async function fetchExposByYear(year: number): Promise<YearExpoLoadResult> {
+  const { yearStartIso, yearEndIso, yearKey } = yearBoundsIso(year);
+  try {
+    await getExpoFieldDiscovery();
+  } catch {}
+  const eventStart = EXPO_DATE_FIELDS.eventStart;
+  const eventEnd = EXPO_DATE_FIELDS.eventEnd;
+  const fields = getExpoFieldsSync();
+  const mountStartCode = EXPO_DATE_FIELDS.mountStart ?? fields.mountStart?.code;
+  const dismantleEndCode =
+    EXPO_DATE_FIELDS.dismantleEnd ?? fields.dismantleEnd?.code;
+
+  const eventFilter: Record<string, unknown> = {
+    [`<=${eventStart}`]: yearEndIso,
+    [`>=${eventEnd}`]: yearStartIso,
+  };
+  const fullPeriodFilter: Record<string, unknown> | undefined =
+    mountStartCode && dismantleEndCode
+      ? {
+          [`<=${mountStartCode}`]: yearEndIso,
+          [`>=${dismantleEndCode}`]: yearStartIso,
+        }
+      : undefined;
+
+  const start = Date.now();
+  const [eventRes, fullRes] = await Promise.all([
+    tryMonthFilter(eventFilter, "month-filter-event-dates"),
+    fullPeriodFilter
+      ? tryMonthFilter(fullPeriodFilter, "month-filter-full-period")
+      : Promise.resolve(null),
+  ]);
+
+  const seen = new Map<number, ExpoItem>();
+  let duplicateCount = 0;
+  const eventNormalized = eventRes.ok ? eventRes.items.map(normalizeExpo) : [];
+  const fullNormalized = fullRes && fullRes.ok ? fullRes.items.map(normalizeExpo) : [];
+  for (const expo of eventNormalized) {
+    if (!Number.isFinite(expo.id) || expo.id <= 0) continue;
+    seen.set(expo.id, expo);
+  }
+  for (const expo of fullNormalized) {
+    if (!Number.isFinite(expo.id) || expo.id <= 0) continue;
+    if (seen.has(expo.id)) {
+      duplicateCount += 1;
+      continue;
+    }
+    seen.set(expo.id, expo);
+  }
+  const merged = Array.from(seen.values()).sort(compareMergedExpos);
+  const pagesLoaded =
+    (eventRes.ok ? eventRes.pagesLoaded : 0) +
+    (fullRes && fullRes.ok ? fullRes.pagesLoaded : 0);
+
+  const errParts: string[] = [];
+  if (!eventRes.ok && eventRes.error) errParts.push(`event: ${eventRes.error}`);
+  if (fullRes && !fullRes.ok && fullRes.error)
+    errParts.push(`full-period: ${fullRes.error}`);
+
+  return {
+    items: merged,
+    diagnostics: {
+      yearKey,
+      pagesLoaded,
+      itemCount: merged.length,
+      durationMs: Date.now() - start,
+      error: errParts.length ? errParts.join(" · ") : undefined,
+      timedOut: Boolean(eventRes.timedOut || fullRes?.timedOut) || undefined,
+      eventStrategyCount: eventNormalized.length,
+      fullPeriodStrategyCount: fullNormalized.length,
+      duplicateCount,
+    },
+  };
+}
+
 export type FetchExpoOutcome =
   | { status: "found"; expo: ExpoItem }
   | { status: "not-found" }

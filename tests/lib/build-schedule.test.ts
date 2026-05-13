@@ -7,6 +7,7 @@ import {
 import {
   filterExposWithBuildScheduleDeals,
   isBuildScheduleStage,
+  yearBoundsIso,
   type BuildScheduleDeal,
   type ExpoItem,
 } from "../../client/src/lib/expo-data.ts";
@@ -112,5 +113,20 @@ describe("filterExposWithBuildScheduleDeals", () => {
       result.map((e) => e.id),
       [10, 30],
     );
+  });
+});
+
+describe("yearBoundsIso", () => {
+  it("returns the full calendar year as ISO bounds", () => {
+    const bounds = yearBoundsIso(2026);
+    assert.equal(bounds.yearKey, "2026");
+    assert.equal(bounds.yearStart.getFullYear(), 2026);
+    assert.equal(bounds.yearStart.getMonth(), 0);
+    assert.equal(bounds.yearStart.getDate(), 1);
+    assert.equal(bounds.yearEnd.getFullYear(), 2026);
+    assert.equal(bounds.yearEnd.getMonth(), 11);
+    assert.equal(bounds.yearEnd.getDate(), 31);
+    assert.match(bounds.yearStartIso, /^2025-12-31T|^2026-01-01T/);
+    assert.match(bounds.yearEndIso, /^2026-12-31T|^2027-01-01T/);
   });
 });

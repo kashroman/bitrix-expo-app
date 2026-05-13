@@ -1,22 +1,15 @@
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { Link } from "wouter";
-import { Moon, Sun } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
-type Theme = "light" | "dark";
-
-export function useTheme() {
-  const [theme, setTheme] = useState<Theme>(() =>
-    typeof window !== "undefined" && window.matchMedia?.("(prefers-color-scheme: dark)").matches ? "dark" : "light",
-  );
+export function useLightThemeLock() {
   useEffect(() => {
-    document.documentElement.classList.toggle("dark", theme === "dark");
-  }, [theme]);
-  return { theme, toggleTheme: () => setTheme((t) => (t === "dark" ? "light" : "dark")) };
+    document.documentElement.classList.remove("dark");
+    document.documentElement.style.colorScheme = "light";
+  }, []);
 }
 
 export function Shell({ children, embedded }: { children: React.ReactNode; embedded?: boolean }) {
-  const { theme, toggleTheme } = useTheme();
+  useLightThemeLock();
   if (embedded) {
     return (
       <div className="min-h-screen bg-background text-foreground">
@@ -45,15 +38,6 @@ export function Shell({ children, embedded }: { children: React.ReactNode; embed
             <NavLink href="/calendar">Календарь</NavLink>
             <NavLink href="/install">Установка</NavLink>
           </nav>
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={toggleTheme}
-            aria-label="Переключить тему"
-            data-testid="button-toggle-theme"
-          >
-            {theme === "dark" ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </Button>
         </div>
       </header>
       <main className="mx-auto max-w-7xl px-4 py-6" id="main-content">

@@ -1,9 +1,10 @@
-import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useQuery, useMutation } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowLeft, ExternalLink, Loader2, Save } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { Shell, PageTitle, LoadingRows } from "./shell";
 import { LeadFunnel, DealFunnel } from "@/components/funnel";
 import {
@@ -12,6 +13,8 @@ import {
   statusTitleMap,
 } from "@/lib/expo-data";
 import type { CrmItem } from "@/lib/bitrix";
+import { callBx } from "@/lib/bitrix";
+import { queryClient } from "@/lib/queryClient";
 import { LinkFieldChoice, summarizeSettings } from "@/lib/expo-link";
 import {
   EXPO_ENTITY_TYPE_ID,
@@ -99,6 +102,7 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
                 {foundData.expo.responsibleId && (
                   <FieldLine label="Ответственный ID" value={String(foundData.expo.responsibleId)} />
                 )}
+                <SourceUrlEditor expo={foundData.expo} />
                 <div className="pt-2">
                   <Button
                     variant="outline"
@@ -667,5 +671,139 @@ function LoadedDealsDiagnostics({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+type ExpoItemLike = { id: number; raw: CrmItem };
+
+function readSourceUrl(item: CrmItem | undefined): string {
+  if (!item) return "";
+  const camel = (item as Record<string, unknown>)["ufCrm8SourceUrl"];
+  const upper = (item as Record<string, unknown>)["UF_CRM_8_SOURCE_URL"];
+  const value = (camel ?? upper) as unknown;
+  return typeof value === "string" ? value : "";
+}
+
+function normalizeUrl(input: string): string {
+  return input.trim();
+}
+
+function looksLikeUrl(value: string): boolean {
+  if (!value) return true; // empty is allowed — user is clearing the field
+  try {
+    const u = new URL(value);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+function SourceUrlEditor({ expo }: { expo: ExpoItemLike }) {
+  const initial = readSourceUrl(expo.raw);
+  const [value, setValue] = useState<string>(initial);
+  const [status, setStatus] = useState<{ kind: "idle" | "ok" | "err"; message?: string }>({
+    kind: "idle",
+  });
+
+  useEffect(() => {
+    setValue(initial);
+    setStatus({ kind: "idle" });
+  }, [initial, expo.id]);
+
+  const mutation = useMutation({
+    mutationFn: async (next: string) => {
+      const fields: Record<string, unknown> = {
+        ufCrm8SourceUrl: next,
+        UF_CRM_8_SOURCE_URL: next,
+      };
+      // crm.item.update applies only the supplied fields — other expo data is
+      // left untouched. We send both camelCase and uppercase aliases so the
+      // call works regardless of how the field is exposed on this portal.
+      await callBx("crm.item.update", {
+        entityTypeId: EXPO_ENTITY_TYPE_ID,
+        id: expo.id,
+        fields,
+      });
+    },
+    onSuccess: () => {
+      setStatus({ kind: "ok", message: "Сохранено" });
+      queryClient.invalidateQueries({ queryKey: ["expo-aggregate", expo.id] });
+    },
+    onError: (err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
+      setStatus({ kind: "err", message });
+    },
+  });
+
+  const trimmed = normalizeUrl(value);
+  const isValid = looksLikeUrl(trimmed);
+  const isDirty = trimmed !== initial.trim();
+  const disabled = !isValid || !isDirty || mutation.isPending;
+
+  return (
+    <div className="grid grid-cols-[160px_1fr] items-start gap-2 pt-1">
+      <div className="pt-2 text-muted-foreground">Сайт мероприятия</div>
+      <div className="space-y-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <Input
+            type="url"
+            inputMode="url"
+            placeholder="https://example.com/event-page"
+            value={value}
+            onChange={(ev) => {
+              setValue(ev.target.value);
+              if (status.kind !== "idle") setStatus({ kind: "idle" });
+            }}
+            className="min-w-[260px] flex-1"
+            data-testid="input-source-url"
+            aria-invalid={!isValid}
+          />
+          <Button
+            size="sm"
+            onClick={() => mutation.mutate(trimmed)}
+            disabled={disabled}
+            data-testid="button-source-url-save"
+          >
+            {mutation.isPending ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <Save className="mr-2 h-4 w-4" />
+            )}
+            Сохранить
+          </Button>
+        </div>
+        {initial ? (
+          <div className="text-xs text-muted-foreground break-all">
+            Текущий:{" "}
+            <a
+              href={initial}
+              target="_blank"
+              rel="noreferrer"
+              className="text-primary underline"
+              data-testid="link-source-url-current"
+            >
+              {initial}
+            </a>
+          </div>
+        ) : (
+          <div className="text-xs text-muted-foreground">
+            Поле пока не заполнено.
+          </div>
+        )}
+        {!isValid ? (
+          <div className="text-xs text-destructive" data-testid="text-source-url-error">
+            Введите корректный URL (http:// или https://) или очистите поле.
+          </div>
+        ) : status.kind === "ok" ? (
+          <div className="text-xs text-emerald-700" data-testid="text-source-url-ok">
+            {status.message}
+          </div>
+        ) : status.kind === "err" ? (
+          <div className="text-xs text-destructive" data-testid="text-source-url-error">
+            Не удалось сохранить: {status.message}
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
