@@ -18,16 +18,19 @@ import {
   PHASE_FILLS,
 } from "@/lib/config";
 import {
-  daysInYear,
-  monthSegments,
-  type MonthSegment,
+  MONTH_NAMES_RU_SHORT,
+  clipToMonth,
+  monthBounds,
+  percentWithinMonth,
+  type MonthBounds,
 } from "@/lib/build-schedule-months";
 
 const LEFT_COL_PX = 260;
 
-const HEADER_ROW_HEIGHT = 18;
 const DEAL_ROW_HEIGHT = 18;
+const DEAL_ROW_GAP = 3;
 const ROW_PADDING_Y = 6;
+const MIN_ROW_HEIGHT = 44;
 const NEUTRAL_BAR_COLOR = "#94a3b8";
 
 type Range = { start: Date; end: Date };
@@ -36,10 +39,13 @@ function stripTime(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
 }
 
-function dayOfYear(d: Date): number {
-  const start = new Date(d.getFullYear(), 0, 1);
-  const diff = stripTime(d).getTime() - stripTime(start).getTime();
-  return Math.floor(diff / 86_400_000);
+function rangeFromDates(a: unknown, b: unknown): Range | undefined {
+  const start = parseDate(a);
+  const end = parseDate(b);
+  if (!start && !end) return undefined;
+  const s = start ?? end!;
+  const e = end ?? start!;
+  return { start: stripTime(s), end: stripTime(e) };
 }
 
 function expoOverallRange(expo: ExpoItem): Range | undefined {
@@ -59,29 +65,19 @@ function expoOverallRange(expo: ExpoItem): Range | undefined {
   const end = ends.length
     ? new Date(Math.max(...ends.map((d) => d.getTime())))
     : start;
-  return { start: start!, end: end! };
+  return { start: stripTime(start!), end: stripTime(end!) };
 }
 
-// Position a range inside the requested year as left/width percentages.
-// Clips on year edges so cross-year exhibitions still render.
-function clipToYear(
-  range: Range | undefined,
-  year: number,
-): { leftPct: number; widthPct: number } | undefined {
-  if (!range) return undefined;
-  const yearStart = stripTime(new Date(year, 0, 1)).getTime();
-  const yearEnd = stripTime(new Date(year, 11, 31)).getTime();
-  const s = stripTime(range.start).getTime();
-  const e = stripTime(range.end).getTime();
-  if (e < yearStart || s > yearEnd) return undefined;
-  const clippedStart = Math.max(s, yearStart);
-  const clippedEnd = Math.min(e, yearEnd);
-  const total = daysInYear(year);
-  const startDayIdx = Math.floor((clippedStart - yearStart) / 86_400_000);
-  const endDayIdx = Math.floor((clippedEnd - yearStart) / 86_400_000);
-  const leftPct = (startDayIdx / total) * 100;
-  const widthPct = Math.max(0.3, ((endDayIdx - startDayIdx + 1) / total) * 100);
-  return { leftPct, widthPct };
+function expoPhases(expo: ExpoItem): {
+  mount?: Range;
+  expo?: Range;
+  dismantle?: Range;
+} {
+  return {
+    mount: rangeFromDates(expo.installStart, expo.installEnd),
+    expo: rangeFromDates(expo.expoStart, expo.expoEnd),
+    dismantle: rangeFromDates(expo.dismantleStart, expo.dismantleEnd),
+  };
 }
 
 function compareExpos(a: ExpoItem, b: ExpoItem): number {
@@ -113,13 +109,20 @@ function dealSummaryLine(deal: BuildScheduleDeal): string {
   return parts.join(" · ");
 }
 
-// Filter expos whose phases touch the year [y-01-01, y-12-31].
-function expoTouchesYear(expo: ExpoItem, year: number): boolean {
-  const range = expoOverallRange(expo);
-  if (!range) return false;
-  return (
-    range.start.getFullYear() <= year && range.end.getFullYear() >= year
-  );
+function expoTouchesMonth(
+  phases: ReturnType<typeof expoPhases>,
+  bounds: MonthBounds,
+): boolean {
+  for (const r of [phases.mount, phases.expo, phases.dismantle]) {
+    if (!r) continue;
+    if (
+      r.end.getTime() >= bounds.startMs &&
+      r.start.getTime() <= bounds.endMs
+    ) {
+      return true;
+    }
+  }
+  return false;
 }
 
 export function BuildScheduleView({
@@ -154,8 +157,8 @@ export function BuildScheduleView({
   }, [year, onYearChange]);
 
   const sortedExpos = useMemo(
-    () => [...expos].filter((e) => expoTouchesYear(e, year)).sort(compareExpos),
-    [expos, year],
+    () => [...expos].sort(compareExpos),
+    [expos],
   );
 
   const yearOptions = useMemo(() => {
@@ -176,14 +179,15 @@ export function BuildScheduleView({
   const goToday = () => setYear(currentYear);
 
   const today = new Date();
-  const todayLeftPct =
-    today.getFullYear() === year
-      ? (dayOfYear(today) / daysInYear(year)) * 100
-      : undefined;
+  const todayMs = stripTime(today).getTime();
+  const todayMonthIdx =
+    today.getFullYear() === year ? today.getMonth() : undefined;
 
-  const months = useMemo(() => monthSegments(year), [year]);
+  const monthsBounds = useMemo(
+    () => Array.from({ length: 12 }, (_, i) => monthBounds(year, i)),
+    [year],
+  );
 
-  const isEmpty = sortedExpos.length === 0;
   const emptyText =
     emptyMessage ??
     (isFetching
@@ -201,30 +205,28 @@ export function BuildScheduleView({
         yearOptions={yearOptions}
       />
 
-      <div className="mt-3 overflow-hidden rounded-md border bg-background">
-        <YearHeader year={year} todayLeftPct={todayLeftPct} months={months} />
-
-        {isEmpty ? (
-          <EmptyGridBody
-            text={emptyText}
-            todayLeftPct={todayLeftPct}
-            months={months}
-          />
-        ) : null}
-
-        {sortedExpos.map((expo, rowIndex) => {
-          const deals = dealsByExpoId?.get(Number(expo.id)) ?? [];
+      <div
+        className="mt-3 space-y-3"
+        data-testid="build-schedule-month-blocks"
+      >
+        {monthsBounds.map((bounds) => {
+          const monthExpos = sortedExpos.filter((expo) =>
+            expoTouchesMonth(expoPhases(expo), bounds),
+          );
+          const showToday = todayMonthIdx === bounds.monthIdx;
+          const todayLeftPct = showToday
+            ? percentWithinMonth(todayMs, bounds)
+            : undefined;
           return (
-            <BuildScheduleRow
-              key={expo.id}
-              expo={expo}
-              deals={deals}
-              rowIndex={rowIndex}
-              year={year}
+            <MonthBlock
+              key={bounds.monthIdx}
+              bounds={bounds}
+              expos={monthExpos}
+              dealsByExpoId={dealsByExpoId}
               todayLeftPct={todayLeftPct}
-              months={months}
               onSelectExpo={onSelectExpo}
               onSelectDeal={onSelectDeal}
+              emptyText={emptyText}
             />
           );
         })}
@@ -235,34 +237,90 @@ export function BuildScheduleView({
   );
 }
 
-function YearHeader({
-  year,
+function MonthBlock({
+  bounds,
+  expos,
+  dealsByExpoId,
   todayLeftPct,
-  months,
+  onSelectExpo,
+  onSelectDeal,
+  emptyText,
 }: {
-  year: number;
+  bounds: MonthBounds;
+  expos: ExpoItem[];
+  dealsByExpoId: Map<number, BuildScheduleDeal[]> | undefined;
   todayLeftPct: number | undefined;
-  months: MonthSegment[];
+  onSelectExpo: (expo: ExpoItem) => void;
+  onSelectDeal?: (deal: BuildScheduleDeal) => void;
+  emptyText: string;
 }) {
+  const monthName = MONTH_NAMES_RU_SHORT[bounds.monthIdx];
+  const isEmpty = expos.length === 0;
+  return (
+    <div
+      className="overflow-hidden rounded-md border bg-background"
+      data-testid={`build-schedule-month-${bounds.monthIdx}`}
+    >
+      <MonthHeader bounds={bounds} todayLeftPct={todayLeftPct} />
+      {isEmpty ? (
+        <EmptyMonthBody bounds={bounds} todayLeftPct={todayLeftPct} text={emptyText} />
+      ) : (
+        expos.map((expo, rowIndex) => {
+          const deals = dealsByExpoId?.get(Number(expo.id)) ?? [];
+          return (
+            <ExpoMonthRow
+              key={expo.id}
+              expo={expo}
+              deals={deals}
+              rowIndex={rowIndex}
+              bounds={bounds}
+              todayLeftPct={todayLeftPct}
+              onSelectExpo={onSelectExpo}
+              onSelectDeal={onSelectDeal}
+            />
+          );
+        })
+      )}
+      <div className="sr-only">{monthName} {bounds.year}</div>
+    </div>
+  );
+}
+
+function MonthHeader({
+  bounds,
+  todayLeftPct,
+}: {
+  bounds: MonthBounds;
+  todayLeftPct: number | undefined;
+}) {
+  const monthName = MONTH_NAMES_RU_SHORT[bounds.monthIdx];
+  // Show day ticks at 1, 8, 15, 22 and last day for orientation.
+  const ticks = [1, 8, 15, 22, bounds.days].filter(
+    (d, i, arr) => arr.indexOf(d) === i,
+  );
   return (
     <div
       className="relative grid min-w-0 items-stretch border-b bg-muted/40 text-xs"
       style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr` }}
     >
-      <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-muted-foreground">
-        Выставка · сделки
+      <div className="flex items-center border-r px-3 py-2 font-medium uppercase tracking-wide text-foreground">
+        <span className="text-sm normal-case">
+          {monthName} {bounds.year}
+        </span>
       </div>
       <div className="relative h-7">
-        {months.map((m) => (
-          <div
-            key={m.index}
-            className="absolute inset-y-0 flex items-center justify-center border-r border-border/70 text-[11px] font-medium uppercase tracking-wide text-muted-foreground last:border-r-0"
-            style={{ left: `${m.leftPct}%`, width: `${m.widthPct}%` }}
-            title={`${m.name} ${year}`}
-          >
-            <span className="truncate px-1">{m.name}</span>
-          </div>
-        ))}
+        {ticks.map((day) => {
+          const leftPct = ((day - 1) / bounds.days) * 100;
+          return (
+            <div
+              key={day}
+              className="absolute inset-y-0 flex items-center justify-start pl-1 text-[11px] font-medium text-muted-foreground"
+              style={{ left: `${leftPct}%` }}
+            >
+              {day}
+            </div>
+          );
+        })}
         {todayLeftPct !== undefined ? (
           <div
             className="pointer-events-none absolute inset-y-0 z-10 w-px bg-primary/70"
@@ -275,60 +333,99 @@ function YearHeader({
   );
 }
 
-// Vertical month columns shown behind row content: alternating shading and
-// dividers so the year reads as 12 month groups without offsetting bars.
-function MonthGridBackdrop({ months }: { months: MonthSegment[] }) {
+function DayGridBackdrop({ bounds }: { bounds: MonthBounds }) {
+  const lines = [8, 15, 22];
   return (
     <div className="pointer-events-none absolute inset-0" aria-hidden>
-      {months.map((m) => (
-        <div
-          key={m.index}
-          className={`absolute inset-y-0 border-r border-border/40 last:border-r-0 ${
-            m.index % 2 === 1 ? "bg-muted/30" : ""
-          }`}
-          style={{ left: `${m.leftPct}%`, width: `${m.widthPct}%` }}
-        />
-      ))}
+      {lines.map((day) => {
+        const leftPct = ((day - 1) / bounds.days) * 100;
+        return (
+          <div
+            key={day}
+            className="absolute inset-y-0 border-l border-border/40"
+            style={{ left: `${leftPct}%` }}
+          />
+        );
+      })}
     </div>
   );
 }
 
-function BuildScheduleRow({
+function ExpoMonthRow({
   expo,
   deals,
   rowIndex,
-  year,
+  bounds,
   todayLeftPct,
-  months,
   onSelectExpo,
   onSelectDeal,
 }: {
   expo: ExpoItem;
   deals: BuildScheduleDeal[];
   rowIndex: number;
-  year: number;
+  bounds: MonthBounds;
   todayLeftPct: number | undefined;
-  months: MonthSegment[];
   onSelectExpo: (expo: ExpoItem) => void;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
 }) {
-  const overall = expoOverallRange(expo);
-  const clip = clipToYear(overall, year);
+  const phases = expoPhases(expo);
   const dealsCount = deals.length;
   const innerHeight =
     ROW_PADDING_Y * 2 +
-    HEADER_ROW_HEIGHT +
-    Math.max(0, dealsCount) * DEAL_ROW_HEIGHT +
-    Math.max(0, dealsCount - 1) * 2;
+    Math.max(1, dealsCount) * DEAL_ROW_HEIGHT +
+    Math.max(0, dealsCount - 1) * DEAL_ROW_GAP;
+  const rowHeight = Math.max(MIN_ROW_HEIGHT, innerHeight);
+
+  const phaseClips: Array<{
+    key: "mount" | "expo" | "dismantle";
+    clip: ReturnType<typeof clipToMonth>;
+    color: string;
+    border: string;
+  }> = [
+    {
+      key: "mount",
+      clip: phases.mount
+        ? clipToMonth(phases.mount.start.getTime(), phases.mount.end.getTime(), bounds)
+        : undefined,
+      color: PHASE_FILLS.mount,
+      border: "rgba(234,179,8,0.5)",
+    },
+    {
+      key: "expo",
+      clip: phases.expo
+        ? clipToMonth(phases.expo.start.getTime(), phases.expo.end.getTime(), bounds)
+        : undefined,
+      color: PHASE_FILLS.expo,
+      border: "rgba(34,197,94,0.5)",
+    },
+    {
+      key: "dismantle",
+      clip: phases.dismantle
+        ? clipToMonth(
+            phases.dismantle.start.getTime(),
+            phases.dismantle.end.getTime(),
+            bounds,
+          )
+        : undefined,
+      color: PHASE_FILLS.dismantle,
+      border: "rgba(239,68,68,0.5)",
+    },
+  ];
+
+  // For deals: use the expo overall range as the deal span (mount→dismantle).
+  const dealRange = expoOverallRange(expo);
+  const dealClip = dealRange
+    ? clipToMonth(dealRange.start.getTime(), dealRange.end.getTime(), bounds)
+    : undefined;
 
   return (
     <div
-      className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
+      className={`grid min-w-0 items-stretch border-b last:border-b-0 ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
       style={{
         gridTemplateColumns: `${LEFT_COL_PX}px 1fr`,
-        minHeight: `${Math.max(56, innerHeight)}px`,
+        minHeight: `${rowHeight}px`,
       }}
-      data-testid={`build-schedule-row-${expo.id}`}
+      data-testid={`build-schedule-row-${expo.id}-${bounds.monthIdx}`}
     >
       <button
         type="button"
@@ -344,39 +441,37 @@ function BuildScheduleRow({
           Сделок: {dealsCount}
         </div>
       </button>
-      <div
-        className="relative"
-        style={{ minHeight: `${innerHeight}px` }}
-      >
-        <MonthGridBackdrop months={months} />
+      <div className="relative" style={{ minHeight: `${rowHeight}px` }}>
+        <DayGridBackdrop bounds={bounds} />
+
+        {phaseClips.map(({ key, clip, color, border }) =>
+          clip ? (
+            <div
+              key={key}
+              className="pointer-events-none absolute inset-y-0"
+              style={{
+                left: `${clip.leftPct}%`,
+                width: `${clip.widthPct}%`,
+                background: color,
+                borderLeft: `1px solid ${border}`,
+                borderRight: `1px solid ${border}`,
+              }}
+              aria-hidden
+            />
+          ) : null,
+        )}
+
         {todayLeftPct !== undefined ? (
           <div
-            className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
+            className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/50"
             style={{ left: `${todayLeftPct}%` }}
             aria-hidden
           />
         ) : null}
 
-        {clip ? (
-          <div
-            className="absolute rounded"
-            style={{
-              top: `${ROW_PADDING_Y}px`,
-              height: `${HEADER_ROW_HEIGHT}px`,
-              left: `${clip.leftPct}%`,
-              width: `${clip.widthPct}%`,
-              background: PHASE_FILLS.expo,
-              border: "1px solid rgba(34,197,94,0.45)",
-            }}
-            title={`${expo.title} · ${formatShort(overall!.start)} — ${formatShort(overall!.end)}`}
-          />
-        ) : null}
-
         {deals.map((deal, idx) => {
-          const dealClip = clip;
           if (!dealClip) return null;
-          const top =
-            ROW_PADDING_Y + HEADER_ROW_HEIGHT + 4 + idx * (DEAL_ROW_HEIGHT + 2);
+          const top = ROW_PADDING_Y + idx * (DEAL_ROW_HEIGHT + DEAL_ROW_GAP);
           return (
             <button
               key={deal.id}
@@ -386,7 +481,7 @@ function BuildScheduleRow({
                 if (onSelectDeal) onSelectDeal(deal);
                 else if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
               }}
-              className="absolute truncate rounded px-1 text-left text-[11px] leading-tight text-white shadow-sm transition hover:brightness-110"
+              className="absolute z-10 truncate rounded px-1 text-left text-[11px] leading-tight text-white shadow-sm transition hover:brightness-110"
               style={{
                 top: `${top}px`,
                 height: `${DEAL_ROW_HEIGHT}px`,
@@ -395,7 +490,7 @@ function BuildScheduleRow({
                 background: dealColor(deal),
               }}
               title={dealSummaryLine(deal)}
-              data-testid={`build-schedule-deal-${deal.id}`}
+              data-testid={`build-schedule-deal-${deal.id}-${bounds.monthIdx}`}
             >
               <span className="truncate">{dealSummaryLine(deal)}</span>
             </button>
@@ -414,23 +509,23 @@ function BuildScheduleRow({
   );
 }
 
-function EmptyGridBody({
-  text,
+function EmptyMonthBody({
+  bounds,
   todayLeftPct,
-  months,
+  text,
 }: {
-  text: string;
+  bounds: MonthBounds;
   todayLeftPct: number | undefined;
-  months: MonthSegment[];
+  text: string;
 }) {
   return (
     <div
-      className="relative grid min-w-0 items-stretch border-b"
-      style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr`, minHeight: "112px" }}
+      className="relative grid min-w-0 items-stretch"
+      style={{ gridTemplateColumns: `${LEFT_COL_PX}px 1fr`, minHeight: "48px" }}
     >
       <div className="border-r bg-background/70" aria-hidden />
       <div className="relative">
-        <MonthGridBackdrop months={months} />
+        <DayGridBackdrop bounds={bounds} />
         {todayLeftPct !== undefined ? (
           <div
             className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-primary/40"
@@ -440,8 +535,8 @@ function EmptyGridBody({
         ) : null}
       </div>
       <div
-        className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-sm text-muted-foreground"
-        data-testid="build-schedule-empty"
+        className="pointer-events-none absolute inset-0 flex items-center justify-center px-4 text-center text-xs text-muted-foreground"
+        data-testid={`build-schedule-month-empty-${bounds.monthIdx}`}
       >
         {text}
       </div>
@@ -514,8 +609,11 @@ function YearControls({
 
 function LegendBar() {
   return (
-    <div className="flex flex-wrap items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
-      <LegendSwatch color={PHASE_FILLS.expo} label="Период выставки" />
+    <div className="flex flex-wrap items-center gap-3 rounded-md border bg-background px-3 py-2 text-xs text-muted-foreground">
+      <LegendSwatch color={PHASE_FILLS.mount} label="Монтаж" />
+      <LegendSwatch color={PHASE_FILLS.expo} label="Работа выставки" />
+      <LegendSwatch color={PHASE_FILLS.dismantle} label="Демонтаж" />
+      <span className="mx-2 h-3 w-px bg-border" aria-hidden />
       {DEAL_STATUS_ORDER.map((key) => (
         <LegendSwatch
           key={key}
