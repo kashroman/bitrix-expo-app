@@ -2,9 +2,12 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   MONTH_NAMES_RU_SHORT,
+  clipToMonth,
   daysInMonth,
   daysInYear,
+  monthBounds,
   monthSegments,
+  percentWithinMonth,
 } from "../../client/src/lib/build-schedule-months.ts";
 
 describe("daysInYear", () => {
@@ -80,5 +83,90 @@ describe("monthSegments", () => {
         `gap at month ${i}: ${segments[i].leftPct} vs ${expected}`,
       );
     }
+  });
+});
+
+describe("monthBounds", () => {
+  it("returns inclusive day range for the month", () => {
+    const b = monthBounds(2026, 0); // January
+    assert.equal(new Date(b.startMs).getDate(), 1);
+    assert.equal(new Date(b.endMs).getDate(), 31);
+    assert.equal(b.days, 31);
+  });
+
+  it("handles leap February", () => {
+    const b = monthBounds(2024, 1);
+    assert.equal(b.days, 29);
+    assert.equal(new Date(b.endMs).getDate(), 29);
+  });
+});
+
+describe("clipToMonth", () => {
+  const jan = monthBounds(2026, 0); // 31 days
+  const feb = monthBounds(2026, 1); // 28 days
+
+  function ms(y: number, m: number, d: number): number {
+    return new Date(y, m, d).getTime();
+  }
+
+  it("returns full width when range covers entire month", () => {
+    const clip = clipToMonth(ms(2026, 0, 1), ms(2026, 0, 31), jan);
+    assert.ok(clip);
+    assert.equal(clip!.leftPct, 0);
+    assert.ok(Math.abs(clip!.widthPct - 100) < 1e-9);
+  });
+
+  it("returns undefined when range is entirely before the month", () => {
+    const clip = clipToMonth(ms(2025, 11, 1), ms(2025, 11, 31), jan);
+    assert.equal(clip, undefined);
+  });
+
+  it("returns undefined when range is entirely after the month", () => {
+    const clip = clipToMonth(ms(2026, 1, 1), ms(2026, 1, 28), jan);
+    assert.equal(clip, undefined);
+  });
+
+  it("clips the start when range begins before the month", () => {
+    // Dec 25 → Jan 10: visible portion is Jan 1..Jan 10 (10 days / 31)
+    const clip = clipToMonth(ms(2025, 11, 25), ms(2026, 0, 10), jan);
+    assert.ok(clip);
+    assert.equal(clip!.leftPct, 0);
+    assert.ok(Math.abs(clip!.widthPct - (10 / 31) * 100) < 1e-6);
+  });
+
+  it("clips the end when range extends past the month", () => {
+    // Jan 20 → Feb 5: visible portion in Jan is Jan 20..Jan 31 (12 days / 31)
+    const clip = clipToMonth(ms(2026, 0, 20), ms(2026, 1, 5), jan);
+    assert.ok(clip);
+    assert.ok(Math.abs(clip!.leftPct - (19 / 31) * 100) < 1e-6);
+    assert.ok(Math.abs(clip!.widthPct - (12 / 31) * 100) < 1e-6);
+  });
+
+  it("positions a single-day range correctly", () => {
+    const clip = clipToMonth(ms(2026, 1, 14), ms(2026, 1, 14), feb);
+    assert.ok(clip);
+    assert.ok(Math.abs(clip!.leftPct - (13 / 28) * 100) < 1e-6);
+    // Width snaps to >= 0.3 floor
+    assert.ok(clip!.widthPct >= (1 / 28) * 100 - 1e-6);
+  });
+});
+
+describe("percentWithinMonth", () => {
+  const jan = monthBounds(2026, 0);
+
+  it("returns 0% for the first day", () => {
+    const pct = percentWithinMonth(new Date(2026, 0, 1).getTime(), jan);
+    assert.equal(pct, 0);
+  });
+
+  it("returns roughly N/days*100 for day N", () => {
+    const pct = percentWithinMonth(new Date(2026, 0, 16).getTime(), jan);
+    assert.ok(pct !== undefined);
+    assert.ok(Math.abs(pct! - (15 / 31) * 100) < 1e-6);
+  });
+
+  it("returns undefined for a date outside the month", () => {
+    const pct = percentWithinMonth(new Date(2026, 1, 5).getTime(), jan);
+    assert.equal(pct, undefined);
   });
 });
