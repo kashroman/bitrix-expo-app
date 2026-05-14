@@ -20,8 +20,6 @@ import {
   fetchDealsForStageProbe,
   fetchExpoList,
   fetchExposByMonth,
-  fetchExposByYear,
-  YearExpoLoadResult,
   fetchDealStages,
   fetchDealStagesDetailed,
   fetchMonthlyDealsByRecentScan,
@@ -97,47 +95,34 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
-  const [activeYear, setActiveYear] = useState<number>(() => new Date().getFullYear());
 
-  // Gantt-only month-scoped loader. Uses crm.item.list with a server-side
-  // date filter so only exhibitions whose event interval overlaps the
-  // selected month are requested. Calendar/List modes still use the full
-  // list — they need every exhibition for their own layouts.
+  // Both «Календарь выставок» (gantt) and «График застройки» (build-schedule)
+  // are month-scoped. They share the per-month exhibition loader so flipping
+  // between tabs reuses the cache.
   const isBitrix = isInsideBitrix();
   const activeMonthKey = monthKeyOf(activeMonth);
+  const usesMonthScopedExpos = view === "gantt" || view === "build-schedule";
+
   const monthExpos = useQuery<MonthExpoLoadResult>({
     queryKey: ["expo-list-month", activeMonthKey],
     queryFn: () => fetchExposByMonth(activeMonth),
-    enabled: isBitrix && view === "gantt",
+    enabled: isBitrix && usesMonthScopedExpos,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
     // Keep the previous month's result visible while the new month loads.
-    // This prevents GanttView from unmounting/remounting on every month
-    // switch — the old remount flow lost GanttTimeline's cursor state and
-    // the transient `isLoading=true` window masked the in-flight fetch so
-    // the month-load diagnostics appeared to stall at "loading" with 0
-    // expos when the new month wasn't immediately cached.
-    placeholderData: keepPreviousData,
-  });
-
-  const usesMonthScopedExpos = view === "gantt";
-  const usesYearScopedExpos = view === "build-schedule";
-
-  const yearExpos = useQuery<YearExpoLoadResult>({
-    queryKey: ["expo-list-year", activeYear],
-    queryFn: () => fetchExposByYear(activeYear),
-    enabled: isBitrix && usesYearScopedExpos,
-    staleTime: 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
+    // This prevents the timeline from unmounting/remounting on every month
+    // switch — the old remount flow lost the cursor state and the
+    // transient `isLoading=true` window masked the in-flight fetch so the
+    // month-load diagnostics appeared to stall at "loading" with 0 expos
+    // when the new month wasn't immediately cached.
     placeholderData: keepPreviousData,
   });
 
   const expos = useQuery({
     queryKey: ["expo-list"],
     queryFn: fetchExpoList,
-    enabled: isBitrix && !usesMonthScopedExpos && !usesYearScopedExpos,
+    enabled: isBitrix && !usesMonthScopedExpos,
   });
 
   // With placeholderData: keepPreviousData the query returns last month's
@@ -145,26 +130,14 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // the active month — otherwise expose an empty list and flag fetching.
   const monthDataIsForActiveMonth =
     monthExpos.data?.diagnostics.monthKey === activeMonthKey;
-  const yearDataIsForActiveYear =
-    yearExpos.data?.diagnostics.yearKey === String(activeYear);
   const activeExpos: ExpoItem[] = usesMonthScopedExpos
     ? monthDataIsForActiveMonth
       ? monthExpos.data?.items ?? []
       : []
-    : usesYearScopedExpos
-      ? yearDataIsForActiveYear
-        ? yearExpos.data?.items ?? []
-        : []
-      : expos.data ?? [];
+    : expos.data ?? [];
   const monthFirstLoad =
     usesMonthScopedExpos && monthExpos.isFetching && !monthExpos.data;
-  const yearFirstLoad =
-    usesYearScopedExpos && yearExpos.isFetching && !yearExpos.data;
-  const activeIsLoading = usesMonthScopedExpos
-    ? monthFirstLoad
-    : usesYearScopedExpos
-      ? yearFirstLoad
-      : expos.isLoading;
+  const activeIsLoading = usesMonthScopedExpos ? monthFirstLoad : expos.isLoading;
   const monthIsFetchingNewMonth =
     usesMonthScopedExpos &&
     monthExpos.isFetching &&
@@ -172,32 +145,20 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     Boolean(monthExpos.data);
   const ganttIsFetchingNewMonth =
     view === "gantt" && monthIsFetchingNewMonth;
-  const yearIsFetchingNewYear =
-    usesYearScopedExpos &&
-    yearExpos.isFetching &&
-    !yearDataIsForActiveYear &&
-    Boolean(yearExpos.data);
+  const buildScheduleIsFetchingNewMonth =
+    view === "build-schedule" && monthIsFetchingNewMonth;
   const activeIsError = usesMonthScopedExpos
     ? monthExpos.isError ||
       (monthDataIsForActiveMonth &&
         Boolean(monthExpos.data?.diagnostics.error))
-    : usesYearScopedExpos
-      ? yearExpos.isError ||
-        (yearDataIsForActiveYear && Boolean(yearExpos.data?.diagnostics.error))
-      : expos.isError;
+    : expos.isError;
   const activeError = usesMonthScopedExpos
     ? (monthDataIsForActiveMonth
         ? monthExpos.data?.diagnostics.error
         : undefined) ??
       (monthExpos.error as Error | undefined)?.message ??
       monthExpos.error
-    : usesYearScopedExpos
-      ? (yearDataIsForActiveYear
-          ? yearExpos.data?.diagnostics.error
-          : undefined) ??
-        (yearExpos.error as Error | undefined)?.message ??
-        yearExpos.error
-      : (expos.error as Error | undefined)?.message ?? expos.error;
+    : (expos.error as Error | undefined)?.message ?? expos.error;
 
   const responsibles = useMemo(() => {
     const ids = new Set<string>();
@@ -235,11 +196,8 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // 30 IDs/chunk × concurrency 2 means a 60-row visible set finishes
   // in 1–2 round-trips.
   const counterExpoIds = useMemo(() => {
-    if (view === "gantt") {
+    if (view === "gantt" || view === "build-schedule") {
       return exposOverlappingMonth(filtered, activeMonth).map((e) => e.id);
-    }
-    if (view === "build-schedule") {
-      return filtered.map((e) => e.id);
     }
     return filtered.map((e) => e.id);
   }, [view, filtered, activeMonth]);
@@ -256,14 +214,14 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // again client-side as a safety net.
   const buildScheduleExpoIds = useMemo(() => {
     if (view !== "build-schedule") return [] as number[];
-    return filtered.map((e) => Number(e.id));
-  }, [view, filtered]);
+    return exposOverlappingMonth(filtered, activeMonth).map((e) => Number(e.id));
+  }, [view, filtered, activeMonth]);
   const buildScheduleKey = useMemo(
     () => buildScheduleExpoIds.slice().sort((a, b) => a - b),
     [buildScheduleExpoIds],
   );
   const buildScheduleQuery = useQuery<BuildScheduleResult>({
-    queryKey: ["build-schedule-deals-year", String(activeYear), buildScheduleKey],
+    queryKey: ["build-schedule-deals-month", activeMonthKey, buildScheduleKey],
     queryFn: () => fetchBuildScheduleDeals(buildScheduleKey),
     enabled:
       isBitrix &&
@@ -304,9 +262,8 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             onClick={() => {
               queryClient.invalidateQueries({ queryKey: ["expo-list"] });
               queryClient.invalidateQueries({ queryKey: ["expo-list-month"] });
-              queryClient.invalidateQueries({ queryKey: ["expo-list-year"] });
               queryClient.invalidateQueries({ queryKey: ["build-schedule-deals"] });
-              queryClient.invalidateQueries({ queryKey: ["build-schedule-deals-year"] });
+              queryClient.invalidateQueries({ queryKey: ["build-schedule-deals-month"] });
             }}
             data-testid="button-refresh"
           >
@@ -343,9 +300,9 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
           ) : view === "build-schedule" ? (
             <BuildScheduleSection
               expos={filtered}
-              activeYear={activeYear}
-              onYearChange={setActiveYear}
-              isFetchingExpos={yearIsFetchingNewYear}
+              activeMonth={activeMonth}
+              onMonthChange={setActiveMonth}
+              isFetchingExpos={buildScheduleIsFetchingNewMonth}
               dealsQuery={buildScheduleQuery}
             />
           ) : !filtered.length ? (
@@ -484,21 +441,25 @@ function GanttView({
 
 function BuildScheduleSection({
   expos,
-  activeYear,
-  onYearChange,
+  activeMonth,
+  onMonthChange,
   isFetchingExpos,
   dealsQuery,
 }: {
   expos: ExpoItem[];
-  activeYear: number;
-  onYearChange: (y: number) => void;
+  activeMonth: Date;
+  onMonthChange: (d: Date) => void;
   isFetchingExpos: boolean;
   dealsQuery: ReturnType<typeof useQuery<BuildScheduleResult>>;
 }) {
   const dealsByExpoId = dealsQuery.data?.byExpoId;
+  const overlapping = useMemo(
+    () => exposOverlappingMonth(expos, activeMonth),
+    [expos, activeMonth],
+  );
   const withDeals = useMemo(
-    () => filterExposWithBuildScheduleDeals(expos, dealsByExpoId),
-    [expos, dealsByExpoId],
+    () => filterExposWithBuildScheduleDeals(overlapping, dealsByExpoId),
+    [overlapping, dealsByExpoId],
   );
   const isFetchingDeals = dealsQuery.isFetching;
   const diag = dealsQuery.data?.diagnostics;
@@ -510,7 +471,7 @@ function BuildScheduleSection({
           data-testid="build-schedule-month-fetching-banner"
         >
           <RefreshCw className="h-3.5 w-3.5 animate-spin" />
-          <span>Загрузка выставок за выбранный год…</span>
+          <span>Загрузка выставок за выбранный месяц…</span>
         </div>
       ) : null}
       {isFetchingDeals && expos.length > 0 ? (
@@ -534,20 +495,19 @@ function BuildScheduleSection({
       <BuildScheduleView
         expos={withDeals}
         dealsByExpoId={dealsByExpoId}
-        initialYear={activeYear}
-        onYearChange={onYearChange}
+        initialMonth={activeMonth}
+        onMonthChange={onMonthChange}
         onSelectExpo={(expo) => navigateToEvent(expo.id)}
         onSelectDeal={(deal) => {
           if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
           else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
         }}
-        isFetching={isFetchingDeals}
         emptyMessage={
           expos.length === 0
-            ? "Ни одна выставка не попадает в выбранный год."
+            ? "Ни одна выставка не попадает в выбранный месяц."
             : isFetchingDeals
               ? "Загрузка сделок…"
-              : "Нет выставок со сделками на стадиях графика застройки в этом году."
+              : "Нет выставок со сделками на стадиях графика застройки в этом месяце."
         }
       />
       {diag ? (
