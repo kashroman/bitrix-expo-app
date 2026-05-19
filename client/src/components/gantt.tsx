@@ -1,7 +1,11 @@
 import { useMemo, useState, useEffect } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { PHASE_FILLS, matchDealStatus } from "@/lib/config";
-import { ExpoItem } from "@/lib/expo-data";
+import {
+  DEAL_STATUS_COLORS,
+  PHASE_FILLS,
+  matchDealStatus,
+} from "@/lib/config";
+import { BuildScheduleDeal, ExpoItem } from "@/lib/expo-data";
 import { parseDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import {
@@ -13,6 +17,103 @@ import {
 } from "@/components/ui/select";
 
 const LEFT_COL_PX = 240;
+const DEAL_BAR_HEIGHT = 18;
+const DEAL_BAR_GAP = 3;
+const DEAL_STACK_PAD_Y = 6;
+const NEUTRAL_BAR_COLOR = "#94a3b8";
+const STAGE_FALLBACK_PALETTE = [
+  "#a855f7", // purple
+  "#0ea5e9", // sky
+  "#f97316", // orange
+  "#14b8a6", // teal
+  "#ec4899", // pink
+  "#22c55e", // green
+  "#facc15", // yellow
+  "#ef4444", // red
+  "#6366f1", // indigo
+  "#84cc16", // lime
+];
+
+// Deterministic colour for stage IDs the matcher doesn't know about. Keeps
+// custom stages visually distinguishable without per-stage configuration.
+export function stageFallbackColor(stageId: string | undefined | null): string {
+  const s = String(stageId ?? "").trim();
+  if (!s) return NEUTRAL_BAR_COLOR;
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
+  }
+  return STAGE_FALLBACK_PALETTE[hash % STAGE_FALLBACK_PALETTE.length];
+}
+
+function dealColor(deal: BuildScheduleDeal): string {
+  if (deal.status && DEAL_STATUS_COLORS[deal.status]) {
+    return DEAL_STATUS_COLORS[deal.status];
+  }
+  return stageFallbackColor(deal.stageTail || deal.stageId);
+}
+
+function dealStageLabel(
+  deal: BuildScheduleDeal,
+  stageTitles?: Map<string, string>,
+): string {
+  if (stageTitles) {
+    const t =
+      stageTitles.get(deal.stageId) ??
+      stageTitles.get(deal.stageTail ?? "") ??
+      stageTitles.get(deal.stageTail ?? "");
+    if (t) return t;
+  }
+  return deal.stageTail || deal.stageId || "—";
+}
+
+function dealSummaryLine(
+  deal: BuildScheduleDeal,
+  stageTitles?: Map<string, string>,
+): string {
+  const parts: string[] = [];
+  if (deal.clientName) parts.push(deal.clientName);
+  else parts.push(deal.title);
+  if (deal.manager) parts.push(deal.manager);
+  if (deal.budget) parts.push(deal.budget);
+  parts.push(dealStageLabel(deal, stageTitles));
+  return parts.join(" · ");
+}
+
+// Compute the visible row height required to stack `count` deal bars on top of
+// the phase background. Always ≥ the base day-row height.
+export function dealRowHeight(count: number, base: number = DAY_HEIGHT_BASE): number {
+  if (count <= 0) return base;
+  const stack =
+    DEAL_STACK_PAD_Y * 2 +
+    count * DEAL_BAR_HEIGHT +
+    (count - 1) * DEAL_BAR_GAP;
+  return Math.max(base, stack);
+}
+
+// Span the deal across the exhibition's full mount→dismantle interval (same
+// behaviour as the old BuildScheduleView: a deal occupies the whole row of
+// its expo, clipped to the visible month).
+export function expoOverallRange(
+  expo: ExpoItem,
+): { start: Date; end: Date } | undefined {
+  const starts = [parseDate(expo.installStart), parseDate(expo.expoStart)].filter(
+    Boolean,
+  ) as Date[];
+  const ends = [
+    parseDate(expo.dismantleEnd),
+    parseDate(expo.expoEnd),
+    parseDate(expo.installEnd),
+  ].filter(Boolean) as Date[];
+  if (!starts.length && !ends.length) return undefined;
+  const start = starts.length
+    ? new Date(Math.min(...starts.map((d) => d.getTime())))
+    : ends[0];
+  const end = ends.length
+    ? new Date(Math.max(...ends.map((d) => d.getTime())))
+    : start;
+  return { start: stripTime(start!), end: stripTime(end!) };
+}
 const MONTH_NAMES_RU = [
   "Январь",
   "Февраль",
@@ -87,6 +188,10 @@ export function GanttTimeline({
   initialMonth,
   onMonthChange,
   emptyMessage,
+  dealsByExpoId,
+  onSelectDeal,
+  stageTitles,
+  selectedStageIds,
 }: {
   expos: ExpoItem[];
   onSelect: (expo: ExpoItem) => void;
@@ -94,6 +199,10 @@ export function GanttTimeline({
   initialMonth?: Date;
   onMonthChange?: (monthStart: Date) => void;
   emptyMessage?: string;
+  dealsByExpoId?: Map<number, BuildScheduleDeal[]>;
+  onSelectDeal?: (deal: BuildScheduleDeal) => void;
+  stageTitles?: Map<string, string>;
+  selectedStageIds?: string[];
 }) {
   const [cursor, setCursor] = useState<Date>(() => {
     if (initialMonth) return monthStartOf(initialMonth.getFullYear(), initialMonth.getMonth());
@@ -218,6 +327,8 @@ export function GanttTimeline({
 
         {sortedExpos.map((expo, rowIndex) => {
           const phases = phasesOf(expo);
+          const deals = dealsByExpoId?.get(Number(expo.id)) ?? [];
+          const rowHeight = dealRowHeight(deals.length);
           return (
             <ExpoRow
               key={expo.id}
@@ -227,14 +338,20 @@ export function GanttTimeline({
               month={month}
               totalDays={totalDays}
               phases={phases}
-              rowHeight={DAY_HEIGHT_BASE}
+              rowHeight={rowHeight}
+              deals={deals}
               onSelect={onSelect}
+              onSelectDeal={onSelectDeal}
+              stageTitles={stageTitles}
               renderRight={renderRight}
             />
           );
         })}
 
-        <GanttLegendBar />
+        <GanttLegendBar
+          selectedStageIds={selectedStageIds}
+          stageTitles={stageTitles}
+        />
       </div>
     </div>
   );
@@ -248,7 +365,10 @@ function ExpoRow({
   totalDays,
   phases,
   rowHeight,
+  deals,
   onSelect,
+  onSelectDeal,
+  stageTitles,
   renderRight,
 }: {
   expo: ExpoItem;
@@ -258,9 +378,15 @@ function ExpoRow({
   totalDays: number;
   phases: Phase[];
   rowHeight: number;
+  deals?: BuildScheduleDeal[];
   onSelect: (expo: ExpoItem) => void;
+  onSelectDeal?: (deal: BuildScheduleDeal) => void;
+  stageTitles?: Map<string, string>;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
 }) {
+  const dealList = deals ?? [];
+  const dealRange = dealList.length > 0 ? expoOverallRange(expo) : undefined;
+  const dealClip = dealRange ? clipToMonth(dealRange, year, month) : undefined;
   return (
     <div
       className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
@@ -280,6 +406,11 @@ function ExpoRow({
         <div className="truncate text-xs text-muted-foreground">
           {formatShortRange(expo.expoStart, expo.expoEnd)}
         </div>
+        {dealList.length > 0 ? (
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            Сделок: {dealList.length}
+          </div>
+        ) : null}
         {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
       </button>
       <div
@@ -318,13 +449,14 @@ function ExpoRow({
           return (
             <div
               key={phase.key}
-              className="absolute top-1 bottom-1 rounded"
+              className="pointer-events-none absolute inset-y-0"
               style={{
                 left: `${left}%`,
                 width: `${width}%`,
                 background: PHASE_FILLS[phase.key],
               }}
               title={`${phaseLabel(phase.key)}: ${formatShort(phase.start)} — ${formatShort(phase.end)}`}
+              data-testid={`gantt-phase-${expo.id}-${phase.key}`}
             />
           );
         })}
@@ -335,6 +467,41 @@ function ExpoRow({
           className="absolute inset-0 cursor-pointer focus:outline-none focus:ring-2 focus:ring-primary/50"
           aria-label={`Открыть ${expo.title}`}
         />
+
+        {dealClip
+          ? dealList.map((deal, idx) => {
+              const left = ((dealClip.startDay - 1) / totalDays) * 100;
+              const width =
+                ((dealClip.endDay - dealClip.startDay + 1) / totalDays) * 100;
+              const top =
+                DEAL_STACK_PAD_Y + idx * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP);
+              const summary = dealSummaryLine(deal, stageTitles);
+              return (
+                <button
+                  key={deal.id}
+                  type="button"
+                  onClick={(ev) => {
+                    ev.stopPropagation();
+                    if (onSelectDeal) onSelectDeal(deal);
+                    else if (deal.bitrixUrl)
+                      window.open(deal.bitrixUrl, "_blank");
+                  }}
+                  className="absolute z-10 truncate rounded px-1 text-left text-[11px] leading-tight text-white shadow-sm transition hover:brightness-110"
+                  style={{
+                    top: `${top}px`,
+                    height: `${DEAL_BAR_HEIGHT}px`,
+                    left: `${left}%`,
+                    width: `${width}%`,
+                    background: dealColor(deal),
+                  }}
+                  title={summary}
+                  data-testid={`gantt-deal-${deal.id}`}
+                >
+                  <span className="truncate">{summary}</span>
+                </button>
+              );
+            })
+          : null}
       </div>
     </div>
   );
@@ -445,12 +612,32 @@ function MonthControls({
   );
 }
 
-function GanttLegendBar() {
+function GanttLegendBar({
+  selectedStageIds,
+  stageTitles,
+}: {
+  selectedStageIds?: string[];
+  stageTitles?: Map<string, string>;
+}) {
+  const stageSwatches = (selectedStageIds ?? []).map((id) => {
+    const known = matchDealStatus(id, stageTitles?.get(id));
+    const color = known
+      ? DEAL_STATUS_COLORS[known]
+      : stageFallbackColor(id);
+    const label = stageTitles?.get(id) ?? id;
+    return { id, color, label };
+  });
   return (
     <div className="flex flex-wrap items-center gap-3 border-t px-3 py-2 text-xs text-muted-foreground">
       <LegendSwatch color={PHASE_FILLS.mount} label="Монтаж" />
       <LegendSwatch color={PHASE_FILLS.expo} label="Проведение" />
       <LegendSwatch color={PHASE_FILLS.dismantle} label="Демонтаж" />
+      {stageSwatches.length > 0 ? (
+        <span className="mx-2 h-3 w-px bg-border" aria-hidden />
+      ) : null}
+      {stageSwatches.map((s) => (
+        <LegendSwatch key={s.id} color={s.color} label={s.label} />
+      ))}
     </div>
   );
 }

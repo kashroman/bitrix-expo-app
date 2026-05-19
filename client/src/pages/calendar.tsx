@@ -1,10 +1,12 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
 import { Link } from "wouter";
-import { RefreshCw, BarChart3, ChevronDown, Loader2, Hammer } from "lucide-react";
+import { RefreshCw, BarChart3, ChevronDown, Loader2, Hammer, Filter } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Shell, PageTitle, Empty, LoadingRows } from "./shell";
 import { GanttTimeline } from "@/components/gantt";
@@ -42,6 +44,7 @@ import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
 import { isInsideBitrix } from "@/lib/bitrix";
 import {
+  BUILD_SCHEDULE_STAGE_IDS,
   DEAL_STATUS_LABELS,
   DEAL_STATUS_ORDER,
   DealStatusKey,
@@ -84,7 +87,11 @@ function monthKeyOf(d: Date): string {
 }
 
 export default function CalendarPage({ embedded = false }: { embedded?: boolean } = {}) {
-  const [view, setView] = useState<ViewMode>("gantt");
+  // The "build-schedule" tab is now hidden — deals are rendered as colored
+  // bars inside the "Календарь выставок" Gantt. The constant is widened to
+  // ViewMode so historical view-mode-driven branches still type-check and
+  // can be re-enabled later without a deeper refactor.
+  const view = "gantt" as ViewMode;
   // Filters by period / responsible / title search were removed from the UI
   // per user request. The state is retained as constants so the filtering
   // logic below stays intact (and easy to re-enable later if needed).
@@ -95,10 +102,16 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     const now = new Date();
     return new Date(now.getFullYear(), now.getMonth(), 1);
   });
+  // User-selected deal stages to overlay on the Gantt. Defaults to the
+  // build-schedule whitelist (8 / 9 / WON or VITE_BUILD_SCHEDULE_STAGE_IDS).
+  // Kept in React state only — Bitrix iframes block storage APIs and this
+  // selection is meaningful only while the calendar page is open.
+  const [selectedStageIds, setSelectedStageIds] = useState<string[]>(
+    () => [...BUILD_SCHEDULE_STAGE_IDS],
+  );
 
-  // Both «Календарь выставок» (gantt) and «График застройки» (build-schedule)
-  // are month-scoped. They share the per-month exhibition loader so flipping
-  // between tabs reuses the cache.
+  // Calendar view is month-scoped. The per-month exhibition loader is the
+  // single source of truth for what's drawn in the timeline.
   const isBitrix = isInsideBitrix();
   const activeMonthKey = monthKeyOf(activeMonth);
   const usesMonthScopedExpos = view === "gantt" || view === "build-schedule";
@@ -206,32 +219,61 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     enabled: isBitrix && counterExpoIds.length > 0,
   });
 
-  // --- Build Schedule data ---
+  // --- Deal-bar overlay (formerly «График застройки») ---
   // Fetch deal details (id/title/client/manager/budget/stage) for the
   // exhibitions visible in the current month, using the @<dealField>
   // chunked IN-filter so the number of REST calls stays bounded by
-  // ceil(N/30). Stage filter is applied server-side via @STAGE_ID and
-  // again client-side as a safety net.
-  const buildScheduleExpoIds = useMemo(() => {
-    if (view !== "build-schedule") return [] as number[];
-    return exposOverlappingMonth(filtered, activeMonth).map((e) => Number(e.id));
-  }, [view, filtered, activeMonth]);
+  // ceil(N/30). Stage filter is now driven by the in-page stage picker —
+  // when the user clears it, the query is disabled and the calendar shows
+  // the bare phase grid.
+  const buildScheduleExpoIds = useMemo(
+    () => exposOverlappingMonth(filtered, activeMonth).map((e) => Number(e.id)),
+    [filtered, activeMonth],
+  );
   const buildScheduleKey = useMemo(
     () => buildScheduleExpoIds.slice().sort((a, b) => a - b),
     [buildScheduleExpoIds],
   );
+  const sortedStageKey = useMemo(
+    () => [...selectedStageIds].sort(),
+    [selectedStageIds],
+  );
   const buildScheduleQuery = useQuery<BuildScheduleResult>({
-    queryKey: ["build-schedule-deals-month", activeMonthKey, buildScheduleKey],
-    queryFn: () => fetchBuildScheduleDeals(buildScheduleKey),
+    queryKey: [
+      "build-schedule-deals-month",
+      activeMonthKey,
+      buildScheduleKey,
+      sortedStageKey,
+    ],
+    queryFn: () =>
+      fetchBuildScheduleDeals(buildScheduleKey, {
+        stageIds: sortedStageKey,
+      }),
     enabled:
       isBitrix &&
-      view === "build-schedule" &&
-      buildScheduleKey.length > 0,
+      buildScheduleKey.length > 0 &&
+      sortedStageKey.length > 0,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
     placeholderData: keepPreviousData,
   });
+
+  // Deal stages for the in-page picker. Loaded lazily; falls back to an
+  // empty list (the picker then renders just the default IDs as plain
+  // chips).
+  const stagesListQuery = useQuery<DealStagesResult>({
+    queryKey: ["deal-stages-detailed"],
+    queryFn: fetchDealStagesDetailed,
+    enabled: isBitrix,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const stageTitles = useMemo(
+    () => statusTitleMap(stagesListQuery.data?.stages ?? []),
+    [stagesListQuery.data?.stages],
+  );
 
   return (
     <Shell embedded={embedded}>
@@ -251,10 +293,12 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
 
       <Card className="mb-4">
         <CardContent className="flex flex-wrap items-center gap-3 p-4">
-          <div className="flex flex-wrap rounded-md border p-0.5">
-            <ViewButton mode="gantt" active={view} onClick={setView} icon={<BarChart3 className="h-4 w-4" />} label="Календарь выставок" />
-            <ViewButton mode="build-schedule" active={view} onClick={setView} icon={<Hammer className="h-4 w-4" />} label="График застройки" />
-          </div>
+          <DealStagePicker
+            stages={stagesListQuery.data?.stages ?? []}
+            stagesLoading={stagesListQuery.isLoading}
+            selectedStageIds={selectedStageIds}
+            onChange={setSelectedStageIds}
+          />
           <Button
             variant="outline"
             size="sm"
@@ -289,6 +333,17 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               onMonthChange={setActiveMonth}
               isFetchingNewMonth={ganttIsFetchingNewMonth}
               counts={bulkCounts}
+              dealsByExpoId={buildScheduleQuery.data?.byExpoId}
+              dealsLoading={buildScheduleQuery.isFetching && sortedStageKey.length > 0}
+              dealsError={
+                buildScheduleQuery.isError
+                  ? (buildScheduleQuery.error as Error | undefined)?.message ??
+                    "неизвестная ошибка"
+                  : undefined
+              }
+              dealsDiagnostics={buildScheduleQuery.data?.diagnostics}
+              selectedStageIds={sortedStageKey}
+              stageTitles={stageTitles}
               emptyMessage={
                 filtered.length === 0
                   ? ganttIsFetchingNewMonth
@@ -296,14 +351,6 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
                     : "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
                   : undefined
               }
-            />
-          ) : view === "build-schedule" ? (
-            <BuildScheduleSection
-              expos={filtered}
-              activeMonth={activeMonth}
-              onMonthChange={setActiveMonth}
-              isFetchingExpos={buildScheduleIsFetchingNewMonth}
-              dealsQuery={buildScheduleQuery}
             />
           ) : !filtered.length ? (
             <Empty text="Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс." />
@@ -395,6 +442,12 @@ function GanttView({
   emptyMessage,
   isFetchingNewMonth = false,
   counts,
+  dealsByExpoId,
+  dealsLoading = false,
+  dealsError,
+  dealsDiagnostics,
+  selectedStageIds,
+  stageTitles,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
@@ -402,6 +455,12 @@ function GanttView({
   emptyMessage?: string;
   isFetchingNewMonth?: boolean;
   counts: BulkCountsState;
+  dealsByExpoId?: Map<number, BuildScheduleDeal[]>;
+  dealsLoading?: boolean;
+  dealsError?: string;
+  dealsDiagnostics?: import("@/lib/expo-data").BuildScheduleDiagnostics;
+  selectedStageIds: string[];
+  stageTitles?: Map<string, string>;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -425,6 +484,31 @@ function GanttView({
           <span>Загрузка выставок за выбранный месяц…</span>
         </div>
       ) : null}
+      {selectedStageIds.length === 0 ? (
+        <div
+          className="rounded-md border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200"
+          data-testid="gantt-no-stages-hint"
+        >
+          Выберите стадии сделок для отображения цветных полосок на календаре.
+        </div>
+      ) : null}
+      {dealsLoading ? (
+        <div
+          className="flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 p-2 text-xs text-blue-800"
+          data-testid="gantt-deals-fetching-banner"
+        >
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>Загрузка сделок по выбранным стадиям…</span>
+        </div>
+      ) : null}
+      {dealsError ? (
+        <div
+          className="rounded-md border border-red-200 bg-red-50 p-2 text-xs text-red-800"
+          data-testid="gantt-deals-error"
+        >
+          Не удалось загрузить сделки: {dealsError}
+        </div>
+      ) : null}
       <GanttTimeline
         expos={overlapping}
         onSelect={(expo) => navigateToEvent(expo.id)}
@@ -434,8 +518,158 @@ function GanttView({
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
+        dealsByExpoId={dealsByExpoId}
+        onSelectDeal={(deal) => {
+          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
+          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
+        }}
+        stageTitles={stageTitles}
+        selectedStageIds={selectedStageIds}
       />
+      {dealsDiagnostics ? (
+        <div
+          className="text-[11px] text-muted-foreground"
+          data-testid="gantt-deals-diagnostics"
+        >
+          Запросов: {dealsDiagnostics.dealRequests} · строк загружено:{" "}
+          {dealsDiagnostics.dealRowsLoaded} · сделок в календаре:{" "}
+          {dealsDiagnostics.dealRowsKept}
+          {dealsDiagnostics.dealFailures.length > 0
+            ? ` · ошибок: ${dealsDiagnostics.dealFailures.length}`
+            : ""}
+          {" · "}за {dealsDiagnostics.durationMs} мс
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+function DealStagePicker({
+  stages,
+  stagesLoading,
+  selectedStageIds,
+  onChange,
+}: {
+  stages: StatusRef[];
+  stagesLoading: boolean;
+  selectedStageIds: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  // Order: keep currently-selected first, then any stages discovered from
+  // Bitrix. If Bitrix returned nothing, fall back to the user's current
+  // selection so they at least see what they have on.
+  const orderedStages = useMemo<Array<{ id: string; title: string; category?: string }>>(() => {
+    const seen = new Set<string>();
+    const rows: Array<{ id: string; title: string; category?: string }> = [];
+    selectedStageIds.forEach((id) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const fromCrm = stages.find((s) => s.id === id);
+      rows.push({
+        id,
+        title: fromCrm?.title ?? id,
+        category: fromCrm?.categoryId,
+      });
+    });
+    stages.forEach((s) => {
+      if (seen.has(s.id)) return;
+      seen.add(s.id);
+      rows.push({ id: s.id, title: s.title, category: s.categoryId });
+    });
+    return rows;
+  }, [stages, selectedStageIds]);
+
+  const toggle = (id: string) => {
+    if (selectedStageIds.includes(id)) {
+      onChange(selectedStageIds.filter((x) => x !== id));
+    } else {
+      onChange([...selectedStageIds, id]);
+    }
+  };
+
+  const summary =
+    selectedStageIds.length === 0
+      ? "Стадии не выбраны"
+      : `${selectedStageIds.length} стадии`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="deal-stage-picker"
+          className="gap-2"
+        >
+          <Filter className="h-4 w-4" />
+          <span>Стадии сделок: {summary}</span>
+          <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[320px] p-0">
+        <div className="flex items-center justify-between border-b px-3 py-2 text-xs">
+          <span className="font-medium">Стадии сделок</span>
+          <div className="flex gap-2">
+            <button
+              type="button"
+              className="text-primary hover:underline disabled:text-muted-foreground"
+              onClick={() => onChange([...BUILD_SCHEDULE_STAGE_IDS])}
+              data-testid="deal-stage-picker-defaults"
+            >
+              По умолчанию
+            </button>
+            <button
+              type="button"
+              className="text-primary hover:underline disabled:text-muted-foreground"
+              onClick={() => onChange([])}
+              disabled={selectedStageIds.length === 0}
+              data-testid="deal-stage-picker-clear"
+            >
+              Очистить
+            </button>
+          </div>
+        </div>
+        <div className="max-h-[320px] overflow-y-auto p-2">
+          {stagesLoading ? (
+            <div className="flex items-center gap-2 px-2 py-3 text-xs text-muted-foreground">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Загрузка стадий…
+            </div>
+          ) : orderedStages.length === 0 ? (
+            <div className="px-2 py-3 text-xs text-muted-foreground">
+              Стадии не найдены. Проверьте права доступа к воронкам сделок.
+            </div>
+          ) : (
+            orderedStages.map((stage) => {
+              const checked = selectedStageIds.includes(stage.id);
+              return (
+                <label
+                  key={stage.id}
+                  className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/60"
+                  data-testid={`deal-stage-option-${stage.id}`}
+                >
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() => toggle(stage.id)}
+                    aria-label={stage.title}
+                  />
+                  <span className="flex-1 leading-tight">
+                    <span className="block font-medium">{stage.title}</span>
+                    <span className="block text-muted-foreground">
+                      ID: <code>{stage.id}</code>
+                      {stage.category !== undefined
+                        ? ` · воронка ${stage.category}`
+                        : ""}
+                    </span>
+                  </span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }
 

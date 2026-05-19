@@ -3129,6 +3129,7 @@ export async function fetchBuildScheduleDeals(
   const chunks = chunkArray(ids, chunkSize);
   diagnostics.dealChunks = chunks.length;
 
+  const stageWhitelist = new Set(stageIds);
   const recordRow = (row: Record<string, unknown>, chunkIds: number[]) => {
     const dealIdRaw =
       readDealRowField(row, "ID") ?? readDealRowField(row, "id");
@@ -3137,8 +3138,10 @@ export async function fetchBuildScheduleDeals(
     const stageRaw = String(readDealRowField(row, "STAGE_ID") ?? "").trim();
     const stageTail = stageRaw.split(":").pop() ?? stageRaw;
     // Server-side stage filter may not be supported on every account; double
-    // check client-side so unexpected rows are dropped quietly.
-    if (!matchBuildScheduleStage(stageRaw) && !stageIds.includes(stageTail)) {
+    // check client-side against the caller-supplied whitelist so unexpected
+    // rows are dropped quietly. We honor the user's stage selection here —
+    // not the env-hardcoded build-schedule list — so custom pickers work.
+    if (!stageWhitelist.has(stageRaw) && !stageWhitelist.has(stageTail)) {
       return;
     }
     const linked = expoIdsFromLinkValue(readLinkFieldValue(row, dealField));
