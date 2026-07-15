@@ -42,7 +42,7 @@ import type {
 import type { CrmItem } from "@/lib/bitrix";
 import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
-import { isInsideBitrix } from "@/lib/bitrix";
+import { isInsideBitrix, openDealCard } from "@/lib/bitrix";
 import {
   BUILD_SCHEDULE_STAGE_IDS,
   DEAL_STATUS_LABELS,
@@ -562,10 +562,7 @@ function GanttView({
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
         dealsByExpoId={dealsByExpoId}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) => openDealCard(deal.id)}
         stageTitles={stageTitles}
         selectedStageIds={selectedStageIds}
       />
@@ -863,10 +860,7 @@ function BuildScheduleSection({
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         onSelectExpo={(expo) => navigateToEvent(expo.id)}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) => openDealCard(deal.id)}
         emptyMessage={
           expos.length === 0
             ? "Ни одна выставка не попадает в выбранный месяц."
