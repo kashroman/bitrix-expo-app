@@ -3069,6 +3069,7 @@ export async function fetchBuildScheduleDeals(
   expoIds: Array<number | string>,
   options: {
     stageIds?: string[];
+    assignedByIds?: string[];
     chunkSize?: number;
     concurrency?: number;
     dealField?: string | null;
@@ -3087,6 +3088,10 @@ export async function fetchBuildScheduleDeals(
     options.stageIds && options.stageIds.length > 0
       ? options.stageIds
       : BUILD_SCHEDULE_STAGE_IDS;
+  const assignedByIds =
+    options.assignedByIds && options.assignedByIds.length > 0
+      ? options.assignedByIds
+      : undefined;
   const dealField =
     options.dealField === undefined ? dealExpoFieldCode : options.dealField;
   const chunkSize = Math.max(
@@ -3130,6 +3135,7 @@ export async function fetchBuildScheduleDeals(
   diagnostics.dealChunks = chunks.length;
 
   const stageWhitelist = new Set(stageIds);
+  const assignedByIdSet = assignedByIds ? new Set(assignedByIds) : undefined;
   const recordRow = (row: Record<string, unknown>, chunkIds: number[]) => {
     const dealIdRaw =
       readDealRowField(row, "ID") ?? readDealRowField(row, "id");
@@ -3143,6 +3149,14 @@ export async function fetchBuildScheduleDeals(
     // not the env-hardcoded build-schedule list — so custom pickers work.
     if (!stageWhitelist.has(stageRaw) && !stageWhitelist.has(stageTail)) {
       return;
+    }
+    // Client-side manager filter. Bitrix server-side filter may not be reliable
+    // on all accounts, so enforce the whitelist client-side.
+    if (assignedByIdSet) {
+      const assignedById = String(readDealRowField(row, "ASSIGNED_BY_ID") ?? "").trim();
+      if (!assignedByIdSet.has(assignedById)) {
+        return;
+      }
     }
     const linked = expoIdsFromLinkValue(readLinkFieldValue(row, dealField));
     const expoMatches = linked.filter((tid) => byExpoId.has(tid));
@@ -3197,13 +3211,17 @@ export async function fetchBuildScheduleDeals(
   await runChunkedRequests(chunks, concurrency, async (chunkIds) => {
     diagnostics.dealRequests += 1;
     try {
+      const filter: Record<string, unknown> = {
+        [`@${dealField}`]: chunkIds,
+        "@STAGE_ID": stageIds,
+      };
+      if (assignedByIds) {
+        filter["@ASSIGNED_BY_ID"] = assignedByIds;
+      }
       const res = await listAllBxDetailed<Record<string, unknown>>(
         "crm.deal.list",
         {
-          filter: {
-            [`@${dealField}`]: chunkIds,
-            "@STAGE_ID": stageIds,
-          },
+          filter,
           select,
           order: { ID: "DESC" },
         },

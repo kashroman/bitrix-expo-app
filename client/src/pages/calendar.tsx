@@ -1,6 +1,6 @@
 import { useMemo, useState, useEffect } from "react";
 import { useQuery, keepPreviousData } from "@tanstack/react-query";
-import { Link } from "wouter";
+import { Link, useSearchParams } from "wouter";
 import { RefreshCw, BarChart3, ChevronDown, Loader2, Hammer, Filter } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -42,7 +42,7 @@ import type {
 import type { CrmItem } from "@/lib/bitrix";
 import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
-import { isInsideBitrix } from "@/lib/bitrix";
+import { isInsideBitrix, openDealCard } from "@/lib/bitrix";
 import {
   BUILD_SCHEDULE_STAGE_IDS,
   DEAL_STATUS_LABELS,
@@ -109,6 +109,23 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>(
     () => [...BUILD_SCHEDULE_STAGE_IDS],
   );
+
+  // URL parameters for persistent filter state
+  const [searchParams, setSearchParams] = useSearchParams();
+  const managerParam = searchParams.get("managers") ?? "";
+  const selectedManagerIds = managerParam
+    ? managerParam.split(",").filter(Boolean)
+    : [];
+
+  const setSelectedManagers = (ids: string[]) => {
+    const newParams = new URLSearchParams(searchParams);
+    if (ids.length > 0) {
+      newParams.set("managers", ids.join(","));
+    } else {
+      newParams.delete("managers");
+    }
+    setSearchParams(newParams.toString());
+  };
 
   // Calendar view is month-scoped. The per-month exhibition loader is the
   // single source of truth for what's drawn in the timeline.
@@ -238,16 +255,22 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     () => [...selectedStageIds].sort(),
     [selectedStageIds],
   );
+  const sortedManagerKey = useMemo(
+    () => [...selectedManagerIds].sort(),
+    [selectedManagerIds],
+  );
   const buildScheduleQuery = useQuery<BuildScheduleResult>({
     queryKey: [
       "build-schedule-deals-month",
       activeMonthKey,
       buildScheduleKey,
       sortedStageKey,
+      sortedManagerKey,
     ],
     queryFn: () =>
       fetchBuildScheduleDeals(buildScheduleKey, {
         stageIds: sortedStageKey,
+        assignedByIds: sortedManagerKey.length > 0 ? sortedManagerKey : undefined,
       }),
     enabled:
       isBitrix &&
@@ -258,6 +281,21 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     retry: false,
     placeholderData: keepPreviousData,
   });
+
+  // Extract unique manager IDs from loaded deals so we can populate the manager picker
+  const availableManagerIds = useMemo(() => {
+    const managers = new Map<string, string>();
+    if (buildScheduleQuery.data?.deals) {
+      buildScheduleQuery.data.deals.forEach((deal) => {
+        if (deal.assignedById) {
+          managers.set(deal.assignedById, deal.manager || `ID ${deal.assignedById}`);
+        }
+      });
+    }
+    return Array.from(managers.entries())
+      .sort((a, b) => a[1].localeCompare(b[1], "ru-RU"))
+      .map(([id, name]) => ({ id, name }));
+  }, [buildScheduleQuery.data?.deals]);
 
   // Deal stages for the in-page picker. Loaded lazily; falls back to an
   // empty list (the picker then renders just the default IDs as plain
@@ -298,6 +336,11 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             stagesLoading={stagesListQuery.isLoading}
             selectedStageIds={selectedStageIds}
             onChange={setSelectedStageIds}
+          />
+          <ManagerPicker
+            managers={availableManagerIds}
+            selectedManagerIds={selectedManagerIds}
+            onChange={setSelectedManagers}
           />
           <Button
             variant="outline"
@@ -519,10 +562,7 @@ function GanttView({
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
         dealsByExpoId={dealsByExpoId}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) => openDealCard(deal.id)}
         stageTitles={stageTitles}
         selectedStageIds={selectedStageIds}
       />
@@ -673,6 +713,94 @@ function DealStagePicker({
   );
 }
 
+function ManagerPicker({
+  managers,
+  selectedManagerIds,
+  onChange,
+}: {
+  managers: Array<{ id: string; name: string }>;
+  selectedManagerIds: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+
+  const toggle = (id: string) => {
+    if (selectedManagerIds.includes(id)) {
+      onChange(selectedManagerIds.filter((x) => x !== id));
+    } else {
+      onChange([...selectedManagerIds, id]);
+    }
+  };
+
+  const summary =
+    selectedManagerIds.length === 0
+      ? "Не выбраны"
+      : selectedManagerIds.length === 1
+        ? "1 менеджер"
+        : `${selectedManagerIds.length} менеджера`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="manager-picker"
+          className="gap-2"
+        >
+          <Filter className="h-4 w-4" />
+          <span>Менеджеры: {summary}</span>
+          <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[320px] p-0">
+        <div className="flex items-center justify-between border-b px-3 py-2 text-xs">
+          <span className="font-medium">Менеджеры</span>
+          <button
+            type="button"
+            className="text-primary hover:underline disabled:text-muted-foreground"
+            onClick={() => onChange([])}
+            disabled={selectedManagerIds.length === 0}
+            data-testid="manager-picker-clear"
+          >
+            Очистить
+          </button>
+        </div>
+        <div className="max-h-[320px] overflow-y-auto p-2">
+          {managers.length === 0 ? (
+            <div className="px-2 py-3 text-xs text-muted-foreground">
+              Менеджеры не найдены. Загрузите сделки.
+            </div>
+          ) : (
+            managers.map((manager) => {
+              const checked = selectedManagerIds.includes(manager.id);
+              return (
+                <label
+                  key={manager.id}
+                  className="flex cursor-pointer items-start gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/60"
+                  data-testid={`manager-option-${manager.id}`}
+                >
+                  <Checkbox
+                    checked={checked}
+                    onCheckedChange={() => toggle(manager.id)}
+                    aria-label={manager.name}
+                  />
+                  <span className="flex-1 leading-tight">
+                    <span className="block font-medium">{manager.name}</span>
+                    <span className="block text-muted-foreground">
+                      ID: <code>{manager.id}</code>
+                    </span>
+                  </span>
+                </label>
+              );
+            })
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 function BuildScheduleSection({
   expos,
   activeMonth,
@@ -732,10 +860,7 @@ function BuildScheduleSection({
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         onSelectExpo={(expo) => navigateToEvent(expo.id)}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) => openDealCard(deal.id)}
         emptyMessage={
           expos.length === 0
             ? "Ни одна выставка не попадает в выбранный месяц."

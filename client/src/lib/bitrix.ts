@@ -58,6 +58,7 @@ declare global {
         info(): PlacementInfo;
       };
       openPath?(path: string, callback?: () => void): void;
+      openSlider?(path: string, options?: Record<string, unknown>): void;
     };
   }
 }
@@ -269,6 +270,15 @@ export function openBitrixPath(path: string) {
     return;
   }
   window.open(path, "_blank", "noopener,noreferrer");
+}
+
+export function openDealCard(dealId: number | string): void {
+  if (window.BX24?.openSlider) {
+    window.BX24.openSlider(`/crm/deal/details/${dealId}/`);
+    return;
+  }
+  // Fallback: open in new tab if openSlider not available
+  window.open(`/crm/deal/details/${dealId}/`, "_blank", "noopener,noreferrer");
 }
 
 export function currentHandlerUrl(route: string): string {
