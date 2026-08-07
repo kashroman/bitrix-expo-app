@@ -66,7 +66,6 @@ type CheckDiagnostics = {
 };
 
 const YANDEX_HOST_MARKER = "containers.yandexcloud.net";
-const RENDER_HOST_MARKER = "onrender.com";
 
 function classifyHost(handler: string, currentOrigin: string): { label: string; tone: "ok" | "stale" | "neutral" } {
   if (!handler) return { label: "—", tone: "neutral" };
@@ -79,8 +78,7 @@ function classifyHost(handler: string, currentOrigin: string): { label: string; 
   const host = url.host.toLowerCase();
   if (currentOrigin && url.origin === currentOrigin) return { label: `current (${host})`, tone: "ok" };
   if (host.includes(YANDEX_HOST_MARKER)) return { label: `Yandex (${host})`, tone: "ok" };
-  if (host.includes(RENDER_HOST_MARKER)) return { label: `Render-legacy (${host})`, tone: "stale" };
-  return { label: host, tone: "neutral" };
+  return { label: `устаревший хост (${host})`, tone: "stale" };
 }
 
 export default function InstallPage() {
@@ -126,28 +124,16 @@ export default function InstallPage() {
           description: "Карточка выставки, связанные лиды/сделки",
         },
         {
-          placement: dynamicPlacement,
-          handler: currentHandlerUrl("/placement-detail"),
-          title: "Источник данных",
-          description: "URL организатора, проверить сейчас",
-        },
-        {
           placement: "CRM_ANALYTICS_MENU",
           handler: currentHandlerUrl("/calendar"),
           title: "Календарь выставок",
           description: "Календарь выставок interpro.pro",
         },
         {
-          placement: `CRM_DYNAMIC_${entityTypeId}_LIST_MENU`,
-          handler: currentHandlerUrl("/placement-list"),
-          title: "Добавить по ссылке",
-          description: "Smart enrichment: создание выставки по URL организатора",
-        },
-        {
           placement: "LEFT_MENU",
-          handler: currentHandlerUrl("/placement-menu"),
+          handler: currentHandlerUrl("/calendar"),
           title: "Календарь выставок",
-          description: "Календарь выставок interpro.pro: добавить, проверить",
+          description: "Календарь выставок interpro.pro",
         },
       ];
 
@@ -280,7 +266,7 @@ export default function InstallPage() {
     },
     onSuccess: ({ diag }) => {
       if (diag.finished) {
-        setInstallStatus({ tone: "success", title: "Установка завершена", text: "Все placement-ы Render-origin зарегистрированы. BX24.installFinish() вызван." });
+        setInstallStatus({ tone: "success", title: "Установка завершена", text: "Все placement-ы Yandex зарегистрированы. BX24.installFinish() вызван." });
         toast({ title: "Установка завершена" });
       } else {
         setInstallStatus({ tone: "warning", title: "Установка завершена с ошибками", text: diag.errors.join("; ") || "См. диагностику ниже." });
@@ -312,11 +298,11 @@ export default function InstallPage() {
         setCheckStatus({ tone: "warning", title: "placement.get вернул ошибку", text: data.errorMessage });
       } else {
         const yandexCount = data.managedRows.filter((r) => r.handler.includes(YANDEX_HOST_MARKER)).length;
-        const renderCount = data.managedRows.filter((r) => r.handler.includes(RENDER_HOST_MARKER)).length;
+        const otherCount = data.managedRows.length - yandexCount;
         setCheckStatus({
-          tone: renderCount > 0 ? "warning" : "success",
+          tone: otherCount > 0 ? "warning" : "success",
           title: `placement.get: managed=${data.managedRows.length}`,
-          text: `Yandex handlers: ${yandexCount}, Render-legacy: ${renderCount}, всего строк: ${data.registered.length}.`,
+          text: `Yandex handlers: ${yandexCount}, другие хосты: ${otherCount}, всего строк: ${data.registered.length}.`,
         });
       }
     },
@@ -330,7 +316,7 @@ export default function InstallPage() {
       <PageTitle
         eyebrow="Установка"
         title="Регистрация приложения в Bitrix24"
-        description="Снимает устаревшие handlers (Replit/другой origin), регистрирует текущие Render-обработчики и вызывает BX24.installFinish()."
+        description="Снимает устаревшие handlers, регистрирует обработчики Yandex Cloud и вызывает BX24.installFinish()."
       />
 
       <div className="grid gap-6 lg:grid-cols-[1.1fr_.9fr]">
@@ -360,10 +346,8 @@ export default function InstallPage() {
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_DEAL_DETAIL_TAB → /deal-tab</code>
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_LEAD_DETAIL_TAB → /lead-tab</code>
               <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB → /expo-tab`}</code>
-              <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB → /placement-detail`}</code>
-              <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_LIST_MENU → /placement-list`}</code>
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_ANALYTICS_MENU → /calendar</code>
-              <code className="rounded bg-background px-2 py-1 text-xs">LEFT_MENU → /placement-menu</code>
+              <code className="rounded bg-background px-2 py-1 text-xs">LEFT_MENU → /calendar</code>
             </div>
             {installStatus && <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} />}
             {checkStatus && <Notice tone={checkStatus.tone} title={checkStatus.title} text={checkStatus.text} />}
@@ -537,9 +521,8 @@ function CheckPanel({ diagnostics, entityTypeId }: { diagnostics: CheckDiagnosti
   const managed = useMemo(() => new Set(getManagedPlacements(entityTypeId)), [entityTypeId]);
   if (!diagnostics) return null;
   const yandexRows = diagnostics.managedRows.filter((r) => r.handler.includes(YANDEX_HOST_MARKER));
-  const renderRows = diagnostics.managedRows.filter((r) => r.handler.includes(RENDER_HOST_MARKER));
   const otherRows = diagnostics.managedRows.filter(
-    (r) => !r.handler.includes(YANDEX_HOST_MARKER) && !r.handler.includes(RENDER_HOST_MARKER),
+    (r) => !r.handler.includes(YANDEX_HOST_MARKER),
   );
   const unmanagedRows = diagnostics.registered.filter((r) => !managed.has(r.placement));
   return (
@@ -555,10 +538,9 @@ function CheckPanel({ diagnostics, entityTypeId }: { diagnostics: CheckDiagnosti
           </div>
         ) : (
           <>
-            <div className="grid gap-2 text-xs sm:grid-cols-3">
+            <div className="grid gap-2 text-xs sm:grid-cols-2">
               <Stat label="Yandex" value={yandexRows.length} tone="ok" />
-              <Stat label="Render-legacy" value={renderRows.length} tone={renderRows.length > 0 ? "stale" : "neutral"} />
-              <Stat label="Other host" value={otherRows.length} tone="neutral" />
+              <Stat label="Другой хост" value={otherRows.length} tone={otherRows.length > 0 ? "stale" : "neutral"} />
             </div>
             <div>
               <div className="mb-2 text-xs font-medium">Managed placements ({diagnostics.managedRows.length})</div>

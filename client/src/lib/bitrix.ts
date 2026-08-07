@@ -273,7 +273,7 @@ export function openBitrixPath(path: string) {
 
 export function currentHandlerUrl(route: string): string {
   const cleanRoute = route.startsWith("/") ? route : `/${route}`;
-  const basePath = window.location.pathname.replace(/\/(deal-tab|lead-tab|expo-tab|calendar|install|placement-list|placement-detail|placement-menu)\/?$/, "/");
+  const basePath = window.location.pathname.replace(/\/(deal-tab|lead-tab|expo-tab|calendar|install)\/?$/, "/");
   return `${window.location.origin}${basePath.replace(/\/$/, "")}${cleanRoute}`;
 }
 
@@ -284,23 +284,11 @@ export type RegisteredHandler = {
   raw?: Record<string, unknown>;
 };
 
-const STALE_HOST_MARKERS = [
-  "replit.app",
-  "replit.dev",
-  "riker.replit.dev",
-  "bitrix-expo-app.replit.app",
-  "replit.co",
-  "repl.co",
-];
-
 const MANAGED_ROUTES = [
   "/deal-tab",
   "/lead-tab",
   "/expo-tab",
   "/calendar",
-  "/placement-list",
-  "/placement-detail",
-  "/placement-menu",
 ];
 
 export function getManagedPlacements(entityTypeId?: number): string[] {
@@ -312,7 +300,6 @@ export function getManagedPlacements(entityTypeId?: number): string[] {
   ];
   if (entityTypeId) {
     placements.push(`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`);
-    placements.push(`CRM_DYNAMIC_${entityTypeId}_LIST_MENU`);
   }
   return placements;
 }
@@ -355,8 +342,6 @@ export function isStaleHandler(handler: string, currentOrigin: string): boolean 
   } catch {
     return false;
   }
-  const lowerHost = url.host.toLowerCase();
-  if (STALE_HOST_MARKERS.some((marker) => lowerHost.includes(marker))) return true;
   const routeMatches = MANAGED_ROUTES.some((route) => url.pathname === route || url.pathname.endsWith(route));
   if (routeMatches && url.origin !== currentOrigin) return true;
   return false;

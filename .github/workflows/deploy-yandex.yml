@@ -1,74 +1,48 @@
-# Manual Yandex Cloud Serverless Container deploy.
-#
-# This workflow is intentionally gated on `workflow_dispatch` so it never
-# runs automatically. The existing Render auto-deploy is unaffected.
-#
-# Required repo *Secrets* (sensitive — masked by GitHub):
-#   - YC_SA_JSON_CREDENTIALS : service-account key JSON (for yc CLI auth)
-#   - BITRIX_WEBHOOK_URL     : full inbound webhook URL
-#   - ADMIN_JOB_TOKEN        : long random secret authorising /api/admin/*
-#   - CRON_REPORT_CHAT_ID    : optional, only when CRON_REPORT_CHANNEL=chat
-#
-# Required repo *Variables* (non-secret, plain config):
-#   - YC_DEPLOY_ENABLED      : must be the literal string "true" to enable
-#   - YC_FOLDER_ID           : Yandex Cloud folder id (required to resolve
-#                              container / registry names — without this,
-#                              `yc ... --container-name` fails with
-#                              "can't resolve object by name without folder id")
-#   - YC_REGISTRY_ID         : Yandex Container Registry id
-#   - YC_CONTAINER_NAME      : Serverless Container name (e.g. bitrix-expo-app)
-#   - YC_SA_ID               : service-account id used to run the container
-#   - BITRIX_PORTAL          : e.g. b24-5syfa7.bitrix24.ru
-#   - BITRIX_UF_ENTITY_ID    : e.g. CRM_8
-#   - APP_BASE_URL           : e.g. https://<id>.containers.yandexcloud.net
-#   - PARSE_RATE_LIMIT_MS    : e.g. 1000
-#   - CRON_REPORT_CHANNEL    : personal | chat
-#   - OWNER_USER_ID          : e.g. 1
-#
-# IMPORTANT: Yandex Serverless Containers *fully replace* the revision env
-# on every deploy. Anything not listed in `--environment` / `--secret` below
-# disappears. Therefore every variable the app needs at runtime MUST be
-# passed here. See docs/yandex-cloud.md for the full list.
-
-name: deploy-yandex (manual)
+name: deploy-yandex
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Docker image tag (defaults to the commit SHA)"
+        description: "Docker image tag (по умолчанию — commit SHA)"
         required: false
         default: ""
 
 permissions:
   contents: read
 
+concurrency:
+  group: deploy-yandex-production
+  cancel-in-progress: false
+
 jobs:
   build-and-deploy:
-    runs-on: ubuntu-latest
-    # Hard guard: refuse to run unless explicitly enabled via repo variable.
-    # Prevents accidental enablement before secrets/vars are configured.
     if: ${{ vars.YC_DEPLOY_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set image tag
         id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.image_tag }}
         run: |
-          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
-            echo "tag=${{ github.event.inputs.image_tag }}" >> "$GITHUB_OUTPUT"
+          if [ -n "${INPUT_TAG:-}" ]; then
+            echo "tag=$INPUT_TAG" >> "$GITHUB_OUTPUT"
           else
             echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Setup Node (for sanity check only — image builds run inside Docker)
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: "20"
-          cache: "npm"
+          cache: npm
 
-      - name: Install & test (fail fast before pushing an image)
+      - name: Check and test
         run: |
           npm ci
           npm run check
@@ -82,99 +56,61 @@ jobs:
       - name: Authenticate yc CLI
         env:
           YC_SA_JSON_CREDENTIALS: ${{ secrets.YC_SA_JSON_CREDENTIALS }}
-          YC_FOLDER_ID:           ${{ vars.YC_FOLDER_ID }}
+          YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
         run: |
+          set -euo pipefail
+          test -n "$YC_SA_JSON_CREDENTIALS"
+          test -n "$YC_FOLDER_ID"
           umask 077
           printf '%s' "$YC_SA_JSON_CREDENTIALS" > /tmp/sa-key.json
           yc config set service-account-key /tmp/sa-key.json
-          yc config set format json
-          # Yandex Cloud resolves `--container-name` / registry names against
-          # the active folder. Without this, `revision deploy` fails with
-          # "can't resolve object by name without folder id".
-          if [ -z "${YC_FOLDER_ID:-}" ]; then
-            echo "::error::YC_FOLDER_ID repository variable is not set" >&2
-            exit 1
-          fi
           yc config set folder-id "$YC_FOLDER_ID"
+          yc config set format json
 
-      - name: Configure Docker for Yandex CR
-        run: yc container registry configure-docker
-
-      - name: Build & push image
+      - name: Build and push image
         env:
           REGISTRY_ID: ${{ vars.YC_REGISTRY_ID }}
-          NAME:        ${{ vars.YC_CONTAINER_NAME }}
-          TAG:         ${{ steps.tag.outputs.tag }}
-        run: |
-          IMAGE="cr.yandex/${REGISTRY_ID}/${NAME}:${TAG}"
-          docker build -t "$IMAGE" .
-          docker push        "$IMAGE"
-          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
-
-      - name: Deploy new revision
-        # Secrets are read into env (GitHub masks them in logs); they are
-        # passed to `yc` via an args array, never echoed or interpolated
-        # into a printable command line. Yandex replaces the revision env
-        # on every deploy, so all required vars MUST be set here.
-        env:
-          NAME:               ${{ vars.YC_CONTAINER_NAME }}
-          SA_ID:              ${{ vars.YC_SA_ID }}
-          YC_FOLDER_ID:       ${{ vars.YC_FOLDER_ID }}
-          BITRIX_PORTAL:      ${{ vars.BITRIX_PORTAL }}
-          BITRIX_UF_ENTITY_ID: ${{ vars.BITRIX_UF_ENTITY_ID }}
-          APP_BASE_URL:       ${{ vars.APP_BASE_URL }}
-          PARSE_RATE_LIMIT_MS: ${{ vars.PARSE_RATE_LIMIT_MS }}
-          CRON_REPORT_CHANNEL: ${{ vars.CRON_REPORT_CHANNEL }}
-          OWNER_USER_ID:      ${{ vars.OWNER_USER_ID }}
-          BITRIX_WEBHOOK_URL: ${{ secrets.BITRIX_WEBHOOK_URL }}
-          ADMIN_JOB_TOKEN:    ${{ secrets.ADMIN_JOB_TOKEN }}
-          CRON_REPORT_CHAT_ID: ${{ secrets.CRON_REPORT_CHAT_ID }}
+          CONTAINER_NAME: ${{ vars.YC_CONTAINER_NAME }}
+          TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
+          yc container registry configure-docker
+          IMAGE="cr.yandex/${REGISTRY_ID}/${CONTAINER_NAME}:${TAG}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
 
-          # Build args incrementally. Secrets are referenced via shell
-          # parameter expansion ("$VAR") so their values never appear in
-          # the workflow YAML or in echoed command lines.
-          args=(
-            serverless container revision deploy
-            --folder-id        "$YC_FOLDER_ID"
-            --container-name   "$NAME"
-            --image            "$IMAGE"
-            --cores            1
-            --memory           512MB
-            --concurrency      8
-            --execution-timeout 60s
-            --service-account-id "$SA_ID"
-            --environment NODE_ENV=production
-            --environment "BITRIX_PORTAL=$BITRIX_PORTAL"
-            --environment "BITRIX_UF_ENTITY_ID=$BITRIX_UF_ENTITY_ID"
-            --environment "APP_BASE_URL=$APP_BASE_URL"
-            --environment "PARSE_RATE_LIMIT_MS=$PARSE_RATE_LIMIT_MS"
-            --environment "CRON_REPORT_CHANNEL=$CRON_REPORT_CHANNEL"
-            --environment "OWNER_USER_ID=$OWNER_USER_ID"
-            --environment "BITRIX_WEBHOOK_URL=$BITRIX_WEBHOOK_URL"
-            --environment "ADMIN_JOB_TOKEN=$ADMIN_JOB_TOKEN"
-          )
-
-          # Optional: only forward chat id when actually configured.
-          if [ -n "${CRON_REPORT_CHAT_ID:-}" ]; then
-            args+=(--environment "CRON_REPORT_CHAT_ID=$CRON_REPORT_CHAT_ID")
-          fi
-
-          # Disable shell tracing for the actual invocation as a belt-and-
-          # braces measure on top of GitHub's secret masking.
-          set +x
-          yc "${args[@]}"
-
-      - name: Smoke-test /health
+      - name: Deploy revision
         env:
-          NAME:         ${{ vars.YC_CONTAINER_NAME }}
           YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
+          CONTAINER_NAME: ${{ vars.YC_CONTAINER_NAME }}
+          YC_SA_ID: ${{ vars.YC_SA_ID }}
+          BITRIX_PORTAL_URL: ${{ vars.BITRIX_PORTAL_URL }}
+          COMPANY_NAME: ${{ vars.COMPANY_NAME }}
         run: |
-          URL=$(yc serverless container get --folder-id "$YC_FOLDER_ID" "$NAME" | jq -r .url)
-          echo "Container URL: $URL"
-          curl -fsS --retry 5 --retry-delay 3 --retry-connrefused "$URL/health"
+          set -euo pipefail
+          yc serverless container revision deploy \
+            --folder-id "$YC_FOLDER_ID" \
+            --container-name "$CONTAINER_NAME" \
+            --image "$IMAGE" \
+            --cores 1 \
+            --memory 512MB \
+            --concurrency 8 \
+            --execution-timeout 60s \
+            --service-account-id "$YC_SA_ID" \
+            --environment NODE_ENV=production \
+            --environment "BITRIX_PORTAL_URL=$BITRIX_PORTAL_URL" \
+            --environment "COMPANY_NAME=${COMPANY_NAME:-interpro.pro}"
 
-      - name: Clean up key material
+      - name: Smoke-test
+        env:
+          YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
+          CONTAINER_NAME: ${{ vars.YC_CONTAINER_NAME }}
+        run: |
+          URL=$(yc serverless container get --folder-id "$YC_FOLDER_ID" "$CONTAINER_NAME" | jq -r .url)
+          curl -fsS --retry 5 --retry-delay 3 --retry-connrefused "$URL/health"
+          echo "Deployed: $URL" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up key
         if: always()
         run: rm -f /tmp/sa-key.json

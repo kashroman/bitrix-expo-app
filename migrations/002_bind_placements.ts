@@ -17,16 +17,14 @@
  *   npm run bind-placements -- --apply            # bind targets (and unbind same-handler dupes)
  *   npm run rebind-placements                     # dry-run with stale cleanup
  *   npm run rebind-placements -- --apply          # cleanup stale + bind targets
- *   npm run bind-placements -- --check-fields     # also list UF status
- *
  *   # No-browser fallback when placement.get/list is unavailable: unbind the
  *   # exact handlers we'd have produced under a known-stale base, then bind
  *   # APP_BASE_URL. Tolerates "not found" / already-unbound responses.
- *   STALE_BASE_URL=https://calendar-interpro-app.onrender.com \
+ *   STALE_BASE_URL=https://old-host.example.com \
  *     npm run rebind-placements -- --apply
  *   # or:
  *   npm run rebind-placements -- --apply \
- *     --stale-base-url=https://calendar-interpro-app.onrender.com
+ *     --stale-base-url=https://old-host.example.com
  */
 
 import "dotenv/config";
@@ -42,7 +40,7 @@ const ENTITY_TYPE_ID = 1050;
 
 function getAppBase(): string {
   const raw = (process.env.APP_BASE_URL ?? "").trim();
-  const base = raw || "https://calendar-interpro-app.onrender.com";
+  const base = raw || "https://bba8ln220jfloq5251dv.containers.yandexcloud.net";
   return base.replace(/\/+$/, "");
 }
 
@@ -56,7 +54,7 @@ function readCliFlag(prefix: string): string | undefined {
  * Optional "stale" base URL used for an exact-handler unbind fallback when
  * `placement.get/list` is unavailable via the current webhook. Combined with
  * the same managed routes, it lets us unbind known-stale handlers (e.g. the
- * old Render URL) without needing to enumerate registrations first.
+ * old deployment URL) without needing to enumerate registrations first.
  *
  * Returns the trimmed, trailing-slash-stripped value, or "" if not provided.
  */
@@ -74,9 +72,7 @@ function buildTargets(appBase: string): Target[] {
     { placement: "CRM_LEAD_DETAIL_TAB", route: "/lead-tab", title: "Календарь выставок" },
     { placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_DETAIL_TAB`, route: "/expo-tab", title: "Календарь выставки" },
     { placement: "CRM_ANALYTICS_MENU", route: "/calendar", title: "Календарь выставок" },
-    { placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_LIST_MENU`, route: "/placement-list", title: "Добавить по ссылке" },
-    { placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_DETAIL_TAB`, route: "/placement-detail", title: "Источник данных" },
-    { placement: "LEFT_MENU", route: "/placement-menu", title: "Календарь выставок" },
+    { placement: "LEFT_MENU", route: "/calendar", title: "Календарь выставок" },
   ];
 }
 
@@ -183,42 +179,11 @@ async function listRegistered(): Promise<Array<Record<string, any>> | null> {
   return null;
 }
 
-async function checkFields(): Promise<void> {
-  const entityId = process.env.BITRIX_UF_ENTITY_ID ?? "CRM_8";
-  const expected = [
-    "UF_CRM_8_SOURCE_URL",
-    "UF_CRM_8_LAST_CHECKED",
-    "UF_CRM_8_VERIFIED",
-    "UF_CRM_8_CALCULATED",
-    "UF_CRM_8_PARSE_LOG",
-  ];
-  console.log(`[bind] check-fields entityId=${entityId}`);
-  try {
-    const list: any = await bx("userfieldconfig.list", {
-      moduleId: "crm",
-      filter: { entityId },
-    });
-    const arr = Array.isArray(list) ? list : Array.isArray(list?.items) ? list.items : [];
-    const present = new Set<string>();
-    for (const f of arr) {
-      const name = f?.FIELD_NAME ?? f?.fieldName ?? f?.field_name;
-      if (name) present.add(String(name));
-    }
-    for (const name of expected) {
-      console.log(`[bind] field ${name}: ${present.has(name) ? "OK" : "MISSING"}`);
-    }
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[bind] check-fields warning: ${msg}`);
-  }
-}
-
 async function main() {
   // SAFE-BY-DEFAULT: dry-run unless the caller passes --apply (or --live).
   // --dry-run is still accepted for back-compat / explicitness.
   const apply = process.argv.includes("--apply") || process.argv.includes("--live");
   const dryRun = !apply || process.argv.includes("--dry-run");
-  const wantCheckFields = process.argv.includes("--check-fields");
   const cleanupStale = process.argv.includes("--cleanup-stale");
   const appBase = getAppBase();
   const appHost = safeHost(appBase);
@@ -305,7 +270,6 @@ async function main() {
   }
 
   if (dryRun) {
-    if (wantCheckFields && hasWebhook()) await checkFields();
     console.log("[bind] dry-run: nothing called. Pass --apply to execute.");
     return;
   }
@@ -375,7 +339,6 @@ async function main() {
     }
   }
 
-  if (wantCheckFields) await checkFields();
 
   const failed = results.filter((r) => r.bind.startsWith("Bitrix call") || r.bind.startsWith("HTTP_"));
   console.log(

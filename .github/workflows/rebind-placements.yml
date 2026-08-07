@@ -37,9 +37,9 @@ on:
         required: false
         default: ""
       stale_base_url:
-        description: "Optional stale base URL — when set, the script unbinds exact handlers under this base before binding APP_BASE_URL (no-browser fallback when placement.list is unavailable). Leave empty to skip."
+        description: "Optional old app URL to unbind before binding APP_BASE_URL"
         required: false
-        default: "https://calendar-interpro-app.onrender.com"
+        default: ""
 
 permissions:
   contents: read

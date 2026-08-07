@@ -9,9 +9,8 @@ ENV NODE_ENV=development \
     NPM_CONFIG_UPDATE_NOTIFIER=false \
     NPM_CONFIG_FUND=false
 
-# better-sqlite3 needs build toolchain when no prebuilt is available
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+ && apt-get install -y --no-install-recommends ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
 COPY package.json package-lock.json ./
@@ -56,7 +55,7 @@ USER nodejs
 
 EXPOSE 8080
 
-# Container runtimes (Yandex Serverless Containers, Cloud Run, etc.) inject
+# Yandex Serverless Containers injects
 # PORT. The server reads process.env.PORT and binds 0.0.0.0.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "dist/index.cjs"]
