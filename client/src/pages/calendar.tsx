@@ -42,9 +42,19 @@ import type {
 import type { CrmItem } from "@/lib/bitrix";
 import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
-import { isInsideBitrix } from "@/lib/bitrix";
+import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
 import {
-  BUILD_SCHEDULE_STAGE_IDS,
+  DEFAULT_STAGE_THRESHOLD_TITLE,
+  defaultStageIdsFromThreshold,
+  filterDealsByManagers,
+  isLostStage,
+  lostStageIdsForThreshold,
+  monthFromKey,
+  monthKeyOf,
+  readCalendarFilters,
+  writeCalendarFilters,
+} from "@/lib/calendar-filters";
+import {
   DEAL_STATUS_LABELS,
   DEAL_STATUS_ORDER,
   DealStatusKey,
@@ -82,10 +92,6 @@ const RECENT_SCAN_PER_PAGE_TIMEOUT_MS = 12_000;
 const RECENT_SCAN_FAST_DEADLINE_MS = 15_000;
 const RECENT_SCAN_WIDE_DEADLINE_MS = 35_000;
 
-function monthKeyOf(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
-}
-
 export default function CalendarPage({ embedded = false }: { embedded?: boolean } = {}) {
   // The "build-schedule" tab is now hidden — deals are rendered as colored
   // bars inside the "Календарь выставок" Gantt. The constant is widened to
@@ -98,16 +104,26 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   const period: PeriodMode = "all";
   const responsible = "all";
   const search = "";
-  const [activeMonth, setActiveMonth] = useState<Date>(() => {
-    const now = new Date();
-    return new Date(now.getFullYear(), now.getMonth(), 1);
-  });
-  // User-selected deal stages to overlay on the Gantt. Defaults to the
-  // build-schedule whitelist (8 / 9 / WON or VITE_BUILD_SCHEDULE_STAGE_IDS).
-  // Kept in React state only — Bitrix iframes block storage APIs and this
-  // selection is meaningful only while the calendar page is open.
+  const [initialFilters] = useState(() =>
+    readCalendarFilters(
+      typeof window === "undefined" ? "" : window.location.search,
+    ),
+  );
+  const [activeMonth, setActiveMonth] = useState<Date>(() =>
+    monthFromKey(initialFilters.monthKey, new Date()),
+  );
   const [selectedStageIds, setSelectedStageIds] = useState<string[]>(
-    () => [...BUILD_SCHEDULE_STAGE_IDS],
+    initialFilters.stageIds,
+  );
+  const [selectedManagerIds, setSelectedManagerIds] = useState<string[]>(
+    initialFilters.managerIds,
+  );
+  const [onlyWithDeals, setOnlyWithDeals] = useState(
+    initialFilters.onlyWithDeals,
+  );
+  const [includeLost, setIncludeLost] = useState(initialFilters.includeLost);
+  const [stageDefaultsResolved, setStageDefaultsResolved] = useState(
+    initialFilters.hasExplicitStages,
   );
 
   // Calendar view is month-scoped. The per-month exhibition loader is the
@@ -203,21 +219,57 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     });
   }, [activeExpos, responsible, search, period]);
 
-  // For Gantt mode the counters cover only the expos overlapping the
-  // selected month; for List/Calendar modes the counters cover the
-  // currently filtered set. This keeps the bulk request bounded:
-  // 30 IDs/chunk × concurrency 2 means a 60-row visible set finishes
-  // in 1–2 round-trips.
-  const counterExpoIds = useMemo(() => {
-    if (view === "gantt" || view === "build-schedule") {
-      return exposOverlappingMonth(filtered, activeMonth).map((e) => e.id);
-    }
-    return filtered.map((e) => e.id);
-  }, [view, filtered, activeMonth]);
-
-  const bulkCounts = useBulkExpoCounts(counterExpoIds, {
-    enabled: isBitrix && counterExpoIds.length > 0,
+  const stagesListQuery = useQuery<DealStagesResult>({
+    queryKey: ["deal-stages-detailed"],
+    queryFn: fetchDealStagesDetailed,
+    enabled: isBitrix,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
   });
+  const allStages = stagesListQuery.data?.stages ?? [];
+  const selectableStages = useMemo(
+    () => allStages.filter((stage) => !isLostStage(stage)),
+    [allStages],
+  );
+  const defaultStageIds = useMemo(
+    () => defaultStageIdsFromThreshold(allStages),
+    [allStages],
+  );
+  const lostStageIds = useMemo(
+    () => lostStageIdsForThreshold(allStages),
+    [allStages],
+  );
+
+  useEffect(() => {
+    if (stageDefaultsResolved || stagesListQuery.isLoading) return;
+    setSelectedStageIds(defaultStageIds);
+    setStageDefaultsResolved(true);
+  }, [
+    defaultStageIds,
+    stageDefaultsResolved,
+    stagesListQuery.isLoading,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !stageDefaultsResolved) return;
+    const nextSearch = writeCalendarFilters(window.location.search, {
+      monthKey: monthKeyOf(activeMonth),
+      stageIds: selectedStageIds,
+      managerIds: selectedManagerIds,
+      onlyWithDeals,
+      includeLost,
+    });
+    const nextUrl = `${window.location.pathname}${nextSearch}${window.location.hash}`;
+    window.history.replaceState(window.history.state, "", nextUrl);
+  }, [
+    activeMonth,
+    includeLost,
+    onlyWithDeals,
+    selectedManagerIds,
+    selectedStageIds,
+    stageDefaultsResolved,
+  ]);
 
   // --- Deal-bar overlay (formerly «График застройки») ---
   // Fetch deal details (id/title/client/manager/budget/stage) for the
@@ -235,8 +287,14 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     [buildScheduleExpoIds],
   );
   const sortedStageKey = useMemo(
-    () => [...selectedStageIds].sort(),
-    [selectedStageIds],
+    () =>
+      Array.from(
+        new Set([
+          ...selectedStageIds,
+          ...(includeLost ? lostStageIds : []),
+        ]),
+      ).sort(),
+    [includeLost, lostStageIds, selectedStageIds],
   );
   const buildScheduleQuery = useQuery<BuildScheduleResult>({
     queryKey: [
@@ -256,31 +314,66 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
-    placeholderData: keepPreviousData,
+  });
+  const availableManagers = useMemo(() => {
+    const managers = new Map<string, string>();
+    buildScheduleQuery.data?.deals.forEach((deal) => {
+      if (!deal.assignedById) return;
+      managers.set(
+        String(deal.assignedById),
+        deal.manager || `ID ${deal.assignedById}`,
+      );
+    });
+    return Array.from(managers, ([id, name]) => ({ id, name })).sort((a, b) =>
+      a.name.localeCompare(b.name, "ru-RU"),
+    );
+  }, [buildScheduleQuery.data?.deals]);
+  const filteredBuildSchedule = useMemo(
+    () => filterDealsByManagers(buildScheduleQuery.data, selectedManagerIds),
+    [buildScheduleQuery.data, selectedManagerIds],
+  );
+  const visibleExpos = useMemo(() => {
+    if (!onlyWithDeals) return filtered;
+    const byExpoId = filteredBuildSchedule?.byExpoId;
+    if (!byExpoId) return [];
+    return filtered.filter(
+      (expo) => (byExpoId.get(Number(expo.id)) ?? []).length > 0,
+    );
+  }, [filtered, filteredBuildSchedule?.byExpoId, onlyWithDeals]);
+
+  const counterExpoIds = useMemo(
+    () => exposOverlappingMonth(visibleExpos, activeMonth).map((expo) => expo.id),
+    [activeMonth, visibleExpos],
+  );
+  const bulkCounts = useBulkExpoCounts(counterExpoIds, {
+    enabled: isBitrix && counterExpoIds.length > 0,
   });
 
-  // Deal stages for the in-page picker. Loaded lazily; falls back to an
-  // empty list (the picker then renders just the default IDs as plain
-  // chips).
-  const stagesListQuery = useQuery<DealStagesResult>({
-    queryKey: ["deal-stages-detailed"],
-    queryFn: fetchDealStagesDetailed,
-    enabled: isBitrix,
-    staleTime: 5 * 60_000,
-    refetchOnWindowFocus: false,
-    retry: false,
-  });
   const stageTitles = useMemo(
-    () => statusTitleMap(stagesListQuery.data?.stages ?? []),
-    [stagesListQuery.data?.stages],
+    () => statusTitleMap(allStages),
+    [allStages],
   );
+  const thresholdMissing =
+    stageDefaultsResolved &&
+    !initialFilters.hasExplicitStages &&
+    !stagesListQuery.isLoading &&
+    defaultStageIds.length === 0;
+
+  const resetFilters = () => {
+    const now = new Date();
+    setActiveMonth(new Date(now.getFullYear(), now.getMonth(), 1));
+    setSelectedStageIds(defaultStageIds);
+    setSelectedManagerIds([]);
+    setOnlyWithDeals(true);
+    setIncludeLost(false);
+  };
 
   return (
     <Shell embedded={embedded}>
       <PageTitle
         eyebrow="Календарь"
         title="Календарь выставок"
-        description="Основной рабочий экран: переключение между «Календарём выставок» и «Графиком застройки» по текущему месяцу."
+        description="Выставки выбранного месяца и связанные сделки по стадиям и ответственным."
       />
 
       {!isInsideBitrix() && (
@@ -294,11 +387,41 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
       <Card className="mb-4">
         <CardContent className="flex flex-wrap items-center gap-3 p-4">
           <DealStagePicker
-            stages={stagesListQuery.data?.stages ?? []}
+            stages={selectableStages}
             stagesLoading={stagesListQuery.isLoading}
             selectedStageIds={selectedStageIds}
+            defaultStageIds={defaultStageIds}
             onChange={setSelectedStageIds}
           />
+          <ManagerPicker
+            managers={availableManagers}
+            selectedManagerIds={selectedManagerIds}
+            onChange={setSelectedManagerIds}
+          />
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={onlyWithDeals}
+              onCheckedChange={(checked) => setOnlyWithDeals(checked === true)}
+              data-testid="filter-only-with-deals"
+            />
+            Только выставки со сделками
+          </label>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={includeLost}
+              onCheckedChange={(checked) => setIncludeLost(checked === true)}
+              data-testid="filter-include-lost"
+            />
+            Показывать проигранные
+          </label>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={resetFilters}
+            data-testid="button-reset-filters"
+          >
+            Сбросить фильтры
+          </Button>
           <Button
             variant="outline"
             size="sm"
@@ -317,10 +440,20 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
         </CardContent>
       </Card>
 
+      {thresholdMissing ? (
+        <Card className="mb-4 border-amber-300 bg-amber-50">
+          <CardContent className="p-3 text-sm text-amber-900">
+            В Bitrix24 не найдена стадия «{DEFAULT_STAGE_THRESHOLD_TITLE}».
+            Выберите стадии вручную; приложение не будет подставлять другие
+            стадии автоматически.
+          </CardContent>
+        </Card>
+      ) : null}
+
       <BulkCountsBanner state={bulkCounts} expoCount={counterExpoIds.length} />
 
       <Card>
-        <CardHeader><CardTitle className="text-lg">Выставки ({filtered.length})</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-lg">Выставки ({visibleExpos.length})</CardTitle></CardHeader>
         <CardContent>
           {activeIsLoading ? (
             <LoadingRows />
@@ -328,12 +461,12 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             <Empty text={`Ошибка Bitrix24 API: ${String((activeError as Error | string | undefined) ?? "")}`} />
           ) : view === "gantt" ? (
             <GanttView
-              expos={filtered}
+              expos={visibleExpos}
               activeMonth={activeMonth}
               onMonthChange={setActiveMonth}
               isFetchingNewMonth={ganttIsFetchingNewMonth}
               counts={bulkCounts}
-              dealsByExpoId={buildScheduleQuery.data?.byExpoId}
+              dealsByExpoId={filteredBuildSchedule?.byExpoId}
               dealsLoading={buildScheduleQuery.isFetching && sortedStageKey.length > 0}
               dealsError={
                 buildScheduleQuery.isError
@@ -345,10 +478,12 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               selectedStageIds={sortedStageKey}
               stageTitles={stageTitles}
               emptyMessage={
-                filtered.length === 0
+                visibleExpos.length === 0
                   ? ganttIsFetchingNewMonth
                     ? "Загрузка выставок за выбранный месяц…"
-                    : "Выставок не найдено. Измените фильтры или добавьте элементы в смарт-процесс."
+                    : onlyWithDeals
+                      ? "Нет выставок со сделками, подходящими под выбранные стадии и менеджеров."
+                      : "Выставок в выбранном месяце не найдено."
                   : undefined
               }
             />
@@ -362,18 +497,6 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
         </CardContent>
       </Card>
 
-      {view === "gantt" && isInsideBitrix() ? (
-        <GanttDiagnostics
-          activeMonth={activeMonth}
-          expos={filtered}
-          monthLoad={monthExpos.data}
-          monthLoadIsFetching={monthExpos.isFetching}
-          monthLoadError={
-            (monthExpos.error as Error | undefined)?.message ??
-            monthExpos.data?.diagnostics.error
-          }
-        />
-      ) : null}
     </Shell>
   );
 }
@@ -519,10 +642,9 @@ function GanttView({
         onMonthChange={onMonthChange}
         emptyMessage={effectiveEmpty}
         dealsByExpoId={dealsByExpoId}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) =>
+          openBitrixPath(`/crm/deal/details/${deal.id}/`)
+        }
         stageTitles={stageTitles}
         selectedStageIds={selectedStageIds}
       />
@@ -548,11 +670,13 @@ function DealStagePicker({
   stages,
   stagesLoading,
   selectedStageIds,
+  defaultStageIds,
   onChange,
 }: {
   stages: StatusRef[];
   stagesLoading: boolean;
   selectedStageIds: string[];
+  defaultStageIds: string[];
   onChange: (next: string[]) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -614,7 +738,8 @@ function DealStagePicker({
             <button
               type="button"
               className="text-primary hover:underline disabled:text-muted-foreground"
-              onClick={() => onChange([...BUILD_SCHEDULE_STAGE_IDS])}
+              onClick={() => onChange([...defaultStageIds])}
+              disabled={defaultStageIds.length === 0}
               data-testid="deal-stage-picker-defaults"
             >
               По умолчанию
@@ -666,6 +791,85 @@ function DealStagePicker({
                 </label>
               );
             })
+          )}
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function ManagerPicker({
+  managers,
+  selectedManagerIds,
+  onChange,
+}: {
+  managers: Array<{ id: string; name: string }>;
+  selectedManagerIds: string[];
+  onChange: (next: string[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const toggle = (id: string) => {
+    onChange(
+      selectedManagerIds.includes(id)
+        ? selectedManagerIds.filter((current) => current !== id)
+        : [...selectedManagerIds, id],
+    );
+  };
+  const summary =
+    selectedManagerIds.length === 0
+      ? "Все"
+      : selectedManagerIds.length === 1
+        ? "1 менеджер"
+        : `${selectedManagerIds.length} менеджера`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="sm"
+          data-testid="manager-picker"
+          className="gap-2"
+        >
+          <Filter className="h-4 w-4" />
+          <span>Ответственные: {summary}</span>
+          <ChevronDown className="h-3.5 w-3.5 opacity-60" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="start" className="w-[320px] p-0">
+        <div className="flex items-center justify-between border-b px-3 py-2 text-xs">
+          <span className="font-medium">Ответственные за сделки</span>
+          <button
+            type="button"
+            className="text-primary hover:underline disabled:text-muted-foreground"
+            onClick={() => onChange([])}
+            disabled={selectedManagerIds.length === 0}
+            data-testid="manager-picker-clear"
+          >
+            Показать всех
+          </button>
+        </div>
+        <div className="max-h-[320px] overflow-y-auto p-2">
+          {managers.length === 0 ? (
+            <div className="px-2 py-3 text-xs text-muted-foreground">
+              В подходящих сделках ответственные не найдены.
+            </div>
+          ) : (
+            managers.map((manager) => (
+              <label
+                key={manager.id}
+                className="flex cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-xs hover:bg-accent/60"
+                data-testid={`manager-option-${manager.id}`}
+              >
+                <Checkbox
+                  checked={selectedManagerIds.includes(manager.id)}
+                  onCheckedChange={() => toggle(manager.id)}
+                  aria-label={manager.name}
+                />
+                <span className="flex-1 font-medium">{manager.name}</span>
+                <code className="text-muted-foreground">{manager.id}</code>
+              </label>
+            ))
           )}
         </div>
       </PopoverContent>
@@ -732,10 +936,9 @@ function BuildScheduleSection({
         initialMonth={activeMonth}
         onMonthChange={onMonthChange}
         onSelectExpo={(expo) => navigateToEvent(expo.id)}
-        onSelectDeal={(deal) => {
-          if (deal.bitrixUrl) window.open(deal.bitrixUrl, "_blank");
-          else if (deal.expoIds.length > 0) navigateToEvent(deal.expoIds[0]);
-        }}
+        onSelectDeal={(deal) =>
+          openBitrixPath(`/crm/deal/details/${deal.id}/`)
+        }
         emptyMessage={
           expos.length === 0
             ? "Ни одна выставка не попадает в выбранный месяц."

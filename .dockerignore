@@ -6,12 +6,6 @@ node_modules
 dist
 .vite
 
-# local databases (never bake these into an image)
-data.db
-data.db-shm
-data.db-wal
-data.db-journal
-
 # secrets / local env
 .env
 .env.*
@@ -25,11 +19,10 @@ Thumbs.db
 # tests output / coverage
 coverage
 
-# editor / replit / render scratch
-.replit
+# editor scratch
 attached_assets
 
 # docs that don't need to ship in the image
-README_REPLIT.md
+README.md
 CHANGELOG.md
 docs

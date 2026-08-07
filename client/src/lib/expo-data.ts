@@ -114,6 +114,7 @@ export type StatusRef = {
   entityId?: string;
   categoryId?: string;
   sort?: number;
+  semantic?: string;
   source?: string;
 };
 
@@ -1107,6 +1108,7 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
       if (row.categoryId && !existing.categoryId) existing.categoryId = row.categoryId;
       if (row.entityId && !existing.entityId) existing.entityId = row.entityId;
       if (row.sort !== undefined && existing.sort === undefined) existing.sort = row.sort;
+      if (row.semantic && !existing.semantic) existing.semantic = row.semantic;
       if (row.source && !existing.source) existing.source = row.source;
       return false;
     }
@@ -1180,6 +1182,9 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
               sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
                 ? Number(sortRaw)
                 : undefined,
+            semantic: String(
+              row.SEMANTICS ?? row.SEMANTIC_ID ?? row.STATUS_SEMANTIC_ID ?? "",
+            ) || undefined,
             source: "dealcategory.stage.list",
           })
         ) {
@@ -1268,6 +1273,9 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
               sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
                 ? Number(sortRaw)
                 : undefined,
+            semantic: String(
+              row.SEMANTICS ?? row.SEMANTIC_ID ?? row.STATUS_SEMANTIC_ID ?? "",
+            ) || undefined,
             source: "status.list",
           })
         ) {
