@@ -8,7 +8,7 @@
  *
  * The Bitrix REST `placement.*` endpoints take UPPER_SNAKE_CASE params
  * (PLACEMENT, HANDLER, TITLE, ...). Do NOT switch to camelCase here — that
- * is a separate convention used by `userfieldconfig.*` (see migration 001).
+ * is a separate convention used by `userfieldconfig.*`.
  *
  * SAFETY: defaults to dry-run. Live changes require `--apply` (alias `--live`).
  *
@@ -73,6 +73,26 @@ function buildTargets(appBase: string): Target[] {
     { placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_DETAIL_TAB`, route: "/expo-tab", title: "Календарь выставки" },
     { placement: "CRM_ANALYTICS_MENU", route: "/calendar", title: "Календарь выставок" },
     { placement: "LEFT_MENU", route: "/calendar", title: "Календарь выставок" },
+  ];
+}
+
+function buildRetiredTargets(): Target[] {
+  return [
+    {
+      placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_DETAIL_TAB`,
+      route: "/placement-detail",
+      title: "Удалённая вкладка выставки",
+    },
+    {
+      placement: `CRM_DYNAMIC_${ENTITY_TYPE_ID}_LIST_MENU`,
+      route: "/placement-list",
+      title: "Удалённое меню выставок",
+    },
+    {
+      placement: "LEFT_MENU",
+      route: "/placement-menu",
+      title: "Удалённый пункт меню",
+    },
   ];
 }
 
@@ -190,7 +210,9 @@ async function main() {
   const staleBase = getStaleBase();
   const staleHost = staleBase ? safeHost(staleBase) : "";
   const targets = buildTargets(appBase);
-  const managed = managedKeys(targets);
+  const retiredTargets = buildRetiredTargets();
+  const managed = managedKeys([...targets, ...retiredTargets]);
+  const retired = managedKeys(retiredTargets);
 
   console.log(
     `[bind] appBase=${appBase} host=${appHost} entityTypeId=${ENTITY_TYPE_ID} ` +
@@ -227,36 +249,45 @@ async function main() {
         // Only touch a placement+route this app owns. This prevents accidental
         // unbinds of unrelated third-party apps that share a placement code.
         if (!managed.has(`${placement}|${path}`)) continue;
-        // Same host as APP_BASE_URL → already correct, skip.
-        if (host && host === appHost) continue;
+        // Active handler on APP_BASE_URL is already correct. Retired routes
+        // must be removed even when they point at the current Yandex host.
+        const isRetired = retired.has(`${placement}|${path}`);
+        if (!isRetired && host && host === appHost) continue;
         stalePlan.push({ placement, handler, host, path, source: "scan" });
         seenKey.add(`${placement}|${handler}`);
       }
     }
 
-    // Fallback: when STALE_BASE_URL is provided, compute the exact handlers
-    // we'd have generated under that base for the same managed routes and
-    // queue them for unbind — even when placement.get/list is unavailable,
-    // since placement.unbind only needs (PLACEMENT, HANDLER) and tolerates
-    // "not found" responses (treated as already-unbound below).
+    const queueFallback = (target: Target, base: string, host: string) => {
+      const handler = `${base}${target.route}`;
+      const key = `${target.placement}|${handler}`;
+      if (seenKey.has(key)) return;
+      stalePlan.push({
+        placement: target.placement,
+        handler,
+        host,
+        path: target.route,
+        source: "fallback",
+      });
+      seenKey.add(key);
+    };
+
+    // Removed routes must disappear from the current host too. Queue their
+    // exact handlers even when placement.get/list is unavailable.
+    for (const target of retiredTargets) {
+      queueFallback(target, appBase, appHost);
+    }
+
+    // When STALE_BASE_URL is provided, also remove active and retired handlers
+    // produced under that known-old base.
     if (staleBase) {
       if (staleHost && staleHost === appHost) {
         console.log(
           "[bind] cleanup-stale: stale-base-url host matches appBase host; skipping fallback",
         );
       } else {
-        for (const t of targets) {
-          const handler = `${staleBase}${t.route}`;
-          const key = `${t.placement}|${handler}`;
-          if (seenKey.has(key)) continue;
-          stalePlan.push({
-            placement: t.placement,
-            handler,
-            host: staleHost,
-            path: t.route,
-            source: "fallback",
-          });
-          seenKey.add(key);
+        for (const target of [...targets, ...retiredTargets]) {
+          queueFallback(target, staleBase, staleHost);
         }
       }
     }

@@ -284,11 +284,19 @@ export type RegisteredHandler = {
   raw?: Record<string, unknown>;
 };
 
-const MANAGED_ROUTES = [
+const ACTIVE_MANAGED_ROUTES = [
   "/deal-tab",
   "/lead-tab",
   "/expo-tab",
   "/calendar",
+];
+
+// These handlers belonged to this application but their pages were removed.
+// Treat them as stale even when they already point at the current Yandex host.
+const RETIRED_MANAGED_ROUTES = [
+  "/placement-detail",
+  "/placement-list",
+  "/placement-menu",
 ];
 
 export function getManagedPlacements(entityTypeId?: number): string[] {
@@ -300,6 +308,9 @@ export function getManagedPlacements(entityTypeId?: number): string[] {
   ];
   if (entityTypeId) {
     placements.push(`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB`);
+    // Retained only so installation cleanup can find and unbind the removed
+    // /placement-list handler. No new handler is registered for this placement.
+    placements.push(`CRM_DYNAMIC_${entityTypeId}_LIST_MENU`);
   }
   return placements;
 }
@@ -342,8 +353,12 @@ export function isStaleHandler(handler: string, currentOrigin: string): boolean 
   } catch {
     return false;
   }
-  const routeMatches = MANAGED_ROUTES.some((route) => url.pathname === route || url.pathname.endsWith(route));
-  if (routeMatches && url.origin !== currentOrigin) return true;
+  const matches = (route: string) =>
+    url.pathname === route || url.pathname.endsWith(route);
+  if (RETIRED_MANAGED_ROUTES.some(matches)) return true;
+  if (ACTIVE_MANAGED_ROUTES.some(matches) && url.origin !== currentOrigin) {
+    return true;
+  }
   return false;
 }
 
