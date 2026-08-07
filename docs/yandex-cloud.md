@@ -46,6 +46,10 @@ Workflow `.github/workflows/rebind-placements.yml` регистрирует об
 проверяйте план в логе и только затем — `apply`. Поле `stale_base_url` оставляйте
 пустым, если старый адрес удалять не требуется.
 
+При `rebind` также удаляются принадлежавшие приложению отменённые обработчики
+`/placement-detail`, `/placement-list` и `/placement-menu`, в том числе на
+текущем Yandex-адресе.
+
 ## Локальная проверка
 
 ```bash
