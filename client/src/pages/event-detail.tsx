@@ -96,9 +96,6 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
                 <FieldLine label="Проведение" value={formatDateRange(foundData.expo.expoStart, foundData.expo.expoEnd)} />
                 <FieldLine label="Монтаж" value={formatDateRange(foundData.expo.installStart, foundData.expo.installEnd)} />
                 <FieldLine label="Демонтаж" value={formatDateRange(foundData.expo.dismantleStart, foundData.expo.dismantleEnd)} />
-                {foundData.expo.responsibleId && (
-                  <FieldLine label="Ответственный ID" value={String(foundData.expo.responsibleId)} />
-                )}
                 <div className="pt-2">
                   <Button
                     variant="outline"

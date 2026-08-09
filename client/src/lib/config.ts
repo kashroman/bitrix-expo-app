@@ -92,7 +92,9 @@ export const statusGroups: StatusGroups = {
     inWork: ["PREPAYMENT_INVOICE", "EXECUTING"],
     refusal: ["LOSE"],
     lostCompetition: ["APOLOGY"],
-    won: ["FINAL_INVOICE", "WON"],
+    // For the exhibition business, a deal is already considered won once
+    // production starts. Stage 9 is the pinned Bitrix24 stage "Строим".
+    won: ["FINAL_INVOICE", "9", "WON"],
   },
 };
 

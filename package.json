@@ -8,9 +8,7 @@
     "build": "node --import tsx script/build.ts",
     "start": "NODE_ENV=production node dist/index.cjs",
     "check": "tsc",
-    "test": "node --import tsx --test tests/lib/*.test.ts",
-    "bind-placements": "node --import tsx migrations/002_bind_placements.ts",
-    "rebind-placements": "node --import tsx migrations/002_bind_placements.ts --cleanup-stale"
+    "test": "node --import tsx --test tests/lib/*.test.ts"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",

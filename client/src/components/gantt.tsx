@@ -1,10 +1,12 @@
 import { useMemo, useState, useEffect } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import {
-  DEAL_STATUS_COLORS,
   PHASE_FILLS,
-  matchDealStatus,
 } from "@/lib/config";
+import {
+  stageDisplayColor,
+  stageFallbackColor,
+} from "@/lib/stage-colors";
 import { BuildScheduleDeal, ExpoItem } from "@/lib/expo-data";
 import { parseDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
@@ -20,37 +22,20 @@ const LEFT_COL_PX = 240;
 const DEAL_BAR_HEIGHT = 18;
 const DEAL_BAR_GAP = 3;
 const DEAL_STACK_PAD_Y = 6;
-const NEUTRAL_BAR_COLOR = "#94a3b8";
-const STAGE_FALLBACK_PALETTE = [
-  "#a855f7", // purple
-  "#0ea5e9", // sky
-  "#f97316", // orange
-  "#14b8a6", // teal
-  "#ec4899", // pink
-  "#22c55e", // green
-  "#facc15", // yellow
-  "#ef4444", // red
-  "#6366f1", // indigo
-  "#84cc16", // lime
-];
+export { stageFallbackColor } from "@/lib/stage-colors";
 
-// Deterministic colour for stage IDs the matcher doesn't know about. Keeps
-// custom stages visually distinguishable without per-stage configuration.
-export function stageFallbackColor(stageId: string | undefined | null): string {
-  const s = String(stageId ?? "").trim();
-  if (!s) return NEUTRAL_BAR_COLOR;
-  let hash = 0;
-  for (let i = 0; i < s.length; i++) {
-    hash = (hash * 31 + s.charCodeAt(i)) >>> 0;
-  }
-  return STAGE_FALLBACK_PALETTE[hash % STAGE_FALLBACK_PALETTE.length];
-}
-
-function dealColor(deal: BuildScheduleDeal): string {
-  if (deal.status && DEAL_STATUS_COLORS[deal.status]) {
-    return DEAL_STATUS_COLORS[deal.status];
-  }
-  return stageFallbackColor(deal.stageTail || deal.stageId);
+function dealColor(
+  deal: BuildScheduleDeal,
+  stageTitles?: Map<string, string>,
+  stageColors?: Map<string, string>,
+): string {
+  const id = deal.stageId || deal.stageTail;
+  const tail = deal.stageTail || deal.stageId;
+  return stageDisplayColor(
+    id,
+    stageTitles?.get(id) ?? stageTitles?.get(tail),
+    stageColors?.get(id) ?? stageColors?.get(tail),
+  );
 }
 
 function dealStageLabel(
@@ -191,6 +176,7 @@ export function GanttTimeline({
   dealsByExpoId,
   onSelectDeal,
   stageTitles,
+  stageColors,
   selectedStageIds,
 }: {
   expos: ExpoItem[];
@@ -202,6 +188,7 @@ export function GanttTimeline({
   dealsByExpoId?: Map<number, BuildScheduleDeal[]>;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
   stageTitles?: Map<string, string>;
+  stageColors?: Map<string, string>;
   selectedStageIds?: string[];
 }) {
   const [cursor, setCursor] = useState<Date>(() => {
@@ -343,6 +330,7 @@ export function GanttTimeline({
               onSelect={onSelect}
               onSelectDeal={onSelectDeal}
               stageTitles={stageTitles}
+              stageColors={stageColors}
               renderRight={renderRight}
             />
           );
@@ -351,6 +339,7 @@ export function GanttTimeline({
         <GanttLegendBar
           selectedStageIds={selectedStageIds}
           stageTitles={stageTitles}
+          stageColors={stageColors}
         />
       </div>
     </div>
@@ -369,6 +358,7 @@ function ExpoRow({
   onSelect,
   onSelectDeal,
   stageTitles,
+  stageColors,
   renderRight,
 }: {
   expo: ExpoItem;
@@ -382,6 +372,7 @@ function ExpoRow({
   onSelect: (expo: ExpoItem) => void;
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
   stageTitles?: Map<string, string>;
+  stageColors?: Map<string, string>;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
 }) {
   const dealList = deals ?? [];
@@ -492,7 +483,7 @@ function ExpoRow({
                     height: `${DEAL_BAR_HEIGHT}px`,
                     left: `${left}%`,
                     width: `${width}%`,
-                    background: dealColor(deal),
+                    background: dealColor(deal, stageTitles, stageColors),
                   }}
                   title={summary}
                   data-testid={`gantt-deal-${deal.id}`}
@@ -615,15 +606,18 @@ function MonthControls({
 function GanttLegendBar({
   selectedStageIds,
   stageTitles,
+  stageColors,
 }: {
   selectedStageIds?: string[];
   stageTitles?: Map<string, string>;
+  stageColors?: Map<string, string>;
 }) {
   const stageSwatches = (selectedStageIds ?? []).map((id) => {
-    const known = matchDealStatus(id, stageTitles?.get(id));
-    const color = known
-      ? DEAL_STATUS_COLORS[known]
-      : stageFallbackColor(id);
+    const color = stageDisplayColor(
+      id,
+      stageTitles?.get(id),
+      stageColors?.get(id),
+    );
     const label = stageTitles?.get(id) ?? id;
     return { id, color, label };
   });
@@ -680,8 +674,3 @@ function formatShortRange(from: unknown, to: unknown): string {
   if (!a && b) return formatShort(b);
   return `${formatShort(a!)} — ${formatShort(b!)}`;
 }
-
-// Re-export helper for the deal-status matcher so consumers can import from
-// gantt-related code without pulling config directly when they already have
-// the stage text. Kept inline to avoid extra lib files.
-export { matchDealStatus };

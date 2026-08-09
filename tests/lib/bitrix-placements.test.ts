@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  findStaleHandlers,
   getManagedPlacements,
   isStaleHandler,
 } from "../../client/src/lib/bitrix.ts";
@@ -34,5 +35,33 @@ describe("Bitrix placement cleanup", () => {
 
   it("includes the retired dynamic list placement for cleanup only", () => {
     assert.ok(getManagedPlacements(1050).includes("CRM_DYNAMIC_1050_LIST_MENU"));
+  });
+
+  it("retires the duplicate LEFT_MENU handler even on the current origin", () => {
+    const stale = findStaleHandlers(
+      [
+        {
+          placement: "LEFT_MENU",
+          handler: `${currentOrigin}/calendar`,
+        },
+      ],
+      getManagedPlacements(1050),
+      currentOrigin,
+    );
+    assert.equal(stale.length, 1);
+  });
+
+  it("keeps the current CRM analytics calendar handler", () => {
+    const stale = findStaleHandlers(
+      [
+        {
+          placement: "CRM_ANALYTICS_MENU",
+          handler: `${currentOrigin}/calendar`,
+        },
+      ],
+      getManagedPlacements(1050),
+      currentOrigin,
+    );
+    assert.equal(stale.length, 0);
   });
 });
