@@ -2945,6 +2945,67 @@ export async function fetchBitrixUserNames(
   return names;
 }
 
+function normalizedRelatedIds(ids: Array<string | number>): string[] {
+  return Array.from(new Set(ids.map(String).map((id) => id.trim()).filter((id) => id && id !== "0")));
+}
+
+/** Resolve company IDs returned by crm.deal.list without exposing technical IDs in the UI. */
+export async function fetchBitrixCompanyNames(
+  companyIds: Array<string | number>,
+): Promise<Map<string, string>> {
+  const ids = normalizedRelatedIds(companyIds);
+  const names = new Map<string, string>();
+  if (ids.length === 0) return names;
+
+  const companies = await listAllBx<Record<string, unknown>>(
+    "crm.company.list",
+    {
+      filter: { "@ID": ids },
+      select: ["ID", "TITLE"],
+      order: { ID: "ASC" },
+    },
+    { maxPages: Math.max(1, Math.ceil(ids.length / 50)) },
+  );
+  companies.forEach((company) => {
+    const id = String(company.ID ?? company.id ?? "").trim();
+    const title = String(company.TITLE ?? company.title ?? "").trim();
+    if (id && title) names.set(id, title);
+  });
+  return names;
+}
+
+/** Resolve a contact name for deals that have no linked company. */
+export async function fetchBitrixContactNames(
+  contactIds: Array<string | number>,
+): Promise<Map<string, string>> {
+  const ids = normalizedRelatedIds(contactIds);
+  const names = new Map<string, string>();
+  if (ids.length === 0) return names;
+
+  const contacts = await listAllBx<Record<string, unknown>>(
+    "crm.contact.list",
+    {
+      filter: { "@ID": ids },
+      select: ["ID", "NAME", "LAST_NAME", "SECOND_NAME"],
+      order: { ID: "ASC" },
+    },
+    { maxPages: Math.max(1, Math.ceil(ids.length / 50)) },
+  );
+  contacts.forEach((contact) => {
+    const id = String(contact.ID ?? contact.id ?? "").trim();
+    const name = [
+      contact.LAST_NAME ?? contact.lastName,
+      contact.NAME ?? contact.name,
+      contact.SECOND_NAME ?? contact.secondName,
+    ]
+      .map((part) => String(part ?? "").trim())
+      .filter(Boolean)
+      .join(" ");
+    if (id && name) names.set(id, name);
+  });
+  return names;
+}
+
 const BUILD_SCHEDULE_DEAL_SELECT = [
   "ID",
   "TITLE",
