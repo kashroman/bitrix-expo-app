@@ -100,38 +100,10 @@ function bitrixLocationHook(): [string, (to: string) => void] {
   return [location, navigate];
 }
 
-function HomePage() {
-  return (
-    <Shell>
-      <PageTitle
-        eyebrow="Приложение"
-        title="Внешнее приложение Bitrix24 для выставок"
-        description="Откройте /calendar для основного рабочего экрана, /install — для регистрации placement-ов."
-      />
-      <div className="grid gap-4 md:grid-cols-3">
-        <LinkCard href="/calendar" title="Календарь" text="Gantt, Calendar, List." />
-        <LinkCard href="/install" title="Установка" text="placement.bind + installFinish." />
-        <LinkCard href="/deal-tab" title="Вкладка сделки" text="Воронки по выставке сделки." />
-      </div>
-    </Shell>
-  );
-}
-
-function LinkCard({ href, title, text }: { href: string; title: string; text: string }) {
-  return (
-    <Link href={href}>
-      <a className="block rounded-xl border bg-card p-5 transition hover:bg-accent">
-        <div className="font-semibold">{title}</div>
-        <div className="mt-2 text-sm text-muted-foreground">{text}</div>
-      </a>
-    </Link>
-  );
-}
-
 function AppRouter() {
   return (
     <Switch>
-      <Route path="/" component={HomePage} />
+      <Route path="/">{() => <CalendarPage />}</Route>
       <Route path="/install" component={InstallPage} />
       <Route path="/calendar">{() => <CalendarPage />}</Route>
       <Route path="/event/:eventId" component={EventDetailPage} />

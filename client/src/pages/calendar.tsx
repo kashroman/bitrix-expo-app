@@ -19,6 +19,7 @@ import {
   ExpoAggregate,
   ExpoItem,
   fetchBuildScheduleDeals,
+  fetchBitrixUserNames,
   fetchDealsForStageProbe,
   fetchExpoList,
   fetchExposByMonth,
@@ -28,6 +29,7 @@ import {
   filterExposWithBuildScheduleDeals,
   isFoundAggregate,
   probeDealById,
+  statusColorMap,
   statusTitleMap,
 } from "@/lib/expo-data";
 import { useBulkExpoCounts, BulkCountsState } from "@/lib/use-bulk-counts";
@@ -72,6 +74,7 @@ import {
   ExpoFieldDiscovery,
   getExpoFieldDiscovery,
 } from "@/lib/expo-fields";
+import { stageDisplayColor } from "@/lib/stage-colors";
 
 // `calendar` and `list` are kept in the type for backward compatibility with
 // internal code, but the UI only exposes `gantt` (rebranded as «Календарь
@@ -136,7 +139,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     queryKey: ["expo-list-month", activeMonthKey],
     queryFn: () => fetchExposByMonth(activeMonth),
     enabled: isBitrix && usesMonthScopedExpos,
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
     refetchOnWindowFocus: false,
     retry: false,
     // Keep the previous month's result visible while the new month loads.
@@ -223,7 +226,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     queryKey: ["deal-stages-detailed"],
     queryFn: fetchDealStagesDetailed,
     enabled: isBitrix,
-    staleTime: 5 * 60_000,
+    staleTime: Infinity,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -311,7 +314,26 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
       isBitrix &&
       buildScheduleKey.length > 0 &&
       sortedStageKey.length > 0,
-    staleTime: 60_000,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const managerIds = useMemo(
+    () =>
+      Array.from(
+        new Set(
+          (buildScheduleQuery.data?.deals ?? [])
+            .map((deal) => String(deal.assignedById ?? "").trim())
+            .filter(Boolean),
+        ),
+      ).sort(),
+    [buildScheduleQuery.data?.deals],
+  );
+  const managerNamesQuery = useQuery({
+    queryKey: ["bitrix-user-names", managerIds],
+    queryFn: () => fetchBitrixUserNames(managerIds),
+    enabled: isBitrix && managerIds.length > 0,
+    staleTime: Infinity,
     refetchOnWindowFocus: false,
     retry: false,
   });
@@ -319,15 +341,18 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     const managers = new Map<string, string>();
     buildScheduleQuery.data?.deals.forEach((deal) => {
       if (!deal.assignedById) return;
-      managers.set(
-        String(deal.assignedById),
-        deal.manager || `ID ${deal.assignedById}`,
-      );
+      const id = String(deal.assignedById);
+      const resolved = managerNamesQuery.data?.get(id);
+      const embedded = deal.manager && !/^ID\s+\d+$/i.test(deal.manager)
+        ? deal.manager
+        : undefined;
+      const name = resolved ?? embedded;
+      if (name) managers.set(id, name);
     });
     return Array.from(managers, ([id, name]) => ({ id, name })).sort((a, b) =>
       a.name.localeCompare(b.name, "ru-RU"),
     );
-  }, [buildScheduleQuery.data?.deals]);
+  }, [buildScheduleQuery.data?.deals, managerNamesQuery.data]);
   const filteredBuildSchedule = useMemo(
     () => filterDealsByManagers(buildScheduleQuery.data, selectedManagerIds),
     [buildScheduleQuery.data, selectedManagerIds],
@@ -351,6 +376,10 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
 
   const stageTitles = useMemo(
     () => statusTitleMap(allStages),
+    [allStages],
+  );
+  const stageColors = useMemo(
+    () => statusColorMap(allStages),
     [allStages],
   );
   const thresholdMissing =
@@ -397,6 +426,8 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             managers={availableManagers}
             selectedManagerIds={selectedManagerIds}
             onChange={setSelectedManagerIds}
+            loading={managerNamesQuery.isLoading}
+            error={managerNamesQuery.error instanceof Error ? managerNamesQuery.error.message : undefined}
           />
           <label className="flex items-center gap-2 text-sm">
             <Checkbox
@@ -477,6 +508,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               dealsDiagnostics={buildScheduleQuery.data?.diagnostics}
               selectedStageIds={sortedStageKey}
               stageTitles={stageTitles}
+              stageColors={stageColors}
               emptyMessage={
                 visibleExpos.length === 0
                   ? ganttIsFetchingNewMonth
@@ -571,6 +603,7 @@ function GanttView({
   dealsDiagnostics,
   selectedStageIds,
   stageTitles,
+  stageColors,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
@@ -584,6 +617,7 @@ function GanttView({
   dealsDiagnostics?: import("@/lib/expo-data").BuildScheduleDiagnostics;
   selectedStageIds: string[];
   stageTitles?: Map<string, string>;
+  stageColors?: Map<string, string>;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -646,6 +680,7 @@ function GanttView({
           openBitrixPath(`/crm/deal/details/${deal.id}/`)
         }
         stageTitles={stageTitles}
+        stageColors={stageColors}
         selectedStageIds={selectedStageIds}
       />
       {dealsDiagnostics ? (
@@ -683,9 +718,9 @@ function DealStagePicker({
   // Order: keep currently-selected first, then any stages discovered from
   // Bitrix. If Bitrix returned nothing, fall back to the user's current
   // selection so they at least see what they have on.
-  const orderedStages = useMemo<Array<{ id: string; title: string; category?: string }>>(() => {
+  const orderedStages = useMemo<Array<{ id: string; title: string; color?: string; category?: string }>>(() => {
     const seen = new Set<string>();
-    const rows: Array<{ id: string; title: string; category?: string }> = [];
+    const rows: Array<{ id: string; title: string; color?: string; category?: string }> = [];
     selectedStageIds.forEach((id) => {
       if (seen.has(id)) return;
       seen.add(id);
@@ -693,13 +728,14 @@ function DealStagePicker({
       rows.push({
         id,
         title: fromCrm?.title ?? id,
+        color: fromCrm?.color,
         category: fromCrm?.categoryId,
       });
     });
     stages.forEach((s) => {
       if (seen.has(s.id)) return;
       seen.add(s.id);
-      rows.push({ id: s.id, title: s.title, category: s.categoryId });
+      rows.push({ id: s.id, title: s.title, color: s.color, category: s.categoryId });
     });
     return rows;
   }, [stages, selectedStageIds]);
@@ -768,6 +804,7 @@ function DealStagePicker({
           ) : (
             orderedStages.map((stage) => {
               const checked = selectedStageIds.includes(stage.id);
+              const color = stageDisplayColor(stage.id, stage.title, stage.color);
               return (
                 <label
                   key={stage.id}
@@ -778,6 +815,11 @@ function DealStagePicker({
                     checked={checked}
                     onCheckedChange={() => toggle(stage.id)}
                     aria-label={stage.title}
+                  />
+                  <span
+                    className="mt-0.5 h-4 w-4 shrink-0 rounded-sm border border-black/10"
+                    style={{ background: color }}
+                    aria-label={`Цвет стадии ${stage.title}`}
                   />
                   <span className="flex-1 leading-tight">
                     <span className="block font-medium">{stage.title}</span>
@@ -802,10 +844,14 @@ function ManagerPicker({
   managers,
   selectedManagerIds,
   onChange,
+  loading,
+  error,
 }: {
   managers: Array<{ id: string; name: string }>;
   selectedManagerIds: string[];
   onChange: (next: string[]) => void;
+  loading?: boolean;
+  error?: string;
 }) {
   const [open, setOpen] = useState(false);
   const toggle = (id: string) => {
@@ -850,7 +896,16 @@ function ManagerPicker({
           </button>
         </div>
         <div className="max-h-[320px] overflow-y-auto p-2">
-          {managers.length === 0 ? (
+          {loading ? (
+            <div className="px-2 py-3 text-xs text-muted-foreground">
+              Загружаем имена сотрудников…
+            </div>
+          ) : error ? (
+            <div className="px-2 py-3 text-xs text-amber-700 dark:text-amber-300">
+              Не удалось загрузить имена сотрудников. Добавьте приложению право
+              «Пользователи (минимальный)» и откройте его заново.
+            </div>
+          ) : managers.length === 0 ? (
             <div className="px-2 py-3 text-xs text-muted-foreground">
               В подходящих сделках ответственные не найдены.
             </div>
@@ -867,7 +922,6 @@ function ManagerPicker({
                   aria-label={manager.name}
                 />
                 <span className="flex-1 font-medium">{manager.name}</span>
-                <code className="text-muted-foreground">{manager.id}</code>
               </label>
             ))
           )}

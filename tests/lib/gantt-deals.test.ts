@@ -6,6 +6,7 @@ import {
   stageFallbackColor,
 } from "../../client/src/components/gantt.tsx";
 import type { ExpoItem } from "../../client/src/lib/expo-data.ts";
+import { stageDisplayColor } from "../../client/src/lib/stage-colors.ts";
 
 function expoWithDates(
   installStart: string,
@@ -85,5 +86,11 @@ describe("stageFallbackColor", () => {
   it("falls back to neutral for empty input", () => {
     assert.equal(stageFallbackColor(""), "#94a3b8");
     assert.equal(stageFallbackColor(null), "#94a3b8");
+  });
+});
+
+describe("stageDisplayColor", () => {
+  it("prefers the native Bitrix24 stage color", () => {
+    assert.equal(stageDisplayColor("9", "Строим", "#7052D3"), "#7052D3");
   });
 });

@@ -120,17 +120,11 @@ export default function InstallPage() {
         {
           placement: dynamicPlacement,
           handler: currentHandlerUrl("/expo-tab"),
-          title: "Работы и результаты",
+          title: "Выставка · аналитика",
           description: "Карточка выставки, связанные лиды/сделки",
         },
         {
           placement: "CRM_ANALYTICS_MENU",
-          handler: currentHandlerUrl("/calendar"),
-          title: "Календарь выставок",
-          description: "Календарь выставок interpro.pro",
-        },
-        {
-          placement: "LEFT_MENU",
           handler: currentHandlerUrl("/calendar"),
           title: "Календарь выставок",
           description: "Календарь выставок interpro.pro",
@@ -160,6 +154,22 @@ export default function InstallPage() {
 
       const managedPlacements = getManagedPlacements(entityTypeId);
       diag.stale = findStaleHandlers(diag.registered, managedPlacements, origin);
+      // Re-bind the smart-process tab once so Bitrix24 applies its new title.
+      // placement.bind returns "already bound" without updating metadata.
+      const dynamicTarget = targets.find((target) => target.placement === dynamicPlacement);
+      const dynamicExisting = diag.registered.find(
+        (row) =>
+          row.placement === dynamicPlacement &&
+          row.handler === dynamicTarget?.handler,
+      );
+      if (
+        dynamicExisting &&
+        !diag.stale.some(
+          (row) => row.placement === dynamicExisting.placement && row.handler === dynamicExisting.handler,
+        )
+      ) {
+        diag.stale.push(dynamicExisting);
+      }
       setDiagnostics({ ...diag });
 
       for (const stale of diag.stale) {
@@ -347,7 +357,6 @@ export default function InstallPage() {
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_LEAD_DETAIL_TAB → /lead-tab</code>
               <code className="rounded bg-background px-2 py-1 text-xs">{`CRM_DYNAMIC_${entityTypeId}_DETAIL_TAB → /expo-tab`}</code>
               <code className="rounded bg-background px-2 py-1 text-xs">CRM_ANALYTICS_MENU → /calendar</code>
-              <code className="rounded bg-background px-2 py-1 text-xs">LEFT_MENU → /calendar</code>
             </div>
             {installStatus && <Notice tone={installStatus.tone} title={installStatus.title} text={installStatus.text} />}
             {checkStatus && <Notice tone={checkStatus.tone} title={checkStatus.title} text={checkStatus.text} />}

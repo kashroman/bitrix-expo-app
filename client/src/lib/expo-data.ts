@@ -111,6 +111,7 @@ function emptyLinkChoice(entity: "lead" | "deal"): LinkFieldChoice {
 export type StatusRef = {
   id: string;
   title: string;
+  color?: string;
   entityId?: string;
   categoryId?: string;
   sort?: number;
@@ -1082,8 +1083,6 @@ export type DealStagesResult = {
   diagnostics: DealStagesDiagnostics;
 };
 
-const MAX_FALLBACK_CATEGORY_ID = 50;
-
 function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   return String(err);
@@ -1105,6 +1104,7 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
       (r) => r.id === row.id && (r.entityId ?? "") === (row.entityId ?? ""),
     );
     if (existing) {
+      if (row.color && !existing.color) existing.color = row.color;
       if (row.categoryId && !existing.categoryId) existing.categoryId = row.categoryId;
       if (row.entityId && !existing.entityId) existing.entityId = row.entityId;
       if (row.sort !== undefined && existing.sort === undefined) existing.sort = row.sort;
@@ -1132,133 +1132,20 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
     }
   };
 
-  // 1) crm.dealcategory.list — discover pipeline category IDs.
-  const categoryIds = new Set<string>(["0"]);
+  // This application intentionally works only with pipeline 0 "Продажи
+  // Экспо". One exact request replaces the former discovery/probing chain
+  // and prevents stages from unrelated pipelines appearing in the filter.
+  const entityId = "DEAL_STAGE";
+  diagnostics.categoryIds = ["0"];
   try {
-    const categories = await callBx<Array<Record<string, unknown>>>(
-      "crm.dealcategory.list",
-      { order: { SORT: "ASC" } },
-    );
-    const list = Array.isArray(categories) ? categories : [];
-    list.forEach((cat) => {
-      const id = String(cat.ID ?? cat.id ?? "");
-      if (id) categoryIds.add(id);
-    });
-    recordAttempt({
-      source: "dealcategory.list",
-      ok: true,
-      count: list.length,
-    });
-  } catch (err) {
-    recordAttempt({
-      source: "dealcategory.list",
-      ok: false,
-      count: 0,
-      error: errorMessage(err),
-    });
-  }
-  diagnostics.categoryIds = Array.from(categoryIds).sort((a, b) => Number(a) - Number(b));
-
-  // 2) crm.dealcategory.stage.list for every known category.
-  for (const categoryId of diagnostics.categoryIds) {
-    const entityId = categoryId === "0" ? "DEAL_STAGE" : `DEAL_STAGE_${categoryId}`;
-    try {
-      const stagesRes = await callBx<Array<Record<string, unknown>>>(
-        "crm.dealcategory.stage.list",
-        { id: categoryId },
-      );
-      const list = Array.isArray(stagesRes) ? stagesRes : [];
-      let added = 0;
-      list.forEach((row) => {
-        const id = String(row.STATUS_ID ?? "");
-        const sortRaw = row.SORT ?? row.sort;
-        if (
-          add({
-            id,
-            title: String(row.NAME ?? row.STATUS_ID ?? ""),
-            entityId,
-            categoryId,
-            sort:
-              sortRaw !== undefined && sortRaw !== null && sortRaw !== ""
-                ? Number(sortRaw)
-                : undefined,
-            semantic: String(
-              row.SEMANTICS ?? row.SEMANTIC_ID ?? row.STATUS_SEMANTIC_ID ?? "",
-            ) || undefined,
-            source: "dealcategory.stage.list",
-          })
-        ) {
-          added += 1;
-        }
-      });
-      recordAttempt({
-        source: "dealcategory.stage.list",
-        entityId,
-        categoryId,
-        ok: true,
-        count: added,
-      });
-    } catch (err) {
-      recordAttempt({
-        source: "dealcategory.stage.list",
-        entityId,
-        categoryId,
-        ok: false,
-        count: 0,
-        error: errorMessage(err),
-      });
-    }
-  }
-
-  // 3) crm.status.entity.types — pull real entity list if the server supports it.
-  const entityIds = new Set<string>();
-  entityIds.add("DEAL_STAGE");
-  try {
-    const entities = await callBx<Array<Record<string, unknown>>>(
-      "crm.status.entity.types",
-      {},
-    );
-    const list = Array.isArray(entities) ? entities : [];
-    list.forEach((row) => {
-      const id = String(row.ID ?? row.id ?? "");
-      if (id.startsWith("DEAL_STAGE")) entityIds.add(id);
-    });
-    recordAttempt({
-      source: "status.entity.types",
-      ok: true,
-      count: list.length,
-    });
-  } catch (err) {
-    recordAttempt({
-      source: "status.entity.types",
-      ok: false,
-      count: 0,
-      error: errorMessage(err),
-    });
-  }
-
-  // 4) Add DEAL_STAGE_<categoryId> for every discovered category, plus a bounded
-  // range of DEAL_STAGE_0..DEAL_STAGE_50 as a defensive fallback in case neither
-  // dealcategory.list nor status.entity.types returned anything useful.
-  diagnostics.categoryIds.forEach((categoryId) => {
-    if (categoryId === "0") return;
-    entityIds.add(`DEAL_STAGE_${categoryId}`);
-  });
-  for (let i = 0; i <= MAX_FALLBACK_CATEGORY_ID; i += 1) {
-    entityIds.add(`DEAL_STAGE_${i}`);
-  }
-
-  // 5) crm.status.list per entityId. Catches any pipeline not surfaced above.
-  for (const entityId of Array.from(entityIds).sort()) {
-    try {
-      const stagesRes = await callBx<Array<Record<string, unknown>>>(
+      const result = await callBx<Array<Record<string, unknown>>>(
         "crm.status.list",
         {
           filter: { ENTITY_ID: entityId },
           order: { SORT: "ASC" },
         },
       );
-      const list = Array.isArray(stagesRes) ? stagesRes : [];
+      const list = Array.isArray(result) ? result : [];
       let added = 0;
       list.forEach((row) => {
         const id = String(row.STATUS_ID ?? "");
@@ -1267,6 +1154,7 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
           add({
             id,
             title: String(row.NAME ?? id),
+            color: String(row.COLOR ?? row.color ?? "").trim() || undefined,
             entityId,
             categoryId: entityIdToCategoryId(entityId),
             sort:
@@ -1299,7 +1187,6 @@ export async function fetchDealStagesDetailed(): Promise<DealStagesResult> {
         error: errorMessage(err),
       });
     }
-  }
 
   return { stages, diagnostics };
 }
@@ -2167,6 +2054,14 @@ export function statusTitleMap(list: StatusRef[]): Map<string, string> {
   return map;
 }
 
+export function statusColorMap(list: StatusRef[]): Map<string, string> {
+  const map = new Map<string, string>();
+  list.forEach((status) => {
+    if (status.id && status.color) map.set(status.id, status.color);
+  });
+  return map;
+}
+
 export function leadGroupLabel(key: LeadGroupKey) {
   return LEAD_GROUP_LABELS[key];
 }
@@ -2637,6 +2532,7 @@ async function fetchChunkRows(
   fieldCode: string,
   ids: number[],
   selectFields: string[],
+  extraFilter: Record<string, unknown> = {},
 ): Promise<{
   ok: boolean;
   rows: Record<string, unknown>[];
@@ -2648,7 +2544,7 @@ async function fetchChunkRows(
     const res = await listAllBxDetailed<Record<string, unknown>>(
       method,
       {
-        filter: { [`@${fieldCode}`]: ids },
+        filter: { [`@${fieldCode}`]: ids, ...extraFilter },
         select: selectFields,
         order: { ID: "DESC" },
       },
@@ -2898,6 +2794,7 @@ export async function fetchExpoCountsBulk(
         dealField,
         chunkIds,
         dealSelect,
+        { CATEGORY_ID: 0 },
       );
       if (!res.ok) {
         markDealFailureForChunk(
@@ -2995,13 +2892,64 @@ export type BuildScheduleResult = {
   diagnostics: BuildScheduleDiagnostics;
 };
 
+export function formatBitrixUserName(user: Record<string, unknown>): string | undefined {
+  const lastName = String(user.LAST_NAME ?? user.lastName ?? "").trim();
+  const firstName = String(user.NAME ?? user.name ?? "").trim();
+  const secondName = String(user.SECOND_NAME ?? user.secondName ?? "").trim();
+  const parts = [lastName, firstName, secondName].filter(Boolean);
+  return parts.length > 0 ? parts.join(" ") : undefined;
+}
+
+/**
+ * Resolve deal assignee IDs to human-readable Bitrix24 user names.
+ * `crm.deal.list` reliably returns ASSIGNED_BY_ID, but not the related user
+ * fields. `user.get` requires one of the minimal user scopes in the local
+ * application settings.
+ */
+export async function fetchBitrixUserNames(
+  userIds: Array<string | number>,
+): Promise<Map<string, string>> {
+  const ids = Array.from(
+    new Set(userIds.map(String).map((id) => id.trim()).filter(Boolean)),
+  );
+  const names = new Map<string, string>();
+  if (ids.length === 0) return names;
+
+  const results = await Promise.allSettled(
+    ids.map((id) =>
+      callBx<Array<Record<string, unknown>>>("user.get", {
+        FILTER: { ID: id },
+      }),
+    ),
+  );
+
+  let firstError: unknown;
+  results.forEach((result, index) => {
+    if (result.status === "rejected") {
+      firstError ??= result.reason;
+      return;
+    }
+    const requestedId = ids[index];
+    const user = (Array.isArray(result.value) ? result.value : []).find((row) =>
+      String(row.ID ?? row.id ?? "").trim() === requestedId,
+    ) ?? result.value?.[0];
+    if (!user) return;
+    const id = String(user.ID ?? user.id ?? requestedId).trim();
+    const name = formatBitrixUserName(user);
+    if (id && name) names.set(id, name);
+  });
+
+  if (names.size === 0 && firstError) {
+    throw firstError;
+  }
+  return names;
+}
+
 const BUILD_SCHEDULE_DEAL_SELECT = [
   "ID",
   "TITLE",
   "STAGE_ID",
   "ASSIGNED_BY_ID",
-  "ASSIGNED_BY_NAME",
-  "ASSIGNED_BY_LAST_NAME",
   "OPPORTUNITY",
   "CURRENCY_ID",
   "COMPANY_ID",
@@ -3211,6 +3159,7 @@ export async function fetchBuildScheduleDeals(
           filter: {
             [`@${dealField}`]: chunkIds,
             "@STAGE_ID": stageIds,
+            CATEGORY_ID: 0,
           },
           select,
           order: { ID: "DESC" },

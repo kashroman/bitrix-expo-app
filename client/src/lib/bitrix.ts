@@ -369,7 +369,13 @@ export function findStaleHandlers(
 ): RegisteredHandler[] {
   const managed = new Set(managedPlacements);
   return registered.filter(
-    (row) => managed.has(row.placement) && isStaleHandler(row.handler, currentOrigin),
+    (row) =>
+      managed.has(row.placement) &&
+      // The local application already has its own Bitrix24 menu entry.
+      // Retire the separately registered LEFT_MENU handler to avoid showing
+      // the same application twice in the left navigation.
+      (row.placement === "LEFT_MENU" ||
+        isStaleHandler(row.handler, currentOrigin)),
   );
 }
 
