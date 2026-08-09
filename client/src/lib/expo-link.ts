@@ -228,10 +228,11 @@ async function tryListWithField(
   const formats = pinned ? [pinned] : all;
   const select = Array.from(new Set([...baseSelect, fieldCode]));
   const attempts: { format: string; count: number; error?: string }[] = [];
+  const categoryFilter = method === "crm.deal.list" ? { CATEGORY_ID: 0 } : {};
   for (const fmt of formats) {
     try {
       const rows = await listAllBx<Record<string, unknown>>(method, {
-        filter: { [fieldCode]: fmt.value },
+        filter: { [fieldCode]: fmt.value, ...categoryFilter },
         select,
         order: { ID: "DESC" },
       }, { maxPages: 20 });
@@ -251,7 +252,7 @@ async function tryListWithField(
         for (const fmt2 of rest) {
           try {
             const rows = await listAllBx<Record<string, unknown>>(method, {
-              filter: { [fieldCode]: fmt2.value },
+              filter: { [fieldCode]: fmt2.value, ...categoryFilter },
               select,
               order: { ID: "DESC" },
             }, { maxPages: 20 });
@@ -366,6 +367,7 @@ export async function fetchLinkedEntities(
   const method = entity === "lead" ? "crm.lead.fields" : "crm.deal.fields";
   const listMethod = entity === "lead" ? "crm.lead.list" : "crm.deal.list";
   const baseSelect = entity === "lead" ? LEAD_SELECT : DEAL_SELECT;
+  const categoryFilter = entity === "deal" ? { CATEGORY_ID: 0 } : {};
 
   const choice: LinkFieldChoice = {
     entity,
@@ -408,7 +410,7 @@ export async function fetchLinkedEntities(
         let pinnedErrored = false;
         try {
           const list = await listAllBx<Record<string, unknown>>(listMethod, {
-            filter: { [candidate.code]: pinnedEntry.value },
+            filter: { [candidate.code]: pinnedEntry.value, ...categoryFilter },
             select,
             order: { ID: "DESC" },
           }, { maxPages: 20 });
@@ -444,7 +446,7 @@ export async function fetchLinkedEntities(
       for (const fmt of formats) {
         try {
           const list = await listAllBx<Record<string, unknown>>(listMethod, {
-            filter: { [candidate.code]: fmt.value },
+            filter: { [candidate.code]: fmt.value, ...categoryFilter },
             select,
             order: { ID: "DESC" },
           }, { maxPages: 20 });
