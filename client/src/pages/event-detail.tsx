@@ -9,6 +9,10 @@ import { LeadFunnel, DealFunnel } from "@/components/funnel";
 import {
   buildExpoAggregate,
   fetchDealStages,
+  fetchBitrixCompanyNames,
+  fetchBitrixContactNames,
+  fetchBitrixUserNames,
+  statusColorMap,
   statusTitleMap,
 } from "@/lib/expo-data";
 import type { CrmItem } from "@/lib/bitrix";
@@ -17,12 +21,10 @@ import {
   EXPO_ENTITY_TYPE_ID,
   DealGroupKey,
   LeadGroupKey,
-  candidateDealStatusByName,
-  dealExpoFieldCode,
-  matchDealStatus,
 } from "@/lib/config";
 import { formatDateRange } from "@/lib/format";
 import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
+import { stageDisplayColor } from "@/lib/stage-colors";
 
 export default function EventDetailPage({ params }: { params: { eventId: string } }) {
   const eventId = params.eventId;
@@ -162,19 +164,9 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
           </div>
 
           <div className="mt-4">
-            <LoadedDealsDiagnostics
+            <ExhibitionDealsTable
               deals={foundData.deals}
-              dealChoice={foundData.diagnostics.deal}
-              expoId={foundData.expo.id}
               expoTitle={foundData.expo.title}
-            />
-          </div>
-
-          <div className="mt-4">
-            <LinkDiagnosticsCard
-              leadChoice={foundData.diagnostics.lead}
-              dealChoice={foundData.diagnostics.deal}
-              errors={foundData.diagnostics.errors}
             />
           </div>
         </>
@@ -464,63 +456,48 @@ function Kpi({
   );
 }
 
-const LOADED_DEAL_HIGHLIGHT: Record<
-  "signingContract" | "building" | "projectCompleted",
-  string
-> = {
-  signingContract:
-    "bg-yellow-100 text-yellow-900 dark:bg-yellow-900/40 dark:text-yellow-100",
-  building: "bg-blue-100 text-blue-900 dark:bg-blue-900/40 dark:text-blue-100",
-  projectCompleted:
-    "bg-green-100 text-green-900 dark:bg-green-900/40 dark:text-green-100",
-};
-
-function linkValueOf(
+function dealClientTitle(
   deal: Record<string, unknown>,
-  fieldCode: string | undefined,
-): string | undefined {
-  if (!fieldCode) return undefined;
-  const variants = [
-    fieldCode,
-    fieldCode.toUpperCase(),
-    fieldCode.toLowerCase(),
-    fieldCode.replace(/_([a-z])/g, (_, c) => (c as string).toUpperCase()),
-  ];
-  for (const key of variants) {
-    const v = deal[key];
-    if (v !== undefined && v !== null && v !== "") {
-      return Array.isArray(v) ? JSON.stringify(v) : String(v);
-    }
-  }
-  return undefined;
-}
-
-function dealClientOf(deal: Record<string, unknown>): string | undefined {
+  companyNames: Map<string, string>,
+  contactNames: Map<string, string>,
+  isLoading: boolean,
+): string {
   const fromCompany =
     deal.COMPANY_TITLE ?? deal.companyTitle ?? deal.COMPANY_NAME ?? deal.companyName;
   if (typeof fromCompany === "string" && fromCompany) return fromCompany;
+  const companyId = String(deal.COMPANY_ID ?? deal.companyId ?? "").trim();
+  if (companyId && companyId !== "0") {
+    return companyNames.get(companyId) ?? (isLoading ? "Загрузка…" : "Компания не найдена");
+  }
+
   const contactName = deal.CONTACT_NAME ?? deal.contactName;
-  if (typeof contactName === "string" && contactName) return contactName;
-  const companyId = deal.COMPANY_ID ?? deal.companyId;
-  if (companyId !== undefined && companyId !== null && companyId !== "" && companyId !== "0") {
-    return `company #${companyId}`;
+  if (typeof contactName === "string" && contactName.trim()) return contactName.trim();
+  const contactId = String(deal.CONTACT_ID ?? deal.contactId ?? "").trim();
+  if (contactId && contactId !== "0") {
+    return contactNames.get(contactId) ?? (isLoading ? "Загрузка…" : "Контакт не найден");
   }
-  const contactId = deal.CONTACT_ID ?? deal.contactId;
-  if (contactId !== undefined && contactId !== null && contactId !== "" && contactId !== "0") {
-    return `contact #${contactId}`;
-  }
-  return undefined;
+  return "Клиент не указан";
 }
 
-function LoadedDealsDiagnostics({
+function formatDealBudget(value: string | undefined, currency: string | undefined): string {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "—";
+  try {
+    return new Intl.NumberFormat("ru-RU", {
+      style: "currency",
+      currency: currency || "RUB",
+      maximumFractionDigits: 0,
+    }).format(amount);
+  } catch {
+    return `${new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 0 }).format(amount)} ${currency || "RUB"}`;
+  }
+}
+
+function ExhibitionDealsTable({
   deals,
-  dealChoice,
-  expoId,
   expoTitle,
 }: {
   deals: CrmItem[];
-  dealChoice: LinkFieldChoice;
-  expoId: number | string;
   expoTitle: string;
 }) {
   const stagesQuery = useQuery({
@@ -533,140 +510,156 @@ function LoadedDealsDiagnostics({
     () => statusTitleMap(stagesQuery.data ?? []),
     [stagesQuery.data],
   );
-  const linkField = dealChoice.chosenField ?? dealExpoFieldCode ?? undefined;
+  const colorById = useMemo(
+    () => statusColorMap(stagesQuery.data ?? []),
+    [stagesQuery.data],
+  );
+
+  const relatedIds = useMemo(() => {
+    const companies = new Set<string>();
+    const contacts = new Set<string>();
+    const managers = new Set<string>();
+    deals.forEach((deal) => {
+      const row = deal as Record<string, unknown>;
+      const companyId = String(row.COMPANY_ID ?? row.companyId ?? "").trim();
+      const contactId = String(row.CONTACT_ID ?? row.contactId ?? "").trim();
+      const managerId = String(row.ASSIGNED_BY_ID ?? row.assignedById ?? "").trim();
+      if (companyId && companyId !== "0") companies.add(companyId);
+      if (contactId && contactId !== "0") contacts.add(contactId);
+      if (managerId && managerId !== "0") managers.add(managerId);
+    });
+    return {
+      companyIds: Array.from(companies).sort(),
+      contactIds: Array.from(contacts).sort(),
+      managerIds: Array.from(managers).sort(),
+    };
+  }, [deals]);
+
+  const relatedQuery = useQuery({
+    queryKey: ["deal-related-names", relatedIds],
+    queryFn: async () => {
+      const [companies, contacts, managers] = await Promise.allSettled([
+        fetchBitrixCompanyNames(relatedIds.companyIds),
+        fetchBitrixContactNames(relatedIds.contactIds),
+        fetchBitrixUserNames(relatedIds.managerIds),
+      ]);
+      return {
+        companyNames: companies.status === "fulfilled" ? companies.value : new Map<string, string>(),
+        contactNames: contacts.status === "fulfilled" ? contacts.value : new Map<string, string>(),
+        managerNames: managers.status === "fulfilled" ? managers.value : new Map<string, string>(),
+      };
+    },
+    enabled: isInsideBitrix() && deals.length > 0,
+    staleTime: 5 * 60_000,
+  });
+
+  const companyNames = relatedQuery.data?.companyNames ?? new Map<string, string>();
+  const contactNames = relatedQuery.data?.contactNames ?? new Map<string, string>();
+  const managerNames = relatedQuery.data?.managerNames ?? new Map<string, string>();
 
   const rows = useMemo(() => {
     return deals.map((deal) => {
       const r = deal as Record<string, unknown>;
       const stageId = String(r.STAGE_ID ?? r.stageId ?? "");
       const stageTitle = stageId ? titleById.get(stageId) : undefined;
-      const exact = matchDealStatus(stageId, stageTitle);
-      const candidate = exact ?? candidateDealStatusByName(stageTitle);
+      const assignedById = String(r.ASSIGNED_BY_ID ?? r.assignedById ?? "").trim();
       return {
         id: String(r.ID ?? r.id ?? ""),
         title: String(r.TITLE ?? r.title ?? ""),
         stageId,
         stageTitle,
-        stageSemanticId: r.STAGE_SEMANTIC_ID
-          ? String(r.STAGE_SEMANTIC_ID)
-          : r.stageSemanticId
-            ? String(r.stageSemanticId)
-            : undefined,
-        categoryId: r.CATEGORY_ID
-          ? String(r.CATEGORY_ID)
-          : r.categoryId
-            ? String(r.categoryId)
-            : undefined,
         opportunity:
           r.OPPORTUNITY !== undefined && r.OPPORTUNITY !== null && r.OPPORTUNITY !== ""
             ? String(r.OPPORTUNITY)
             : r.opportunity !== undefined && r.opportunity !== null && r.opportunity !== ""
               ? String(r.opportunity)
-              : undefined,
+              : r.OPPORTUNITY_ACCOUNT !== undefined && r.OPPORTUNITY_ACCOUNT !== null && r.OPPORTUNITY_ACCOUNT !== ""
+                ? String(r.OPPORTUNITY_ACCOUNT)
+                : undefined,
         currencyId: r.CURRENCY_ID
           ? String(r.CURRENCY_ID)
           : r.currencyId
             ? String(r.currencyId)
-            : undefined,
-        assignedById: r.ASSIGNED_BY_ID
-          ? String(r.ASSIGNED_BY_ID)
-          : r.assignedById
-            ? String(r.assignedById)
-            : undefined,
-        client: dealClientOf(r),
-        linkValue: linkValueOf(r, linkField),
-        exact,
-        candidate,
+            : r.ACCOUNT_CURRENCY_ID
+              ? String(r.ACCOUNT_CURRENCY_ID)
+              : undefined,
+        client: dealClientTitle(r, companyNames, contactNames, relatedQuery.isFetching),
+        manager: assignedById
+          ? managerNames.get(assignedById) ?? (relatedQuery.isFetching ? "Загрузка…" : "Имя недоступно")
+          : "Не указан",
       };
     });
-  }, [deals, titleById, linkField]);
+  }, [deals, titleById, companyNames, contactNames, managerNames, relatedQuery.isFetching]);
 
   return (
-    <Card data-testid="card-loaded-deals-diag">
-      <CardHeader>
-        <CardTitle className="text-base">
-          Загруженные сделки для выставки · диагностика
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-3 text-xs">
-        <div className="text-muted-foreground">
-          Список сделок, действительно пришедших из{" "}
-          <code>crm.deal.list</code> по полю{" "}
-          <code>{linkField ?? "—"}</code> для выставки <b>{expoTitle}</b> (
-          <code>#{expoId}</code>). Используйте эти <code>STAGE_ID</code>, чтобы
-          закрепить значения в <code>dealStageIds</code>, если общий справочник
-          стадий не читается.
+    <Card data-testid="card-exhibition-deals">
+      <CardHeader className="flex flex-row items-center justify-between gap-3">
+        <div>
+          <CardTitle className="text-lg">Сделки выставки</CardTitle>
+          <p className="mt-1 text-sm text-muted-foreground">{expoTitle}</p>
         </div>
+        <span className="rounded-full bg-muted px-3 py-1 text-sm font-medium tabular-nums">
+          {rows.length}
+        </span>
+      </CardHeader>
+      <CardContent className="space-y-3">
         {rows.length === 0 ? (
-          <div className="rounded border border-dashed p-2 text-muted-foreground">
-            Сделок не загружено. Проверьте диагностику связи ниже.
+          <div className="rounded border border-dashed p-4 text-sm text-muted-foreground">
+            Для этой выставки сделок пока нет.
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table
-              className="w-full text-[11px]"
-              data-testid="loaded-deals-diag-table"
+              className="w-full min-w-[760px] text-sm"
+              data-testid="exhibition-deals-table"
             >
               <thead>
-                <tr className="border-b text-left uppercase tracking-wide text-muted-foreground">
-                  <th className="px-2 py-1">Deal ID</th>
-                  <th className="px-2 py-1">Title</th>
-                  <th className="px-2 py-1">STAGE_ID</th>
-                  <th className="px-2 py-1">Stage title</th>
-                  <th className="px-2 py-1">Semantic</th>
-                  <th className="px-2 py-1">Category</th>
-                  <th className="px-2 py-1">Opportunity</th>
-                  <th className="px-2 py-1">Assigned</th>
-                  <th className="px-2 py-1">Клиент</th>
-                  <th className="px-2 py-1">
-                    Link value (<code>{linkField ?? "—"}</code>)
-                  </th>
-                  <th className="px-2 py-1">Match</th>
+                <tr className="border-b text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">
+                  <th className="px-3 py-2">Сделка</th>
+                  <th className="px-3 py-2">Клиент</th>
+                  <th className="px-3 py-2">Стадия</th>
+                  <th className="px-3 py-2 text-right">Бюджет</th>
+                  <th className="px-3 py-2">Ответственный</th>
                 </tr>
               </thead>
               <tbody>
                 {rows.map((row) => {
-                  const key = row.exact ?? row.candidate;
-                  const cls = key ? LOADED_DEAL_HIGHLIGHT[key] : "";
+                  const stageColor = stageDisplayColor(
+                    row.stageId,
+                    row.stageTitle,
+                    colorById.get(row.stageId),
+                  );
                   return (
                     <tr
                       key={row.id}
-                      className={`border-b align-top ${cls}`}
-                      data-testid={`loaded-deals-diag-row-${row.id}`}
+                      className="border-b align-middle transition-colors last:border-0 hover:bg-muted/40"
+                      data-testid={`exhibition-deal-row-${row.id}`}
                     >
-                      <td className="px-2 py-1 font-mono">#{row.id}</td>
-                      <td className="px-2 py-1">{row.title || "—"}</td>
-                      <td className="px-2 py-1 font-mono">{row.stageId || "—"}</td>
-                      <td className="px-2 py-1">{row.stageTitle || "—"}</td>
-                      <td className="px-2 py-1 font-mono">
-                        {row.stageSemanticId ?? "—"}
+                      <td className="px-3 py-3">
+                        <button
+                          type="button"
+                          className="text-left font-medium text-primary hover:underline"
+                          onClick={() => openBitrixPath(`/crm/deal/details/${row.id}/`)}
+                        >
+                          {row.title || `Сделка #${row.id}`}
+                        </button>
+                        <div className="mt-0.5 text-xs text-muted-foreground">#{row.id}</div>
                       </td>
-                      <td className="px-2 py-1 font-mono">
-                        {row.categoryId ?? "—"}
+                      <td className="px-3 py-3">{row.client}</td>
+                      <td className="px-3 py-3">
+                        <span className="inline-flex items-center gap-2">
+                          <span
+                            className="h-2.5 w-2.5 shrink-0 rounded-full"
+                            style={{ backgroundColor: stageColor }}
+                            aria-hidden="true"
+                          />
+                          {row.stageTitle || "Стадия не указана"}
+                        </span>
                       </td>
-                      <td className="px-2 py-1 tabular-nums">
-                        {row.opportunity
-                          ? `${row.opportunity}${row.currencyId ? " " + row.currencyId : ""}`
-                          : "—"}
+                      <td className="whitespace-nowrap px-3 py-3 text-right font-medium tabular-nums">
+                        {formatDealBudget(row.opportunity, row.currencyId)}
                       </td>
-                      <td className="px-2 py-1 font-mono">
-                        {row.assignedById ?? "—"}
-                      </td>
-                      <td className="px-2 py-1">{row.client ?? "—"}</td>
-                      <td className="px-2 py-1 font-mono">
-                        {row.linkValue ?? "—"}
-                      </td>
-                      <td className="px-2 py-1">
-                        {row.exact ? (
-                          <span>
-                            <b>точное</b>
-                          </span>
-                        ) : row.candidate ? (
-                          <span>кандидат</span>
-                        ) : (
-                          <span className="text-muted-foreground">—</span>
-                        )}
-                      </td>
+                      <td className="px-3 py-3">{row.manager}</td>
                     </tr>
                   );
                 })}
