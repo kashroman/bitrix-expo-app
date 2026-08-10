@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "wouter";
-import { ArrowLeft, ExternalLink } from "lucide-react";
+import { ArrowDown, ArrowLeft, ArrowUp, ArrowUpDown, ExternalLink } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Shell, PageTitle, LoadingRows } from "./shell";
@@ -25,8 +25,19 @@ import {
 import { formatDateRange } from "@/lib/format";
 import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
 import { stageDisplayColor } from "@/lib/stage-colors";
+import {
+  DealTableSortKey,
+  SortDirection,
+  sortDealTableRows,
+} from "@/lib/deal-table";
 
-export default function EventDetailPage({ params }: { params: { eventId: string } }) {
+export default function EventDetailPage({
+  params,
+  embedded = false,
+}: {
+  params: { eventId: string };
+  embedded?: boolean;
+}) {
   const eventId = params.eventId;
   const inBitrix = isInsideBitrix();
   const agg = useQuery({
@@ -43,7 +54,7 @@ export default function EventDetailPage({ params }: { params: { eventId: string 
   );
 
   return (
-    <Shell>
+    <Shell embedded={embedded}>
       <div className="mb-4 flex items-center gap-2">
         <Link href="/calendar">
           <a
@@ -500,6 +511,7 @@ function ExhibitionDealsTable({
   deals: CrmItem[];
   expoTitle: string;
 }) {
+  const [sort, setSort] = useState<{ key: DealTableSortKey; direction: SortDirection } | null>(null);
   const stagesQuery = useQuery({
     queryKey: ["deal-stages"],
     queryFn: fetchDealStages,
@@ -512,6 +524,10 @@ function ExhibitionDealsTable({
   );
   const colorById = useMemo(
     () => statusColorMap(stagesQuery.data ?? []),
+    [stagesQuery.data],
+  );
+  const stageById = useMemo(
+    () => new Map((stagesQuery.data ?? []).map((stage) => [stage.id, stage])),
     [stagesQuery.data],
   );
 
@@ -562,20 +578,21 @@ function ExhibitionDealsTable({
       const r = deal as Record<string, unknown>;
       const stageId = String(r.STAGE_ID ?? r.stageId ?? "");
       const stageTitle = stageId ? titleById.get(stageId) : undefined;
+      const budgetRaw =
+        r.OPPORTUNITY !== undefined && r.OPPORTUNITY !== null && r.OPPORTUNITY !== ""
+          ? r.OPPORTUNITY
+          : r.opportunity !== undefined && r.opportunity !== null && r.opportunity !== ""
+            ? r.opportunity
+            : r.OPPORTUNITY_ACCOUNT;
       const assignedById = String(r.ASSIGNED_BY_ID ?? r.assignedById ?? "").trim();
       return {
         id: String(r.ID ?? r.id ?? ""),
         title: String(r.TITLE ?? r.title ?? ""),
         stageId,
         stageTitle,
-        opportunity:
-          r.OPPORTUNITY !== undefined && r.OPPORTUNITY !== null && r.OPPORTUNITY !== ""
-            ? String(r.OPPORTUNITY)
-            : r.opportunity !== undefined && r.opportunity !== null && r.opportunity !== ""
-              ? String(r.opportunity)
-              : r.OPPORTUNITY_ACCOUNT !== undefined && r.OPPORTUNITY_ACCOUNT !== null && r.OPPORTUNITY_ACCOUNT !== ""
-                ? String(r.OPPORTUNITY_ACCOUNT)
-                : undefined,
+        stageSort: stageById.get(stageId)?.sort,
+        opportunity: budgetRaw !== undefined && budgetRaw !== null && budgetRaw !== "" ? String(budgetRaw) : undefined,
+        budgetValue: Number.isFinite(Number(budgetRaw)) ? Number(budgetRaw) : undefined,
         currencyId: r.CURRENCY_ID
           ? String(r.CURRENCY_ID)
           : r.currencyId
@@ -589,7 +606,19 @@ function ExhibitionDealsTable({
           : "Не указан",
       };
     });
-  }, [deals, titleById, companyNames, contactNames, managerNames, relatedQuery.isFetching]);
+  }, [deals, titleById, stageById, companyNames, contactNames, managerNames, relatedQuery.isFetching]);
+
+  const sortedRows = useMemo(
+    () => sort ? sortDealTableRows(rows, sort.key, sort.direction) : rows,
+    [rows, sort],
+  );
+
+  const changeSort = (key: DealTableSortKey) => {
+    setSort((current) => ({
+      key,
+      direction: current?.key === key && current.direction === "asc" ? "desc" : "asc",
+    }));
+  };
 
   return (
     <Card data-testid="card-exhibition-deals">
@@ -615,15 +644,15 @@ function ExhibitionDealsTable({
             >
               <thead>
                 <tr className="border-b text-left text-xs font-medium uppercase tracking-wide text-muted-foreground">
-                  <th className="px-3 py-2">Сделка</th>
-                  <th className="px-3 py-2">Клиент</th>
-                  <th className="px-3 py-2">Стадия</th>
-                  <th className="px-3 py-2 text-right">Бюджет</th>
-                  <th className="px-3 py-2">Ответственный</th>
+                  <SortableHeader label="Сделка" sortKey="title" sort={sort} onSort={changeSort} />
+                  <SortableHeader label="Клиент" sortKey="client" sort={sort} onSort={changeSort} />
+                  <SortableHeader label="Стадия" sortKey="stage" sort={sort} onSort={changeSort} />
+                  <SortableHeader label="Бюджет" sortKey="budget" sort={sort} onSort={changeSort} align="right" />
+                  <SortableHeader label="Ответственный" sortKey="manager" sort={sort} onSort={changeSort} />
                 </tr>
               </thead>
               <tbody>
-                {rows.map((row) => {
+                {sortedRows.map((row) => {
                   const stageColor = stageDisplayColor(
                     row.stageId,
                     row.stageTitle,
@@ -669,5 +698,38 @@ function ExhibitionDealsTable({
         )}
       </CardContent>
     </Card>
+  );
+}
+
+function SortableHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  align = "left",
+}: {
+  label: string;
+  sortKey: DealTableSortKey;
+  sort: { key: DealTableSortKey; direction: SortDirection } | null;
+  onSort: (key: DealTableSortKey) => void;
+  align?: "left" | "right";
+}) {
+  const active = sort?.key === sortKey;
+  const Icon = !active ? ArrowUpDown : sort.direction === "asc" ? ArrowUp : ArrowDown;
+  return (
+    <th
+      className={`px-3 py-2 ${align === "right" ? "text-right" : "text-left"}`}
+      aria-sort={!active ? "none" : sort.direction === "asc" ? "ascending" : "descending"}
+    >
+      <button
+        type="button"
+        className={`inline-flex items-center gap-1.5 rounded py-1 transition hover:text-foreground focus:outline-none focus:ring-2 focus:ring-primary/40 ${align === "right" ? "flex-row-reverse" : ""}`}
+        onClick={() => onSort(sortKey)}
+        data-testid={`sort-deals-${sortKey}`}
+      >
+        <span>{label}</span>
+        <Icon className="h-3.5 w-3.5" aria-hidden="true" />
+      </button>
+    </th>
   );
 }
