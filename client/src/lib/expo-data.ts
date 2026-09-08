@@ -3241,6 +3241,33 @@ export async function fetchBuildScheduleDeals(
     }
   });
 
+  // crm.deal.list reliably returns related company/contact IDs, but display
+  // names are absent on some portals. Resolve them after the bounded deal
+  // request so Gantt bars can show the client rather than the deal title.
+  const companyIds = deals
+    .map((deal) => readDealRowField(deal.raw, "COMPANY_ID"))
+    .filter((id): id is string | number => id !== undefined && id !== null);
+  const contactIds = deals
+    .filter((deal) => !deal.clientName)
+    .map((deal) => readDealRowField(deal.raw, "CONTACT_ID"))
+    .filter((id): id is string | number => id !== undefined && id !== null);
+  try {
+    const [companies, contacts] = await Promise.all([
+      fetchBitrixCompanyNames(companyIds),
+      fetchBitrixContactNames(contactIds),
+    ]);
+    deals.forEach((deal) => {
+      if (deal.clientName) return;
+      const companyId = String(readDealRowField(deal.raw, "COMPANY_ID") ?? "").trim();
+      const contactId = String(readDealRowField(deal.raw, "CONTACT_ID") ?? "").trim();
+      deal.clientName = companies.get(companyId) ?? contacts.get(contactId);
+    });
+  } catch (err) {
+    diagnostics.dealFailures.push(
+      `Не удалось загрузить названия клиентов: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+
   diagnostics.durationMs = Date.now() - start;
   return { byExpoId, deals, diagnostics };
 }

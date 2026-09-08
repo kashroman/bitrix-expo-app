@@ -381,6 +381,16 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     () => statusColorMap(allStages),
     [allStages],
   );
+  const stageSorts = useMemo(() => {
+    const sorts = new Map<string, number>();
+    allStages.forEach((stage) => {
+      const sort = stage.sort ?? Number.MAX_SAFE_INTEGER;
+      sorts.set(stage.id, sort);
+      const tail = stage.id.split(":").pop();
+      if (tail && !sorts.has(tail)) sorts.set(tail, sort);
+    });
+    return sorts;
+  }, [allStages]);
   const resetFilters = () => {
     const now = new Date();
     setActiveMonth(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -412,7 +422,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             stages={selectableStages}
             stagesLoading={stagesListQuery.isLoading}
             selectedStageIds={selectedStageIds}
-            defaultStageIds={defaultStageIds}
+            allStageIds={selectableStages.map((stage) => stage.id)}
             onChange={setSelectedStageIds}
           />
           <ManagerPicker
@@ -492,6 +502,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               selectedStageIds={sortedStageKey}
               stageTitles={stageTitles}
               stageColors={stageColors}
+              stageSorts={stageSorts}
               emptyMessage={
                 visibleExpos.length === 0
                   ? ganttIsFetchingNewMonth
@@ -587,6 +598,7 @@ function GanttView({
   selectedStageIds,
   stageTitles,
   stageColors,
+  stageSorts,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
@@ -601,6 +613,7 @@ function GanttView({
   selectedStageIds: string[];
   stageTitles?: Map<string, string>;
   stageColors?: Map<string, string>;
+  stageSorts?: Map<string, number>;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -664,6 +677,7 @@ function GanttView({
         }
         stageTitles={stageTitles}
         stageColors={stageColors}
+        stageSorts={stageSorts}
         selectedStageIds={selectedStageIds}
       />
       {dealsDiagnostics ? (
@@ -688,37 +702,36 @@ function DealStagePicker({
   stages,
   stagesLoading,
   selectedStageIds,
-  defaultStageIds,
+  allStageIds,
   onChange,
 }: {
   stages: StatusRef[];
   stagesLoading: boolean;
   selectedStageIds: string[];
-  defaultStageIds: string[];
+  allStageIds: string[];
   onChange: (next: string[]) => void;
 }) {
   const [open, setOpen] = useState(false);
-  // Order: keep currently-selected first, then any stages discovered from
-  // Bitrix. If Bitrix returned nothing, fall back to the user's current
-  // selection so they at least see what they have on.
+  // Always follow the funnel order reported by Bitrix, regardless of which
+  // stages are currently selected.
   const orderedStages = useMemo<Array<{ id: string; title: string; color?: string; category?: string }>>(() => {
     const seen = new Set<string>();
     const rows: Array<{ id: string; title: string; color?: string; category?: string }> = [];
+    stages
+      .slice()
+      .sort((a, b) =>
+        (a.sort ?? Number.MAX_SAFE_INTEGER) - (b.sort ?? Number.MAX_SAFE_INTEGER) ||
+        a.title.localeCompare(b.title, "ru-RU"),
+      )
+      .forEach((stage) => {
+        if (seen.has(stage.id)) return;
+        seen.add(stage.id);
+        rows.push({ id: stage.id, title: stage.title, color: stage.color, category: stage.categoryId });
+      });
     selectedStageIds.forEach((id) => {
       if (seen.has(id)) return;
       seen.add(id);
-      const fromCrm = stages.find((s) => s.id === id);
-      rows.push({
-        id,
-        title: fromCrm?.title ?? id,
-        color: fromCrm?.color,
-        category: fromCrm?.categoryId,
-      });
-    });
-    stages.forEach((s) => {
-      if (seen.has(s.id)) return;
-      seen.add(s.id);
-      rows.push({ id: s.id, title: s.title, color: s.color, category: s.categoryId });
+      rows.push({ id, title: id });
     });
     return rows;
   }, [stages, selectedStageIds]);
@@ -757,11 +770,11 @@ function DealStagePicker({
             <button
               type="button"
               className="text-primary hover:underline disabled:text-muted-foreground"
-              onClick={() => onChange([...defaultStageIds])}
-              disabled={defaultStageIds.length === 0}
+              onClick={() => onChange([...allStageIds])}
+              disabled={allStageIds.length === 0}
               data-testid="deal-stage-picker-defaults"
             >
-              По умолчанию
+              Выбрать все
             </button>
             <button
               type="button"
