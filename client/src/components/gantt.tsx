@@ -65,6 +65,25 @@ function dealSummaryLine(
   return parts.join(" · ");
 }
 
+export function dealBarLabel(deal: BuildScheduleDeal): string {
+  return deal.clientName || deal.title;
+}
+
+export function sortDealsByStage(
+  deals: BuildScheduleDeal[],
+  stageSorts?: Map<string, number>,
+): BuildScheduleDeal[] {
+  const sortOf = (deal: BuildScheduleDeal) =>
+    stageSorts?.get(deal.stageId) ??
+    stageSorts?.get(deal.stageTail) ??
+    Number.MAX_SAFE_INTEGER;
+  return deals.slice().sort((a, b) =>
+    sortOf(a) - sortOf(b) ||
+    dealBarLabel(a).localeCompare(dealBarLabel(b), "ru-RU") ||
+    a.id - b.id,
+  );
+}
+
 // Compute the visible row height required to stack `count` deal bars on top of
 // the phase background. Always ≥ the base day-row height.
 export function dealRowHeight(count: number, base: number = DAY_HEIGHT_BASE): number {
@@ -177,6 +196,7 @@ export function GanttTimeline({
   onSelectDeal,
   stageTitles,
   stageColors,
+  stageSorts,
   selectedStageIds,
 }: {
   expos: ExpoItem[];
@@ -189,6 +209,7 @@ export function GanttTimeline({
   onSelectDeal?: (deal: BuildScheduleDeal) => void;
   stageTitles?: Map<string, string>;
   stageColors?: Map<string, string>;
+  stageSorts?: Map<string, number>;
   selectedStageIds?: string[];
 }) {
   const [cursor, setCursor] = useState<Date>(() => {
@@ -314,7 +335,10 @@ export function GanttTimeline({
 
         {sortedExpos.map((expo, rowIndex) => {
           const phases = phasesOf(expo);
-          const deals = dealsByExpoId?.get(Number(expo.id)) ?? [];
+          const deals = sortDealsByStage(
+            dealsByExpoId?.get(Number(expo.id)) ?? [],
+            stageSorts,
+          );
           const rowHeight = dealRowHeight(deals.length);
           return (
             <ExpoRow
@@ -467,6 +491,7 @@ function ExpoRow({
               const top =
                 DEAL_STACK_PAD_Y + idx * (DEAL_BAR_HEIGHT + DEAL_BAR_GAP);
               const summary = dealSummaryLine(deal, stageTitles);
+              const label = dealBarLabel(deal);
               return (
                 <button
                   key={deal.id}
@@ -488,7 +513,7 @@ function ExpoRow({
                   title={summary}
                   data-testid={`gantt-deal-${deal.id}`}
                 >
-                  <span className="truncate">{summary}</span>
+                  <span className="truncate">{label}</span>
                 </button>
               );
             })

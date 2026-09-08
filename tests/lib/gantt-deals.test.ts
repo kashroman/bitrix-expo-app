@@ -1,11 +1,13 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  dealBarLabel,
   dealRowHeight,
   expoOverallRange,
+  sortDealsByStage,
   stageFallbackColor,
 } from "../../client/src/components/gantt.tsx";
-import type { ExpoItem } from "../../client/src/lib/expo-data.ts";
+import type { BuildScheduleDeal, ExpoItem } from "../../client/src/lib/expo-data.ts";
 import { stageDisplayColor } from "../../client/src/lib/stage-colors.ts";
 
 function expoWithDates(
@@ -92,5 +94,39 @@ describe("stageFallbackColor", () => {
 describe("stageDisplayColor", () => {
   it("prefers the native Bitrix24 stage color", () => {
     assert.equal(stageDisplayColor("9", "Строим", "#7052D3"), "#7052D3");
+  });
+});
+
+describe("Gantt deal labels and order", () => {
+  const deal = (id: number, stageId: string, clientName?: string): BuildScheduleDeal => ({
+    id,
+    expoIds: [1],
+    title: `Сделка ${id}`,
+    stageId,
+    stageTail: stageId,
+    status: undefined,
+    clientName,
+    raw: {},
+  });
+
+  it("uses the client name on a deal bar", () => {
+    assert.equal(dealBarLabel(deal(1, "BUILD", "ООО Клиент")), "ООО Клиент");
+    assert.equal(dealBarLabel(deal(1, "BUILD")), "Сделка 1");
+  });
+
+  it("orders deal bars by the funnel stage", () => {
+    const stageSorts = new Map([
+      ["FIRST", 10],
+      ["BUILD", 20],
+      ["WON", 30],
+    ]);
+    assert.deepEqual(
+      sortDealsByStage([
+        deal(3, "WON"),
+        deal(2, "BUILD"),
+        deal(1, "FIRST"),
+      ], stageSorts).map((item) => item.id),
+      [1, 2, 3],
+    );
   });
 });
