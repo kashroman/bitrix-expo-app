@@ -13,7 +13,7 @@ export const CALENDAR_FILTER_KEYS = {
 } as const;
 
 export const DEFAULT_STAGE_THRESHOLD_TITLE =
-  "Разработка и согласование дизайн-проекта";
+  "Согласование участия";
 
 export type CalendarFilterState = {
   monthKey: string;
@@ -62,15 +62,19 @@ export function readCalendarFilters(
 ): CalendarFilterState {
   const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
   const rawStages = params.get(CALENDAR_FILTER_KEYS.stages);
+  const stageIds = csv(rawStages);
   return {
     monthKey: monthKeyOf(
       monthFromKey(params.get(CALENDAR_FILTER_KEYS.month), now),
     ),
-    stageIds: csv(rawStages),
+    stageIds,
     managerIds: csv(params.get(CALENDAR_FILTER_KEYS.managers)),
     onlyWithDeals: bool(params.get(CALENDAR_FILTER_KEYS.onlyWithDeals), true),
     includeLost: bool(params.get(CALENDAR_FILTER_KEYS.includeLost), false),
-    hasExplicitStages: rawStages !== null,
+    // Older versions could persist an empty calStages value after failing to
+    // resolve the former default stage. Treat it as unset so the current
+    // defaults are applied on the next calendar load.
+    hasExplicitStages: stageIds.length > 0,
   };
 }
 
@@ -146,16 +150,25 @@ export function defaultStageIdsFromThreshold(
 ): string[] {
   const threshold = normalizeStageTitle(thresholdTitle);
   const ids: string[] = [];
+  let thresholdFound = false;
   for (const group of sortedGroups(stages)) {
     const index = group.findIndex(
       (stage) => normalizeStageTitle(stage.title) === threshold,
     );
     if (index < 0) continue;
-    group.slice(index).forEach((stage) => {
+    thresholdFound = true;
+    group.slice(index + 1).forEach((stage) => {
       if (!isLostStage(stage) && !ids.includes(stage.id)) ids.push(stage.id);
     });
   }
-  return ids;
+
+  // A Bitrix stage can be renamed without its ID changing. The configured
+  // title-based threshold should not leave the calendar without any selected
+  // stages in that case. Use every non-lost stage until a new explicit
+  // threshold is configured; this also includes stages added to the funnel.
+  return thresholdFound
+    ? ids
+    : stages.filter((stage) => !isLostStage(stage)).map((stage) => stage.id);
 }
 
 export function lostStageIdsForThreshold(
@@ -164,16 +177,20 @@ export function lostStageIdsForThreshold(
 ): string[] {
   const threshold = normalizeStageTitle(thresholdTitle);
   const ids: string[] = [];
+  let thresholdFound = false;
   for (const group of sortedGroups(stages)) {
     const index = group.findIndex(
       (stage) => normalizeStageTitle(stage.title) === threshold,
     );
     if (index < 0) continue;
-    group.slice(index).forEach((stage) => {
+    thresholdFound = true;
+    group.slice(index + 1).forEach((stage) => {
       if (isLostStage(stage) && !ids.includes(stage.id)) ids.push(stage.id);
     });
   }
-  return ids;
+  return thresholdFound
+    ? ids
+    : stages.filter(isLostStage).map((stage) => stage.id);
 }
 
 export function filterDealsByManagers(

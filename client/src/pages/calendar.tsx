@@ -46,7 +46,6 @@ import { formatDateRange, parseDate, formatValue } from "@/lib/format";
 import { queryClient } from "@/lib/queryClient";
 import { isInsideBitrix, openBitrixPath } from "@/lib/bitrix";
 import {
-  DEFAULT_STAGE_THRESHOLD_TITLE,
   defaultStageIdsFromThreshold,
   filterDealsByManagers,
   isLostStage,
@@ -382,12 +381,6 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     () => statusColorMap(allStages),
     [allStages],
   );
-  const thresholdMissing =
-    stageDefaultsResolved &&
-    !initialFilters.hasExplicitStages &&
-    !stagesListQuery.isLoading &&
-    defaultStageIds.length === 0;
-
   const resetFilters = () => {
     const now = new Date();
     setActiveMonth(new Date(now.getFullYear(), now.getMonth(), 1));
@@ -470,16 +463,6 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
           </Button>
         </CardContent>
       </Card>
-
-      {thresholdMissing ? (
-        <Card className="mb-4 border-amber-300 bg-amber-50">
-          <CardContent className="p-3 text-sm text-amber-900">
-            В Bitrix24 не найдена стадия «{DEFAULT_STAGE_THRESHOLD_TITLE}».
-            Выберите стадии вручную; приложение не будет подставлять другие
-            стадии автоматически.
-          </CardContent>
-        </Card>
-      ) : null}
 
       <BulkCountsBanner state={bulkCounts} expoCount={counterExpoIds.length} />
 
