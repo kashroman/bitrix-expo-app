@@ -16,8 +16,8 @@ import type {
 const stages: StatusRef[] = [
   { id: "NEW", title: "Новая", categoryId: "0", sort: 10, semantic: "P" },
   {
-    id: "DESIGN",
-    title: "Разработка и согласование дизайн-проекта",
+    id: "AGREEMENT",
+    title: "Согласование участия",
     categoryId: "0",
     sort: 20,
     semantic: "P",
@@ -33,6 +33,12 @@ describe("calendar filter URL state", () => {
     assert.equal(state.monthKey, "2026-08");
     assert.equal(state.onlyWithDeals, true);
     assert.equal(state.includeLost, false);
+    assert.equal(state.hasExplicitStages, false);
+  });
+
+  it("treats an empty saved stage filter as unset", () => {
+    const state = readCalendarFilters("?calStages=");
+    assert.deepEqual(state.stageIds, []);
     assert.equal(state.hasExplicitStages, false);
   });
 
@@ -55,9 +61,8 @@ describe("calendar filter URL state", () => {
 });
 
 describe("default deal stages", () => {
-  it("selects the threshold and every later non-lost stage", () => {
+  it("selects every non-lost stage after the threshold", () => {
     assert.deepEqual(defaultStageIdsFromThreshold(stages), [
-      "DESIGN",
       "BUILD",
       "WON",
     ]);
@@ -68,8 +73,14 @@ describe("default deal stages", () => {
     assert.equal(isLostStage(stages.at(-1)!), true);
   });
 
-  it("does not guess when the configured threshold is missing", () => {
-    assert.deepEqual(defaultStageIdsFromThreshold(stages, "Несуществующая"), []);
+  it("falls back to every non-lost stage when the threshold was renamed", () => {
+    assert.deepEqual(defaultStageIdsFromThreshold(stages, "Несуществующая"), [
+      "NEW",
+      "AGREEMENT",
+      "BUILD",
+      "WON",
+    ]);
+    assert.deepEqual(lostStageIdsForThreshold(stages, "Несуществующая"), ["LOSE"]);
   });
 });
 
