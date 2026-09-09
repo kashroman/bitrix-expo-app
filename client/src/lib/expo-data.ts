@@ -3052,10 +3052,6 @@ function extractDealManager(row: Record<string, unknown>): string | undefined {
   if (typeof name === "string" && name.trim()) parts.push(name.trim());
   if (typeof last === "string" && last.trim()) parts.push(last.trim());
   if (parts.length) return parts.join(" ");
-  const id = readDealRowField(row, "ASSIGNED_BY_ID");
-  if (id !== undefined && id !== null && String(id).trim()) {
-    return `ID ${String(id).trim()}`;
-  }
   return undefined;
 }
 
@@ -3251,20 +3247,28 @@ export async function fetchBuildScheduleDeals(
     .filter((deal) => !deal.clientName)
     .map((deal) => readDealRowField(deal.raw, "CONTACT_ID"))
     .filter((id): id is string | number => id !== undefined && id !== null);
+  const assigneeIds = deals
+    .map((deal) => deal.assignedById)
+    .filter((id): id is string => Boolean(id));
   try {
-    const [companies, contacts] = await Promise.all([
+    const [companies, contacts, assignees] = await Promise.all([
       fetchBitrixCompanyNames(companyIds),
       fetchBitrixContactNames(contactIds),
+      fetchBitrixUserNames(assigneeIds),
     ]);
     deals.forEach((deal) => {
-      if (deal.clientName) return;
-      const companyId = String(readDealRowField(deal.raw, "COMPANY_ID") ?? "").trim();
-      const contactId = String(readDealRowField(deal.raw, "CONTACT_ID") ?? "").trim();
-      deal.clientName = companies.get(companyId) ?? contacts.get(contactId);
+      if (!deal.clientName) {
+        const companyId = String(readDealRowField(deal.raw, "COMPANY_ID") ?? "").trim();
+        const contactId = String(readDealRowField(deal.raw, "CONTACT_ID") ?? "").trim();
+        deal.clientName = companies.get(companyId) ?? contacts.get(contactId);
+      }
+      if (deal.assignedById) {
+        deal.manager = assignees.get(deal.assignedById) ?? deal.manager;
+      }
     });
   } catch (err) {
     diagnostics.dealFailures.push(
-      `Не удалось загрузить названия клиентов: ${err instanceof Error ? err.message : String(err)}`,
+      `Не удалось загрузить названия клиентов и ответственных: ${err instanceof Error ? err.message : String(err)}`,
     );
   }
 
