@@ -102,6 +102,16 @@ jobs:
             --environment "BITRIX_PORTAL_URL=$BITRIX_PORTAL_URL" \
             --environment "COMPANY_NAME=${COMPANY_NAME:-interpro.pro}"
 
+      - name: Allow public access to container
+        env:
+          YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
+          CONTAINER_NAME: ${{ vars.YC_CONTAINER_NAME }}
+        run: |
+          set -euo pipefail
+          yc serverless container allow-unauthenticated-invoke \
+            --folder-id "$YC_FOLDER_ID" \
+            --name "$CONTAINER_NAME"
+
       - name: Smoke-test
         env:
           YC_FOLDER_ID: ${{ vars.YC_FOLDER_ID }}
