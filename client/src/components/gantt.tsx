@@ -135,6 +135,24 @@ const MONTH_NAMES_RU = [
 const DAY_HEIGHT_BASE = 56;
 
 type Phase = { key: "mount" | "expo" | "dismantle"; start: Date; end: Date };
+type AccreditationDeadline = { key: string; label: string; date: Date; detail?: string };
+
+export function accreditationDeadlines(expo: ExpoItem): AccreditationDeadline[] {
+  const data = expo.accreditation;
+  if (!data) return [];
+  const items: Array<[string, string, string | undefined, string | undefined]> = [
+    ["standard", "Базовый срок", data.standardDeadline, undefined],
+    ["single", "Одноэтажный", data.singleStoreyDeadline, undefined],
+    ["double", "Двухэтажный", data.doubleStoreyDeadline, undefined],
+    ["suspension", "Подвес", data.suspensionDeadline, undefined],
+    ["rate1", "Коэффициент", data.surchargeStart, data.surchargeRate],
+    ["rate2", "Коэффициент", data.secondSurchargeStart, data.secondSurchargeRate],
+  ];
+  return items.flatMap(([key, label, raw, detail]) => {
+    const date = parseDate(raw);
+    return date ? [{ key, label, date, detail }] : [];
+  });
+}
 
 function stripTime(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), d.getDate());
@@ -198,6 +216,7 @@ export function GanttTimeline({
   stageColors,
   stageSorts,
   selectedStageIds,
+  showAccreditation,
 }: {
   expos: ExpoItem[];
   onSelect: (expo: ExpoItem) => void;
@@ -211,6 +230,7 @@ export function GanttTimeline({
   stageColors?: Map<string, string>;
   stageSorts?: Map<string, number>;
   selectedStageIds?: string[];
+  showAccreditation?: boolean;
 }) {
   const [cursor, setCursor] = useState<Date>(() => {
     if (initialMonth) return monthStartOf(initialMonth.getFullYear(), initialMonth.getMonth());
@@ -339,7 +359,7 @@ export function GanttTimeline({
             dealsByExpoId?.get(Number(expo.id)) ?? [],
             stageSorts,
           );
-          const rowHeight = dealRowHeight(deals.length);
+          const rowHeight = Math.max(dealRowHeight(deals.length), showAccreditation ? 104 : DAY_HEIGHT_BASE);
           return (
             <ExpoRow
               key={expo.id}
@@ -356,6 +376,7 @@ export function GanttTimeline({
               stageTitles={stageTitles}
               stageColors={stageColors}
               renderRight={renderRight}
+              showAccreditation={showAccreditation}
             />
           );
         })}
@@ -384,6 +405,7 @@ function ExpoRow({
   stageTitles,
   stageColors,
   renderRight,
+  showAccreditation,
 }: {
   expo: ExpoItem;
   rowIndex: number;
@@ -398,10 +420,12 @@ function ExpoRow({
   stageTitles?: Map<string, string>;
   stageColors?: Map<string, string>;
   renderRight?: (expo: ExpoItem) => React.ReactNode;
+  showAccreditation?: boolean;
 }) {
   const dealList = deals ?? [];
   const dealRange = dealList.length > 0 ? expoOverallRange(expo) : undefined;
   const dealClip = dealRange ? clipToMonth(dealRange, year, month) : undefined;
+  const deadlines = showAccreditation ? accreditationDeadlines(expo) : [];
   return (
     <div
       className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
@@ -427,6 +451,17 @@ function ExpoRow({
           </div>
         ) : null}
         {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
+        {deadlines.length > 0 ? (
+          <div className="mt-1 space-y-0.5 text-[11px] leading-tight text-muted-foreground">
+            {deadlines.map((deadline) => (
+              <div key={deadline.key} className="truncate" title={`${deadline.label}: ${formatShort(deadline.date)}${deadline.detail ? ` · ×${deadline.detail}` : ""}`}>
+                {deadline.label}: {formatShort(deadline.date)}{deadline.detail ? ` · ×${deadline.detail}` : ""}
+              </div>
+            ))}
+          </div>
+        ) : showAccreditation ? (
+          <div className="mt-1 text-[11px] text-muted-foreground">Сроки не заполнены</div>
+        ) : null}
       </button>
       <div
         className="relative col-span-full -col-start-2 row-span-1"
@@ -472,6 +507,21 @@ function ExpoRow({
               }}
               title={`${phaseLabel(phase.key)}: ${formatShort(phase.start)} — ${formatShort(phase.end)}`}
               data-testid={`gantt-phase-${expo.id}-${phase.key}`}
+            />
+          );
+        })}
+
+        {deadlines.map((deadline) => {
+          const clip = clipToMonth({ start: deadline.date, end: deadline.date }, year, month);
+          if (!clip) return null;
+          const left = ((clip.startDay - 1) / totalDays) * 100;
+          return (
+            <div
+              key={`accreditation-${deadline.key}`}
+              className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-violet-600"
+              style={{ left: `${left}%` }}
+              title={`${deadline.label}: ${formatShort(deadline.date)}${deadline.detail ? ` · коэффициент ×${deadline.detail}` : ""}`}
+              data-testid={`gantt-accreditation-${expo.id}-${deadline.key}`}
             />
           );
         })}

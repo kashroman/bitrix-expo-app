@@ -27,6 +27,11 @@ import {
   getExpoFieldDiscovery,
   getExpoFieldsSync,
 } from "./expo-fields";
+import {
+  accreditationSelectCodes,
+  getAccreditationFieldMap,
+  getAccreditationFieldMapSync,
+} from "./expo-accreditation-fields";
 import { fetchLinkedEntities, LinkFieldChoice } from "./expo-link";
 
 export type ExpoItem = {
@@ -44,6 +49,18 @@ export type ExpoItem = {
   expoEnd?: string;
   dismantleStart?: string;
   dismantleEnd?: string;
+  accreditation?: {
+    standardDeadline?: string;
+    surchargeStart?: string;
+    surchargeRate?: string;
+    secondSurchargeStart?: string;
+    secondSurchargeRate?: string;
+    singleStoreyDeadline?: string;
+    doubleStoreyDeadline?: string;
+    suspensionDeadline?: string;
+    sourceUrl?: string;
+    note?: string;
+  };
   raw: CrmItem;
 };
 
@@ -235,6 +252,19 @@ export function normalizeExpo(item: CrmItem): ExpoItem {
     EXPO_DATE_FIELDS_ORIGINAL.dismantleEnd,
   );
   const responsible = pick(item, "assignedById", "ASSIGNED_BY_ID");
+  const accreditationFields = getAccreditationFieldMapSync();
+  const accreditation = {
+    standardDeadline: normalizeDateValue(pick(item, accreditationFields.standardDeadline), false),
+    surchargeStart: normalizeDateValue(pick(item, accreditationFields.surchargeStart), false),
+    surchargeRate: pick(item, accreditationFields.surchargeRate) as string | undefined,
+    secondSurchargeStart: normalizeDateValue(pick(item, accreditationFields.secondSurchargeStart), false),
+    secondSurchargeRate: pick(item, accreditationFields.secondSurchargeRate) as string | undefined,
+    singleStoreyDeadline: normalizeDateValue(pick(item, accreditationFields.singleStoreyDeadline), false),
+    doubleStoreyDeadline: normalizeDateValue(pick(item, accreditationFields.doubleStoreyDeadline), false),
+    suspensionDeadline: normalizeDateValue(pick(item, accreditationFields.suspensionDeadline), false),
+    sourceUrl: pick(item, accreditationFields.sourceUrl) as string | undefined,
+    note: pick(item, accreditationFields.note) as string | undefined,
+  };
 
   return {
     id,
@@ -251,11 +281,13 @@ export function normalizeExpo(item: CrmItem): ExpoItem {
     expoEnd: normalizeDateValue(expoEndRaw, false),
     dismantleStart: normalizeDateValue(dismantleStartRaw, true),
     dismantleEnd: normalizeDateValue(dismantleEndRaw, false),
+    accreditation,
     raw: item,
   };
 }
 
 export async function fetchExpoList(): Promise<ExpoItem[]> {
+  await getAccreditationFieldMap().catch(() => undefined);
   const items = await listAllBx<CrmItem>("crm.item.list", {
     entityTypeId: EXPO_ENTITY_TYPE_ID,
     select: ["*", "ufCrm*"],
@@ -386,8 +418,9 @@ function buildMonthExpoSelect(): string[] {
     EXPO_DATE_FIELDS.dismantleEnd,
   ];
   const dynamic = expoDateSelectCodes();
+  const accreditation = accreditationSelectCodes();
   const merged = new Set<string>(
-    [...base, ...dynamic].filter((s): s is string => Boolean(s)),
+    [...base, ...dynamic, ...accreditation].filter((s): s is string => Boolean(s)),
   );
   return Array.from(merged);
 }
@@ -528,6 +561,7 @@ export async function fetchExposByMonth(
   // on failure — the static EXPO_DATE_FIELDS pins still work.
   try {
     await getExpoFieldDiscovery();
+    await getAccreditationFieldMap();
   } catch {
     // discovery already records the error in its own notes
   }

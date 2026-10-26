@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accreditationDeadlines,
   dealBarLabel,
   dealRowHeight,
   expoOverallRange,
@@ -127,6 +128,35 @@ describe("Gantt deal labels and order", () => {
         deal(1, "FIRST"),
       ], stageSorts).map((item) => item.id),
       [1, 2, 3],
+    );
+  });
+});
+
+describe("accreditationDeadlines", () => {
+  it("shows only completed accreditation dates and keeps the coefficient with its date", () => {
+    const expo = {
+      id: 1,
+      title: "Expo #1",
+      accreditation: {
+        standardDeadline: "2026-05-01",
+        surchargeStart: "2026-05-15",
+        surchargeRate: "1.5",
+        suspensionDeadline: "",
+      },
+      raw: {},
+    } as ExpoItem;
+
+    assert.deepEqual(
+      accreditationDeadlines(expo).map(({ key, label, date, detail }) => ({
+        key,
+        label,
+        date: date.toISOString().slice(0, 10),
+        detail,
+      })),
+      [
+        { key: "standard", label: "Базовый срок", date: "2026-05-01", detail: undefined },
+        { key: "rate1", label: "Коэффициент", date: "2026-05-15", detail: "1.5" },
+      ],
     );
   });
 });

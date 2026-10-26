@@ -124,6 +124,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     initialFilters.onlyWithDeals,
   );
   const [includeLost, setIncludeLost] = useState(initialFilters.includeLost);
+  const [showAccreditation, setShowAccreditation] = useState(false);
   const [stageDefaultsResolved, setStageDefaultsResolved] = useState(
     initialFilters.hasExplicitStages,
   );
@@ -448,6 +449,14 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
             />
             Показывать проигранные
           </label>
+          <label className="flex items-center gap-2 text-sm">
+            <Checkbox
+              checked={showAccreditation}
+              onCheckedChange={(checked) => setShowAccreditation(checked === true)}
+              data-testid="filter-show-accreditation"
+            />
+            Показать сроки аккредитации
+          </label>
           <Button
             variant="ghost"
             size="sm"
@@ -503,6 +512,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               stageTitles={stageTitles}
               stageColors={stageColors}
               stageSorts={stageSorts}
+              showAccreditation={showAccreditation}
               emptyMessage={
                 visibleExpos.length === 0
                   ? ganttIsFetchingNewMonth
@@ -599,6 +609,7 @@ function GanttView({
   stageTitles,
   stageColors,
   stageSorts,
+  showAccreditation = false,
 }: {
   expos: ExpoItem[];
   activeMonth: Date;
@@ -614,6 +625,7 @@ function GanttView({
   stageTitles?: Map<string, string>;
   stageColors?: Map<string, string>;
   stageSorts?: Map<string, number>;
+  showAccreditation?: boolean;
 }) {
   const overlapping = useMemo(
     () => exposOverlappingMonth(expos, activeMonth),
@@ -679,6 +691,7 @@ function GanttView({
         stageColors={stageColors}
         stageSorts={stageSorts}
         selectedStageIds={selectedStageIds}
+        showAccreditation={showAccreditation}
       />
       {dealsDiagnostics ? (
         <div
