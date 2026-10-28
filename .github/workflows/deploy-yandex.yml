@@ -65,6 +65,9 @@ jobs:
           printf '%s' "$YC_SA_JSON_CREDENTIALS" > /tmp/sa-key.json
           yc config set service-account-key /tmp/sa-key.json
           yc config set folder-id "$YC_FOLDER_ID"
+          # The CI runner does not run `yc init`; explicitly set the public
+          # Cloud API endpoint so service-specific endpoints can be resolved.
+          yc config set endpoint api.cloud.yandex.net:443
           yc config set format json
 
       - name: Build and push image
