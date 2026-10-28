@@ -1,6 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
+  accreditationDeadlineGroups,
   accreditationDeadlines,
   dealBarLabel,
   dealRowHeight,
@@ -132,31 +133,44 @@ describe("Gantt deal labels and order", () => {
   });
 });
 
-describe("accreditationDeadlines", () => {
-  it("shows only completed accreditation dates and keeps the coefficient with its date", () => {
+describe("accreditation deadlines", () => {
+  it("groups only completed deadlines by construction type and coefficient", () => {
     const expo = {
       id: 1,
       title: "Expo #1",
       accreditation: {
-        standardDeadline: "2026-05-01",
-        surchargeStart: "2026-05-15",
-        surchargeRate: "1.5",
-        suspensionDeadline: "",
+        singleStorey: { base: "2026-05-01", fifty: "2026-05-15" },
+        outdoor: { hundred: "2026-05-20" },
+        suspension: {},
       },
       raw: {},
     } as ExpoItem;
 
     assert.deepEqual(
-      accreditationDeadlines(expo).map(({ key, label, date, detail }) => ({
-        key,
-        label,
-        date: date.toISOString().slice(0, 10),
-        detail,
+      accreditationDeadlineGroups(expo).map((group) => ({
+        key: group.key,
+        dates: group.deadlines.map((deadline) => ({
+          key: deadline.key,
+          label: deadline.label,
+          date: deadline.date.toISOString().slice(0, 10),
+        })),
       })),
       [
-        { key: "standard", label: "Базовый срок", date: "2026-05-01", detail: undefined },
-        { key: "rate1", label: "Коэффициент", date: "2026-05-15", detail: "1.5" },
+        {
+          key: "singleStorey",
+          dates: [
+            { key: "singleStorey-base", label: "0%", date: "2026-05-01" },
+            { key: "singleStorey-fifty", label: "+50%", date: "2026-05-15" },
+          ],
+        },
+        {
+          key: "outdoor",
+          dates: [
+            { key: "outdoor-hundred", label: "+100%", date: "2026-05-20" },
+          ],
+        },
       ],
     );
+    assert.equal(accreditationDeadlines(expo).length, 3);
   });
 });

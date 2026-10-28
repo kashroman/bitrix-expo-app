@@ -8,6 +8,11 @@ import {
   stageFallbackColor,
 } from "@/lib/stage-colors";
 import { BuildScheduleDeal, ExpoItem } from "@/lib/expo-data";
+import {
+  ACCREDITATION_GROUPS,
+  AccreditationGroupKey,
+  AccreditationLevel,
+} from "@/lib/expo-accreditation-fields";
 import { parseDate } from "@/lib/format";
 import { Button } from "@/components/ui/button";
 import {
@@ -135,23 +140,52 @@ const MONTH_NAMES_RU = [
 const DAY_HEIGHT_BASE = 56;
 
 type Phase = { key: "mount" | "expo" | "dismantle"; start: Date; end: Date };
-type AccreditationDeadline = { key: string; label: string; date: Date; detail?: string };
+type AccreditationDeadline = {
+  key: string;
+  level: AccreditationLevel;
+  label: string;
+  date: Date;
+};
 
-export function accreditationDeadlines(expo: ExpoItem): AccreditationDeadline[] {
+export type AccreditationDeadlineGroup = {
+  key: AccreditationGroupKey;
+  label: string;
+  deadlines: AccreditationDeadline[];
+};
+
+const ACCREDITATION_LEVELS: Array<{ key: AccreditationLevel; label: string; className: string }> = [
+  { key: "base", label: "0%", className: "bg-emerald-200 border-emerald-400 text-emerald-950" },
+  { key: "fifty", label: "+50%", className: "bg-amber-200 border-amber-400 text-amber-950" },
+  { key: "hundred", label: "+100%", className: "bg-red-200 border-red-400 text-red-950" },
+];
+
+function levelMeta(level: AccreditationLevel) {
+  return ACCREDITATION_LEVELS.find((item) => item.key === level)!;
+}
+
+export function accreditationDeadlineGroups(expo: ExpoItem): AccreditationDeadlineGroup[] {
   const data = expo.accreditation;
   if (!data) return [];
-  const items: Array<[string, string, string | undefined, string | undefined]> = [
-    ["standard", "Базовый срок", data.standardDeadline, undefined],
-    ["single", "Одноэтажный", data.singleStoreyDeadline, undefined],
-    ["double", "Двухэтажный", data.doubleStoreyDeadline, undefined],
-    ["suspension", "Подвес", data.suspensionDeadline, undefined],
-    ["rate1", "Коэффициент", data.surchargeStart, data.surchargeRate],
-    ["rate2", "Коэффициент", data.secondSurchargeStart, data.secondSurchargeRate],
-  ];
-  return items.flatMap(([key, label, raw, detail]) => {
-    const date = parseDate(raw);
-    return date ? [{ key, label, date, detail }] : [];
+  return ACCREDITATION_GROUPS.flatMap((group) => {
+    const source = data[group.key];
+    const deadlines = ACCREDITATION_LEVELS.flatMap((level) => {
+      const date = parseDate(source?.[level.key]);
+      return date
+        ? [{
+            key: `${group.key}-${level.key}`,
+            level: level.key,
+            label: level.label,
+            date,
+          }]
+        : [];
+    });
+    return deadlines.length ? [{ key: group.key, label: group.label, deadlines }] : [];
   });
+}
+
+// Kept as a compact flat view for code which only needs all deadline points.
+export function accreditationDeadlines(expo: ExpoItem): AccreditationDeadline[] {
+  return accreditationDeadlineGroups(expo).flatMap((group) => group.deadlines);
 }
 
 function stripTime(d: Date): Date {
@@ -359,7 +393,12 @@ export function GanttTimeline({
             dealsByExpoId?.get(Number(expo.id)) ?? [],
             stageSorts,
           );
-          const rowHeight = Math.max(dealRowHeight(deals.length), showAccreditation ? 104 : DAY_HEIGHT_BASE);
+          const accreditationRows = showAccreditation ? accreditationDeadlineGroups(expo).length : 0;
+          const accreditationHeight = accreditationRows ? 8 + accreditationRows * 22 : 0;
+          const rowHeight = Math.max(
+            dealRowHeight(deals.length) + accreditationHeight,
+            DAY_HEIGHT_BASE + accreditationHeight,
+          );
           return (
             <ExpoRow
               key={expo.id}
@@ -425,7 +464,9 @@ function ExpoRow({
   const dealList = deals ?? [];
   const dealRange = dealList.length > 0 ? expoOverallRange(expo) : undefined;
   const dealClip = dealRange ? clipToMonth(dealRange, year, month) : undefined;
-  const deadlines = showAccreditation ? accreditationDeadlines(expo) : [];
+  const accreditationGroups = showAccreditation ? accreditationDeadlineGroups(expo) : [];
+  const deadlineRowsHeight = accreditationGroups.length ? 8 + accreditationGroups.length * 22 : 0;
+  const accreditationTop = Math.max(0, rowHeight - deadlineRowsHeight);
   return (
     <div
       className={`grid min-w-0 items-stretch border-b ${rowIndex % 2 === 1 ? "bg-muted/20" : ""}`}
@@ -451,16 +492,15 @@ function ExpoRow({
           </div>
         ) : null}
         {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
-        {deadlines.length > 0 ? (
+        {accreditationGroups.length > 0 ? (
           <div className="mt-1 space-y-0.5 text-[11px] leading-tight text-muted-foreground">
-            {deadlines.map((deadline) => (
-              <div key={deadline.key} className="truncate" title={`${deadline.label}: ${formatShort(deadline.date)}${deadline.detail ? ` · ×${deadline.detail}` : ""}`}>
-                {deadline.label}: {formatShort(deadline.date)}{deadline.detail ? ` · ×${deadline.detail}` : ""}
+            {accreditationGroups.map((group) => (
+              <div key={group.key} className="flex items-center gap-1 truncate" title={group.label}>
+                <AccreditationIcon group={group.key} />
+                <span className="truncate">{group.label}</span>
               </div>
             ))}
           </div>
-        ) : showAccreditation ? (
-          <div className="mt-1 text-[11px] text-muted-foreground">Сроки не заполнены</div>
         ) : null}
       </button>
       <div
@@ -511,17 +551,35 @@ function ExpoRow({
           );
         })}
 
-        {deadlines.map((deadline) => {
-          const clip = clipToMonth({ start: deadline.date, end: deadline.date }, year, month);
-          if (!clip) return null;
-          const left = ((clip.startDay - 1) / totalDays) * 100;
+        {accreditationGroups.flatMap((group, groupIndex) =>
+          group.deadlines.map((deadline) => {
+            const clip = clipToMonth({ start: deadline.date, end: deadline.date }, year, month);
+            if (!clip) return null;
+            const left = ((clip.startDay - 1) / totalDays) * 100;
+            const meta = levelMeta(deadline.level);
+            const top = accreditationTop + 4 + groupIndex * 22;
+            return (
+              <div
+                key={`accreditation-${deadline.key}`}
+                className={`pointer-events-none absolute z-[5] flex h-[16px] min-w-[16px] -translate-x-1/2 items-center justify-center rounded border px-0.5 text-[8px] font-semibold shadow-sm ${meta.className}`}
+                style={{ left: `${left}%`, top: `${top}px` }}
+                title={`${group.label}: ${meta.label} — ${formatShort(deadline.date)}`}
+                data-testid={`gantt-accreditation-${expo.id}-${deadline.key}`}
+              >
+                {meta.label}
+              </div>
+            );
+          }),
+        )}
+
+        {accreditationGroups.map((group, groupIndex) => {
+          const top = accreditationTop + 11 + groupIndex * 22;
           return (
             <div
-              key={`accreditation-${deadline.key}`}
-              className="pointer-events-none absolute inset-y-0 z-[5] w-px bg-violet-600"
-              style={{ left: `${left}%` }}
-              title={`${deadline.label}: ${formatShort(deadline.date)}${deadline.detail ? ` · коэффициент ×${deadline.detail}` : ""}`}
-              data-testid={`gantt-accreditation-${expo.id}-${deadline.key}`}
+              key={`accreditation-line-${group.key}`}
+              className="pointer-events-none absolute z-[4] h-px bg-muted-foreground/25"
+              style={{ left: "0%", right: "0%", top: `${top}px` }}
+              aria-hidden
             />
           );
         })}
@@ -570,6 +628,30 @@ function ExpoRow({
           : null}
       </div>
     </div>
+  );
+}
+
+function AccreditationIcon({ group }: { group: AccreditationGroupKey }) {
+  if (group === "singleStorey" || group === "doubleStorey") {
+    return (
+      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-muted-foreground/45 text-[10px] font-semibold text-foreground">
+        {group === "singleStorey" ? "1" : "2"}
+      </span>
+    );
+  }
+  if (group === "outdoor") {
+    return (
+      <svg className="h-4 w-4 shrink-0 text-amber-600" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M3 13.5h14M6 13.5a4 4 0 0 1 8 0" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx="10" cy="8" r="2.4" fill="currentColor" opacity=".85" />
+        <path d="M10 3.5v1M5.8 5.3l.7.7M14.2 5.3l-.7.7M4.2 9h1M14.8 9h1" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="h-4 w-4 shrink-0 text-slate-600" viewBox="0 0 20 20" aria-hidden="true">
+      {[3, 7, 11, 15].map((x) => <g key={x}><path d={`M${x} 3v7`} stroke="currentColor" strokeWidth="1.2" /><circle cx={x} cy="3" r="1.4" fill="none" stroke="currentColor" strokeWidth="1.1" /><path d={`M${x - 1.2} 10h2.4`} stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></g>)}
+    </svg>
   );
 }
 

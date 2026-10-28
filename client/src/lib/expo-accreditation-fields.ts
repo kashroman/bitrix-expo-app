@@ -1,24 +1,57 @@
 import { CrmField } from "./bitrix";
 import { getExpoFieldDiscovery } from "./expo-fields";
 
-// These labels are the contract with the "Выставка" smart process. They are
-// deliberately exact: a deadline must never be guessed from a similarly
-// named field. The accreditation manager fills these fields manually.
+// Exact labels of manually maintained fields in the “Выставка” smart process.
+// Matching only by the complete label prevents a deadline from being guessed.
 export const ACCREDITATION_FIELD_TITLES = {
-  standardDeadline: "Аккредитация: базовый срок",
-  surchargeStart: "Аккредитация: начало коэффициента 1",
-  surchargeRate: "Аккредитация: коэффициент 1",
-  secondSurchargeStart: "Аккредитация: начало коэффициента 2",
-  secondSurchargeRate: "Аккредитация: коэффициент 2",
-  singleStoreyDeadline: "Аккредитация: одноэтажный стенд",
-  doubleStoreyDeadline: "Аккредитация: двухэтажный стенд",
-  suspensionDeadline: "Аккредитация: подвес",
-  sourceUrl: "Аккредитация: источник",
-  note: "Аккредитация: комментарий",
+  singleStoreyBase: "Аккредитация одноэтажного стенда",
+  singleStorey50: "Аккредитация одноэтажного стенда +50%",
+  singleStorey100: "Аккредитация одноэтажного стенда +100%",
+  doubleStoreyBase: "Аккредитация двухэтажного стенда",
+  doubleStorey50: "Аккредитация двухэтажного стенда +50%",
+  doubleStorey100: "Аккредитация двухэтажного стенда +100%",
+  outdoorBase: "Аккредитация уличной экспозиции",
+  outdoor50: "Аккредитация уличной экспозиции +50%",
+  outdoor100: "Аккредитация уличной экспозиции +100%",
+  suspensionBase: "Аккредитация подвесов",
+  suspension50: "Аккредитация подвесов +50%",
+  suspension100: "Аккредитация подвесов +100%",
 } as const;
 
 export type AccreditationFieldKey = keyof typeof ACCREDITATION_FIELD_TITLES;
 export type AccreditationFieldMap = Partial<Record<AccreditationFieldKey, string>>;
+
+export type AccreditationGroupKey = "singleStorey" | "doubleStorey" | "outdoor" | "suspension";
+export type AccreditationLevel = "base" | "fifty" | "hundred";
+
+export type AccreditationGroup = {
+  key: AccreditationGroupKey;
+  label: string;
+  fields: Record<AccreditationLevel, AccreditationFieldKey>;
+};
+
+export const ACCREDITATION_GROUPS: AccreditationGroup[] = [
+  {
+    key: "singleStorey",
+    label: "Одноэтажный стенд",
+    fields: { base: "singleStoreyBase", fifty: "singleStorey50", hundred: "singleStorey100" },
+  },
+  {
+    key: "doubleStorey",
+    label: "Двухэтажный стенд",
+    fields: { base: "doubleStoreyBase", fifty: "doubleStorey50", hundred: "doubleStorey100" },
+  },
+  {
+    key: "outdoor",
+    label: "Уличная экспозиция",
+    fields: { base: "outdoorBase", fifty: "outdoor50", hundred: "outdoor100" },
+  },
+  {
+    key: "suspension",
+    label: "Подвесы",
+    fields: { base: "suspensionBase", fifty: "suspension50", hundred: "suspension100" },
+  },
+];
 
 const normal = (value?: string) =>
   (value ?? "")

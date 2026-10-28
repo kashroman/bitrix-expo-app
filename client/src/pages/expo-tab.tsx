@@ -12,6 +12,8 @@ import { EXPO_ENTITY_TYPE_ID, DealGroupKey, LeadGroupKey } from "@/lib/config";
 import { getPlacementEntityId, getPlacementInfo, isInsideBitrix, openAppInNewTab, openBitrixPath } from "@/lib/bitrix";
 import { formatDate, formatDateRange } from "@/lib/format";
 import { ExpoFieldDiscovery, getExpoFieldDiscovery } from "@/lib/expo-fields";
+import { ACCREDITATION_GROUPS, AccreditationGroupKey } from "@/lib/expo-accreditation-fields";
+import type { ExpoItem } from "@/lib/expo-data";
 
 export default function ExpoTabPage() {
   const placement = isInsideBitrix() ? getPlacementInfo() : {};
@@ -102,6 +104,7 @@ export default function ExpoTabPage() {
               </div>
             </CardContent>
           </Card>
+          <AccreditationCard expo={foundAgg.expo} />
           <Card>
             <CardHeader><CardTitle className="text-base">Лиды</CardTitle></CardHeader>
             <CardContent>
@@ -121,6 +124,57 @@ export default function ExpoTabPage() {
       )}
     </Shell>
   );
+}
+
+function AccreditationCard({ expo }: { expo: ExpoItem }) {
+  const values = expo.accreditation ?? {};
+  const hasAny = ACCREDITATION_GROUPS.some((group) =>
+    Object.values(values[group.key] ?? {}).some(Boolean),
+  );
+  return (
+    <Card>
+      <CardHeader><CardTitle className="text-base">Сроки аккредитации</CardTitle></CardHeader>
+      <CardContent>
+        {!hasAny ? (
+          <div className="text-sm text-muted-foreground">Сроки пока не заполнены.</div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[390px] text-sm">
+              <thead className="text-left text-xs text-muted-foreground">
+                <tr className="border-b">
+                  <th className="pb-2 pr-3 font-medium">Тип</th>
+                  <th className="pb-2 px-2 font-medium"><span className="rounded bg-emerald-100 px-1.5 py-0.5 text-emerald-900">0%</span></th>
+                  <th className="pb-2 px-2 font-medium"><span className="rounded bg-amber-100 px-1.5 py-0.5 text-amber-900">+50%</span></th>
+                  <th className="pb-2 pl-2 font-medium"><span className="rounded bg-red-100 px-1.5 py-0.5 text-red-900">+100%</span></th>
+                </tr>
+              </thead>
+              <tbody>
+                {ACCREDITATION_GROUPS.map((group) => {
+                  const deadline = values[group.key];
+                  if (!deadline || !Object.values(deadline).some(Boolean)) return null;
+                  return (
+                    <tr key={group.key} className="border-b last:border-0">
+                      <td className="py-2 pr-3 font-medium"><span className="mr-1.5 inline-flex w-4 justify-center text-muted-foreground">{accreditationSymbol(group.key)}</span>{group.label}</td>
+                      <td className="px-2 py-2">{formatDate(deadline.base) || "—"}</td>
+                      <td className="px-2 py-2">{formatDate(deadline.fifty) || "—"}</td>
+                      <td className="pl-2 py-2">{formatDate(deadline.hundred) || "—"}</td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function accreditationSymbol(group: AccreditationGroupKey) {
+  if (group === "singleStorey") return "1";
+  if (group === "doubleStorey") return "2";
+  if (group === "outdoor") return "☀";
+  return "⌄⌄⌄⌄";
 }
 
 function ExpoFieldsDetectedSummary({ discovery }: { discovery: ExpoFieldDiscovery | undefined }) {

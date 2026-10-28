@@ -23,6 +23,7 @@ import {
   fetchDealsForStageProbe,
   fetchExpoList,
   fetchExposByMonth,
+  fetchExposWithAccreditationDeadlinesByMonth,
   fetchDealStages,
   fetchDealStagesDetailed,
   fetchMonthlyDealsByRecentScan,
@@ -222,6 +223,24 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     });
   }, [activeExpos, responsible, search, period]);
 
+  // Future exhibitions are fetched only after the accreditation switch is
+  // enabled. They are added when one of their deadlines falls in the open
+  // month, even if the exhibition itself takes place later.
+  const accreditationExposQuery = useQuery<ExpoItem[]>({
+    queryKey: ["expo-accreditation-deadlines-month", activeMonthKey],
+    queryFn: () => fetchExposWithAccreditationDeadlinesByMonth(activeMonth),
+    enabled: isBitrix && view === "gantt" && showAccreditation,
+    staleTime: 5 * 60_000,
+    refetchOnWindowFocus: false,
+    retry: false,
+  });
+  const ganttCandidates = useMemo(() => {
+    if (!showAccreditation) return filtered;
+    const byId = new Map(filtered.map((expo) => [expo.id, expo]));
+    for (const expo of accreditationExposQuery.data ?? []) byId.set(expo.id, expo);
+    return Array.from(byId.values());
+  }, [accreditationExposQuery.data, filtered, showAccreditation]);
+
   const stagesListQuery = useQuery<DealStagesResult>({
     queryKey: ["deal-stages-detailed"],
     queryFn: fetchDealStagesDetailed,
@@ -282,8 +301,8 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
   // when the user clears it, the query is disabled and the calendar shows
   // the bare phase grid.
   const buildScheduleExpoIds = useMemo(
-    () => exposOverlappingMonth(filtered, activeMonth).map((e) => Number(e.id)),
-    [filtered, activeMonth],
+    () => ganttCandidates.map((e) => Number(e.id)),
+    [ganttCandidates],
   );
   const buildScheduleKey = useMemo(
     () => buildScheduleExpoIds.slice().sort((a, b) => a - b),
@@ -358,13 +377,13 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     [buildScheduleQuery.data, selectedManagerIds],
   );
   const visibleExpos = useMemo(() => {
-    if (!onlyWithDeals) return filtered;
+    if (!onlyWithDeals) return ganttCandidates;
     const byExpoId = filteredBuildSchedule?.byExpoId;
     if (!byExpoId) return [];
-    return filtered.filter(
+    return ganttCandidates.filter(
       (expo) => (byExpoId.get(Number(expo.id)) ?? []).length > 0,
     );
-  }, [filtered, filteredBuildSchedule?.byExpoId, onlyWithDeals]);
+  }, [ganttCandidates, filteredBuildSchedule?.byExpoId, onlyWithDeals]);
 
   const counterExpoIds = useMemo(
     () => exposOverlappingMonth(visibleExpos, activeMonth).map((expo) => expo.id),
@@ -474,6 +493,7 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               queryClient.invalidateQueries({ queryKey: ["expo-list-month"] });
               queryClient.invalidateQueries({ queryKey: ["build-schedule-deals"] });
               queryClient.invalidateQueries({ queryKey: ["build-schedule-deals-month"] });
+              queryClient.invalidateQueries({ queryKey: ["expo-accreditation-deadlines-month"] });
             }}
             data-testid="button-refresh"
           >
@@ -627,11 +647,6 @@ function GanttView({
   stageSorts?: Map<string, number>;
   showAccreditation?: boolean;
 }) {
-  const overlapping = useMemo(
-    () => exposOverlappingMonth(expos, activeMonth),
-    [expos, activeMonth],
-  );
-
   const effectiveEmpty =
     emptyMessage ??
     (expos.length === 0
@@ -675,7 +690,7 @@ function GanttView({
         </div>
       ) : null}
       <GanttTimeline
-        expos={overlapping}
+        expos={expos}
         onSelect={(expo) => navigateToEvent(expo.id)}
         renderRight={(expo) => (
           <ExpoCountsMini expoId={Number(expo.id)} state={counts} />

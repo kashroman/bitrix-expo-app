@@ -32,6 +32,12 @@ import {
   getAccreditationFieldMap,
   getAccreditationFieldMapSync,
 } from "./expo-accreditation-fields";
+
+export type AccreditationDeadlines = {
+  base?: string;
+  fifty?: string;
+  hundred?: string;
+};
 import { fetchLinkedEntities, LinkFieldChoice } from "./expo-link";
 
 export type ExpoItem = {
@@ -50,16 +56,10 @@ export type ExpoItem = {
   dismantleStart?: string;
   dismantleEnd?: string;
   accreditation?: {
-    standardDeadline?: string;
-    surchargeStart?: string;
-    surchargeRate?: string;
-    secondSurchargeStart?: string;
-    secondSurchargeRate?: string;
-    singleStoreyDeadline?: string;
-    doubleStoreyDeadline?: string;
-    suspensionDeadline?: string;
-    sourceUrl?: string;
-    note?: string;
+    singleStorey?: AccreditationDeadlines;
+    doubleStorey?: AccreditationDeadlines;
+    outdoor?: AccreditationDeadlines;
+    suspension?: AccreditationDeadlines;
   };
   raw: CrmItem;
 };
@@ -254,16 +254,26 @@ export function normalizeExpo(item: CrmItem): ExpoItem {
   const responsible = pick(item, "assignedById", "ASSIGNED_BY_ID");
   const accreditationFields = getAccreditationFieldMapSync();
   const accreditation = {
-    standardDeadline: normalizeDateValue(pick(item, accreditationFields.standardDeadline), false),
-    surchargeStart: normalizeDateValue(pick(item, accreditationFields.surchargeStart), false),
-    surchargeRate: pick(item, accreditationFields.surchargeRate) as string | undefined,
-    secondSurchargeStart: normalizeDateValue(pick(item, accreditationFields.secondSurchargeStart), false),
-    secondSurchargeRate: pick(item, accreditationFields.secondSurchargeRate) as string | undefined,
-    singleStoreyDeadline: normalizeDateValue(pick(item, accreditationFields.singleStoreyDeadline), false),
-    doubleStoreyDeadline: normalizeDateValue(pick(item, accreditationFields.doubleStoreyDeadline), false),
-    suspensionDeadline: normalizeDateValue(pick(item, accreditationFields.suspensionDeadline), false),
-    sourceUrl: pick(item, accreditationFields.sourceUrl) as string | undefined,
-    note: pick(item, accreditationFields.note) as string | undefined,
+    singleStorey: {
+      base: normalizeDateValue(pick(item, accreditationFields.singleStoreyBase), false),
+      fifty: normalizeDateValue(pick(item, accreditationFields.singleStorey50), false),
+      hundred: normalizeDateValue(pick(item, accreditationFields.singleStorey100), false),
+    },
+    doubleStorey: {
+      base: normalizeDateValue(pick(item, accreditationFields.doubleStoreyBase), false),
+      fifty: normalizeDateValue(pick(item, accreditationFields.doubleStorey50), false),
+      hundred: normalizeDateValue(pick(item, accreditationFields.doubleStorey100), false),
+    },
+    outdoor: {
+      base: normalizeDateValue(pick(item, accreditationFields.outdoorBase), false),
+      fifty: normalizeDateValue(pick(item, accreditationFields.outdoor50), false),
+      hundred: normalizeDateValue(pick(item, accreditationFields.outdoor100), false),
+    },
+    suspension: {
+      base: normalizeDateValue(pick(item, accreditationFields.suspensionBase), false),
+      fifty: normalizeDateValue(pick(item, accreditationFields.suspension50), false),
+      hundred: normalizeDateValue(pick(item, accreditationFields.suspension100), false),
+    },
   };
 
   return {
@@ -813,6 +823,62 @@ export async function fetchExposByMonth(
       timedOut: Boolean(eventRes.timedOut || fullRes?.timedOut || startOnly.timedOut),
     },
   };
+}
+
+// Loads only exhibitions with at least one accreditation deadline in the
+// selected month. This intentionally runs on demand (when the checkbox is
+// enabled): ordinary calendar loading remains just as fast as before.
+export function expoHasAccreditationDeadlineInMonth(expo: ExpoItem, activeMonth: Date): boolean {
+  const start = new Date(activeMonth.getFullYear(), activeMonth.getMonth(), 1).getTime();
+  const end = new Date(activeMonth.getFullYear(), activeMonth.getMonth() + 1, 0, 23, 59, 59, 999).getTime();
+  return Object.values(expo.accreditation ?? {}).some((group) =>
+    Object.values(group ?? {}).some((raw) => {
+      if (!raw) return false;
+      const date = new Date(raw).getTime();
+      return Number.isFinite(date) && date >= start && date <= end;
+    }),
+  );
+}
+
+export async function fetchExposWithAccreditationDeadlinesByMonth(
+  activeMonth: Date,
+): Promise<ExpoItem[]> {
+  const { monthStartIso, monthEndIso } = monthBoundsIso(activeMonth);
+  try {
+    await getExpoFieldDiscovery();
+    await getAccreditationFieldMap();
+  } catch {
+    // The list remains usable with whatever field discovery already has.
+  }
+  const codes = accreditationSelectCodes();
+  if (codes.length === 0) return [];
+  const select = buildMonthExpoSelect();
+  const responses = await Promise.allSettled(
+    codes.map((code) =>
+      listAllBxDetailed<CrmItem>(
+        "crm.item.list",
+        {
+          entityTypeId: EXPO_ENTITY_TYPE_ID,
+          filter: { [`>=${code}`]: monthStartIso, [`<=${code}`]: monthEndIso },
+          select,
+          order: { id: "DESC" },
+          start: 0,
+        },
+        { timeoutMs: MONTH_EXPO_REQUEST_TIMEOUT_MS, maxPages: 3, deadlineMs: MONTH_EXPO_REQUEST_TIMEOUT_MS * 2 },
+      ),
+    ),
+  );
+  const byId = new Map<number, ExpoItem>();
+  for (const response of responses) {
+    if (response.status !== "fulfilled") continue;
+    for (const row of response.value.rows) {
+      const expo = normalizeExpo(row);
+      if (expo.id > 0 && expoHasAccreditationDeadlineInMonth(expo, activeMonth)) {
+        byId.set(expo.id, expo);
+      }
+    }
+  }
+  return Array.from(byId.values()).sort(compareMergedExpos);
 }
 
 // --- Year-scoped exhibition loader -----------------------------------------
