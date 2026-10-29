@@ -168,6 +168,24 @@ function levelMeta(level: AccreditationLevel) {
   return ACCREDITATION_LEVELS.find((item) => item.key === level)!;
 }
 
+function accreditationBarClass(level: AccreditationLevel): string {
+  return level === "base"
+    ? "bg-emerald-300"
+    : level === "fifty"
+      ? "bg-amber-300"
+      : "bg-red-300";
+}
+
+function accreditationTextClass(level: AccreditationLevel): string {
+  return level === "base"
+    ? "text-emerald-800"
+    : level === "fifty"
+      ? "text-amber-800"
+      : "text-red-800";
+}
+
+const ACCREDITATION_CONTOUR = "-1px 0 #fff, 0 1px #fff, 1px 0 #fff, 0 -1px #fff";
+
 export function accreditationDeadlineGroups(expo: ExpoItem): AccreditationDeadlineGroup[] {
   const data = expo.accreditation;
   if (!data) return [];
@@ -544,16 +562,6 @@ function ExpoRow({
           </div>
         ) : null}
         {renderRight ? <div className="mt-0.5 truncate">{renderRight(expo)}</div> : null}
-        {accreditationGroups.length > 0 ? (
-          <div className="mt-1 space-y-0.5 text-[11px] leading-tight text-muted-foreground">
-            {accreditationGroups.map((group) => (
-              <div key={group.key} className="flex items-center gap-1 truncate" title={group.label}>
-                <AccreditationIcon group={group.key} />
-                <span className="truncate">{group.label}</span>
-              </div>
-            ))}
-          </div>
-        ) : null}
       </button>
       <div
         className="relative col-span-full -col-start-2 row-span-1"
@@ -620,7 +628,7 @@ function ExpoRow({
             const left = ((clip.startDay - 1) / totalDays) * 100;
             const width = ((clip.endDay - clip.startDay + 1) / totalDays) * 100;
             const meta = levelMeta(segment.level);
-            const top = accreditationTop + 3 + groupIndex * 22;
+            const top = accreditationTop + 10 + groupIndex * 22;
             const labelAtEnd = segment.level === "base";
             const tooltip = segment.level === "base"
               ? `${group.label} · 0% до ${formatShort(segment.end)}`
@@ -628,18 +636,23 @@ function ExpoRow({
             return (
               <div
                 key={`accreditation-${segment.key}`}
-                className={`absolute z-[5] flex h-[17px] min-w-[2px] items-center border-y ${meta.className}`}
+                className={`absolute z-[5] flex h-[5px] min-w-[2px] items-center ${accreditationBarClass(segment.level)}`}
                 style={{ left: `${left}%`, width: `${width}%`, top: `${top}px` }}
                 title={tooltip}
                 data-testid={`gantt-accreditation-${expo.id}-${segment.key}`}
               >
                 {segment.level === "base" && clip.startDay === 1 ? (
-                  <span className="ml-0.5 shrink-0 rounded bg-background/70 p-px" aria-label={group.label}>
+                  <span
+                    className="absolute left-1 top-1/2 -translate-y-1/2 text-foreground"
+                    style={{ filter: "drop-shadow(-1px 0 white) drop-shadow(1px 0 white) drop-shadow(0 1px white) drop-shadow(0 -1px white)" }}
+                    aria-label={group.label}
+                  >
                     <AccreditationIcon group={group.key} />
                   </span>
                 ) : null}
                 <span
-                  className={`absolute rounded border px-0.5 py-px text-[8px] font-semibold leading-none shadow-sm ${meta.className} ${labelAtEnd ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
+                  className={`absolute px-0.5 text-[8px] font-semibold leading-none ${accreditationTextClass(segment.level)} ${labelAtEnd ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
+                  style={{ textShadow: ACCREDITATION_CONTOUR }}
                 >
                   {meta.label}
                 </span>
@@ -710,7 +723,7 @@ function ExpoRow({
 function AccreditationIcon({ group }: { group: AccreditationGroupKey }) {
   if (group === "singleStorey" || group === "doubleStorey") {
     return (
-      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-sm border border-muted-foreground/45 text-[10px] font-semibold text-foreground">
+      <span className="inline-flex h-4 w-4 shrink-0 items-center justify-center text-[10px] font-semibold text-foreground">
         {group === "singleStorey" ? "1" : "2"}
       </span>
     );
@@ -725,8 +738,8 @@ function AccreditationIcon({ group }: { group: AccreditationGroupKey }) {
     );
   }
   return (
-    <svg className="h-4 w-4 shrink-0 text-slate-600" viewBox="0 0 20 20" aria-hidden="true">
-      {[3, 7, 11, 15].map((x) => <g key={x}><path d={`M${x} 3v7`} stroke="currentColor" strokeWidth="1.2" /><circle cx={x} cy="3" r="1.4" fill="none" stroke="currentColor" strokeWidth="1.1" /><path d={`M${x - 1.2} 10h2.4`} stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" /></g>)}
+    <svg className="h-5 w-6 shrink-0 text-slate-600" viewBox="0 0 26 22" aria-hidden="true">
+      <path d="M3 2h2m4 0h2m4 0h2m4 0h2M4 2v8m6-8v8m6-8v8m6-8v8M4 10l4 7h12l-4-7H4" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

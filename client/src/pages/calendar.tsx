@@ -126,7 +126,9 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     initialFilters.onlyWithDeals,
   );
   const [includeLost, setIncludeLost] = useState(initialFilters.includeLost);
-  const [showAccreditation, setShowAccreditation] = useState(false);
+  // Accreditation deadlines are part of the calendar by default, so users
+  // do not have to discover or enable a separate filter to see them.
+  const showAccreditation = true;
   const [stageDefaultsResolved, setStageDefaultsResolved] = useState(
     initialFilters.hasExplicitStages,
   );
@@ -470,14 +472,6 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
               data-testid="filter-include-lost"
             />
             Показывать проигранные
-          </label>
-          <label className="flex items-center gap-2 text-sm">
-            <Checkbox
-              checked={showAccreditation}
-              onCheckedChange={(checked) => setShowAccreditation(checked === true)}
-              data-testid="filter-show-accreditation"
-            />
-            Показать сроки аккредитации
           </label>
           <Button
             variant="ghost"
