@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   accreditationDeadlineGroups,
   accreditationDeadlines,
+  accreditationSegmentsForMonth,
   dealBarLabel,
   dealRowHeight,
   expoOverallRange,
@@ -172,5 +173,63 @@ describe("accreditation deadlines", () => {
       ],
     );
     assert.equal(accreditationDeadlines(expo).length, 3);
+  });
+
+  it("draws 0% from the left edge for the deadline month and its predecessor", () => {
+    const expo = {
+      id: 1,
+      title: "Expo #1",
+      accreditation: {
+        singleStorey: {
+          base: "2026-11-05",
+          fifty: "2026-11-12",
+          hundred: "2026-11-19",
+        },
+      },
+      raw: {},
+    } as ExpoItem;
+    const group = accreditationDeadlineGroups(expo)[0];
+
+    assert.deepEqual(
+      accreditationSegmentsForMonth(group, 2026, 9).map((segment) => [
+        segment.level,
+        segment.start.getDate(),
+        segment.end.getDate(),
+      ]),
+      [["base", 1, 5]],
+    );
+    assert.deepEqual(
+      accreditationSegmentsForMonth(group, 2026, 8),
+      [],
+    );
+  });
+
+  it("starts each surcharge on the day after the previous deadline", () => {
+    const expo = {
+      id: 1,
+      title: "Expo #1",
+      accreditation: {
+        singleStorey: {
+          base: "2026-10-21",
+          fifty: "2026-11-12",
+          hundred: "2026-11-20",
+        },
+      },
+      raw: {},
+    } as ExpoItem;
+    const group = accreditationDeadlineGroups(expo)[0];
+    const dateKey = (date: Date) =>
+      `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+    assert.deepEqual(
+      accreditationSegmentsForMonth(group, 2026, 10).map((segment) => ({
+        level: segment.level,
+        start: dateKey(segment.start),
+        end: dateKey(segment.end),
+      })),
+      [
+        { level: "fifty", start: "2026-10-22", end: "2026-11-12" },
+        { level: "hundred", start: "2026-11-13", end: "2026-11-20" },
+      ],
+    );
   });
 });

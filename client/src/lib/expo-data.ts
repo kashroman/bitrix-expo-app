@@ -828,6 +828,12 @@ export async function fetchExposByMonth(
 // Loads only exhibitions with at least one accreditation deadline in the
 // selected month. This intentionally runs on demand (when the checkbox is
 // enabled): ordinary calendar loading remains just as fast as before.
+export function expoHasAccreditationData(expo: ExpoItem): boolean {
+  return Object.values(expo.accreditation ?? {}).some((group) =>
+    Object.values(group ?? {}).some(Boolean),
+  );
+}
+
 export function expoHasAccreditationDeadlineInMonth(expo: ExpoItem, activeMonth: Date): boolean {
   const start = new Date(activeMonth.getFullYear(), activeMonth.getMonth(), 1).getTime();
   const end = new Date(activeMonth.getFullYear(), activeMonth.getMonth() + 1, 0, 23, 59, 59, 999).getTime();

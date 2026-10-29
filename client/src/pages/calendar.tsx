@@ -24,6 +24,7 @@ import {
   fetchExpoList,
   fetchExposByMonth,
   fetchExposWithAccreditationDeadlinesByMonth,
+  expoHasAccreditationData,
   fetchDealStages,
   fetchDealStagesDetailed,
   fetchMonthlyDealsByRecentScan,
@@ -381,9 +382,11 @@ export default function CalendarPage({ embedded = false }: { embedded?: boolean 
     const byExpoId = filteredBuildSchedule?.byExpoId;
     if (!byExpoId) return [];
     return ganttCandidates.filter(
-      (expo) => (byExpoId.get(Number(expo.id)) ?? []).length > 0,
+      (expo) =>
+        (byExpoId.get(Number(expo.id)) ?? []).length > 0 ||
+        (showAccreditation && expoHasAccreditationData(expo)),
     );
-  }, [ganttCandidates, filteredBuildSchedule?.byExpoId, onlyWithDeals]);
+  }, [ganttCandidates, filteredBuildSchedule?.byExpoId, onlyWithDeals, showAccreditation]);
 
   const counterExpoIds = useMemo(
     () => exposOverlappingMonth(visibleExpos, activeMonth).map((expo) => expo.id),

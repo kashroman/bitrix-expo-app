@@ -153,6 +153,11 @@ export type AccreditationDeadlineGroup = {
   deadlines: AccreditationDeadline[];
 };
 
+export type AccreditationSegment = AccreditationDeadline & {
+  start: Date;
+  end: Date;
+};
+
 const ACCREDITATION_LEVELS: Array<{ key: AccreditationLevel; label: string; className: string }> = [
   { key: "base", label: "0%", className: "bg-emerald-200 border-emerald-400 text-emerald-950" },
   { key: "fifty", label: "+50%", className: "bg-amber-200 border-amber-400 text-amber-950" },
@@ -186,6 +191,50 @@ export function accreditationDeadlineGroups(expo: ExpoItem): AccreditationDeadli
 // Kept as a compact flat view for code which only needs all deadline points.
 export function accreditationDeadlines(expo: ExpoItem): AccreditationDeadline[] {
   return accreditationDeadlineGroups(expo).flatMap((group) => group.deadlines);
+}
+
+function addDays(date: Date, days: number): Date {
+  const result = stripTime(date);
+  result.setDate(result.getDate() + days);
+  return result;
+}
+
+function isAccreditationBaseVisibleInMonth(baseDeadline: Date, year: number, month: number): boolean {
+  const deadlineMonth = new Date(baseDeadline.getFullYear(), baseDeadline.getMonth(), 1);
+  const previousMonth = new Date(baseDeadline.getFullYear(), baseDeadline.getMonth() - 1, 1);
+  return (
+    (deadlineMonth.getFullYear() === year && deadlineMonth.getMonth() === month) ||
+    (previousMonth.getFullYear() === year && previousMonth.getMonth() === month)
+  );
+}
+
+// Every configured date is the last day of the corresponding coefficient.
+// The next coefficient starts on the following day.  A 0% period has no
+// stored start date, so it starts at the left edge of the visible month and
+// is deliberately limited to the deadline month and the preceding month.
+export function accreditationSegmentsForMonth(
+  group: AccreditationDeadlineGroup,
+  year: number,
+  month: number,
+): AccreditationSegment[] {
+  const result: AccreditationSegment[] = [];
+  const visibleStart = monthStartOf(year, month);
+  const visibleEnd = monthEndOf(year, month);
+  let previousEnd: Date | undefined;
+  for (const deadline of group.deadlines) {
+    if (deadline.level === "base" && !isAccreditationBaseVisibleInMonth(deadline.date, year, month)) {
+      previousEnd = deadline.date;
+      continue;
+    }
+    const start = previousEnd
+      ? addDays(previousEnd, 1)
+      : monthStartOf(year, month);
+    if (start <= deadline.date && start <= visibleEnd && deadline.date >= visibleStart) {
+      result.push({ ...deadline, start, end: deadline.date });
+    }
+    previousEnd = deadline.date;
+  }
+  return result;
 }
 
 function stripTime(d: Date): Date {
@@ -407,6 +456,7 @@ export function GanttTimeline({
               year={year}
               month={month}
               totalDays={totalDays}
+              todayIndex={todayIndex}
               phases={phases}
               rowHeight={rowHeight}
               deals={deals}
@@ -436,6 +486,7 @@ function ExpoRow({
   year,
   month,
   totalDays,
+  todayIndex,
   phases,
   rowHeight,
   deals,
@@ -451,6 +502,7 @@ function ExpoRow({
   year: number;
   month: number;
   totalDays: number;
+  todayIndex: number;
   phases: Phase[];
   rowHeight: number;
   deals?: BuildScheduleDeal[];
@@ -517,6 +569,16 @@ function ExpoRow({
           }}
           aria-hidden
         >
+          {todayIndex > 0 ? (
+            <div
+              className="pointer-events-none absolute inset-y-0 z-[1] bg-primary/10"
+              style={{
+                left: `${((todayIndex - 1) / totalDays) * 100}%`,
+                width: `${(1 / totalDays) * 100}%`,
+              }}
+              aria-hidden
+            />
+          ) : null}
           {Array.from({ length: totalDays }, (_, i) => {
             const dayNum = i + 1;
             const date = new Date(year, month, dayNum);
@@ -552,21 +614,35 @@ function ExpoRow({
         })}
 
         {accreditationGroups.flatMap((group, groupIndex) =>
-          group.deadlines.map((deadline) => {
-            const clip = clipToMonth({ start: deadline.date, end: deadline.date }, year, month);
+          accreditationSegmentsForMonth(group, year, month).map((segment) => {
+            const clip = clipToMonth({ start: segment.start, end: segment.end }, year, month);
             if (!clip) return null;
             const left = ((clip.startDay - 1) / totalDays) * 100;
-            const meta = levelMeta(deadline.level);
-            const top = accreditationTop + 4 + groupIndex * 22;
+            const width = ((clip.endDay - clip.startDay + 1) / totalDays) * 100;
+            const meta = levelMeta(segment.level);
+            const top = accreditationTop + 3 + groupIndex * 22;
+            const labelAtEnd = segment.level === "base";
+            const tooltip = segment.level === "base"
+              ? `${group.label} · 0% до ${formatShort(segment.end)}`
+              : `${group.label} · ${meta.label} с ${formatShort(segment.start)} по ${formatShort(segment.end)}`;
             return (
               <div
-                key={`accreditation-${deadline.key}`}
-                className={`pointer-events-none absolute z-[5] flex h-[16px] min-w-[16px] -translate-x-1/2 items-center justify-center rounded border px-0.5 text-[8px] font-semibold shadow-sm ${meta.className}`}
-                style={{ left: `${left}%`, top: `${top}px` }}
-                title={`${group.label}: ${meta.label} — ${formatShort(deadline.date)}`}
-                data-testid={`gantt-accreditation-${expo.id}-${deadline.key}`}
+                key={`accreditation-${segment.key}`}
+                className={`absolute z-[5] flex h-[17px] min-w-[2px] items-center border-y ${meta.className}`}
+                style={{ left: `${left}%`, width: `${width}%`, top: `${top}px` }}
+                title={tooltip}
+                data-testid={`gantt-accreditation-${expo.id}-${segment.key}`}
               >
-                {meta.label}
+                {segment.level === "base" && clip.startDay === 1 ? (
+                  <span className="ml-0.5 shrink-0 rounded bg-background/70 p-px" aria-label={group.label}>
+                    <AccreditationIcon group={group.key} />
+                  </span>
+                ) : null}
+                <span
+                  className={`absolute rounded border px-0.5 py-px text-[8px] font-semibold leading-none shadow-sm ${meta.className} ${labelAtEnd ? "right-0 translate-x-1/2" : "left-0 -translate-x-1/2"}`}
+                >
+                  {meta.label}
+                </span>
               </div>
             );
           }),

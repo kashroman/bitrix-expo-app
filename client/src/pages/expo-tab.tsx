@@ -138,6 +138,8 @@ function AccreditationCard({ expo }: { expo: ExpoItem }) {
         {!hasAny ? (
           <div className="text-sm text-muted-foreground">Сроки пока не заполнены.</div>
         ) : (
+          <div className="space-y-2">
+            <p className="text-xs text-muted-foreground">Последний день действия каждого коэффициента.</p>
           <div className="overflow-x-auto">
             <table className="w-full min-w-[390px] text-sm">
               <thead className="text-left text-xs text-muted-foreground">
@@ -163,6 +165,7 @@ function AccreditationCard({ expo }: { expo: ExpoItem }) {
                 })}
               </tbody>
             </table>
+          </div>
           </div>
         )}
       </CardContent>
